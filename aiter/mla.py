@@ -330,6 +330,8 @@ def mla_decode_fwd(
     else:
         if num_kv_splits is None:
             num_kv_splits = get_cu_num()
+        head_padded = False
+        o_orig = None
         if (
             nhead == 16
             or (
@@ -446,6 +448,16 @@ def mla_decode_fwd(
 
             o = o.view(total_s, nhead, -1)
             io_transformed = True
+        elif nhead < 16 and (16 % nhead == 0):
+            # GLM-5.1 @ tp8 -> nhead=8; upstream asm MLA only covers nhead>=16.
+            # Zero-pad q to 16 heads, run the qh16 a8w8 kernel, copy real heads back.
+            pad = 16 - nhead
+            q = torch.cat([q, q.new_zeros(total_s, pad, q.shape[-1])], dim=1)
+            o_orig = o
+            o = torch.zeros(total_s, 16, v_head_dim, dtype=o.dtype, device=o.device)
+            nhead = 16
+            head_padded = True
+            io_transformed = True
         else:
             assert False, f"{nhead=} and {max_seqlen_q=} not supported"
 
@@ -536,7 +548,12 @@ def mla_decode_fwd(
         if return_logits:
             logits = logits.view(-1, 1, ori_nhead, v_head_dim)
 
-        if max_seqlen_q == 1 or qseqlen_folded:
+        if head_padded:
+            o_orig.copy_(o[:, :ori_nhead, :])
+            o = o_orig
+            if final_lse is not None:
+                final_lse = final_lse[:, :ori_nhead].contiguous()
+        elif max_seqlen_q == 1 or qseqlen_folded:
             q = q.view(ori_total_s, ori_nhead, -1)
             o = o.view(ori_total_s, ori_nhead, -1)
             if final_lse is not None:
