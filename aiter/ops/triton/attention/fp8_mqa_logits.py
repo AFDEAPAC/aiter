@@ -50,32 +50,32 @@ def fp8_mqa_logits(
     if seq_len <= 1024:
         matrix_instr_nonkdim = 16
 
-    _fp8_mqa_logits_kernel[(seq_len,)](
-        Q_ptr=Q,
-        KV_ptr=KV,
-        kv_scales_ptr=kv_scales,
-        weights_ptr=weights,
-        cu_start_ptr=cu_starts,
-        cu_end_ptr=cu_ends,
-        logits_ptr=logits,
-        seq_len=seq_len,
-        seq_len_kv=seq_len_kv,
-        NUM_HEADS=num_heads,
-        HEAD_SIZE=head_size,
-        stride_q_s=stride_q_s,
-        stride_q_h=stride_q_h,
-        stride_q_d=stride_q_d,
-        stride_kv_s=stride_kv_s,
-        stride_kv_d=stride_kv_d,
-        stride_w_s=stride_w_s,
-        stride_w_h=stride_w_h,
-        stride_logits_s=stride_logits_s,
-        stride_logits_k=stride_logits_k,
-        BLOCK_KV=BLOCK_KV,
-        num_warps=4,
-        num_stages=2,
-        waves_per_eu=2,
-        matrix_instr_nonkdim=matrix_instr_nonkdim,
+    _kw = dict(
+        Q_ptr=Q, KV_ptr=KV, kv_scales_ptr=kv_scales, weights_ptr=weights,
+        cu_start_ptr=cu_starts, cu_end_ptr=cu_ends, logits_ptr=logits,
+        seq_len=seq_len, seq_len_kv=seq_len_kv, NUM_HEADS=num_heads, HEAD_SIZE=head_size,
+        stride_q_s=stride_q_s, stride_q_h=stride_q_h, stride_q_d=stride_q_d,
+        stride_kv_s=stride_kv_s, stride_kv_d=stride_kv_d,
+        stride_w_s=stride_w_s, stride_w_h=stride_w_h,
+        stride_logits_s=stride_logits_s, stride_logits_k=stride_logits_k,
+        num_warps=4, waves_per_eu=2, matrix_instr_nonkdim=matrix_instr_nonkdim,
     )
+    # gfx942 (64KB LDS) fit: BLOCK_KV=128/num_stages=2 is tuned for gfx950 (96KB) and
+    # OOMs gfx942 LDS. Try progressively smaller tiles; gfx950 stops at the first (big) one.
+    from triton.runtime.errors import OutOfResources as _OOR
+    _last = None
+    for _bkv, _ns in ((BLOCK_KV, 2), (BLOCK_KV, 1), (64, 2), (64, 1), (32, 1)):
+        try:
+            _fp8_mqa_logits_kernel[(seq_len,)](BLOCK_KV=_bkv, num_stages=_ns, **_kw)
+            if not globals().get("_DSV4_MQA_LOGGED"):
+                globals()["_DSV4_MQA_LOGGED"] = True
+                print(f"[dsv4 mqa_logits] seq_len={seq_len} NH={num_heads} HD={head_size} "
+                      f"mnk={matrix_instr_nonkdim} -> BLOCK_KV={_bkv} num_stages={_ns}", flush=True)
+            break
+        except _OOR as e:
+            _last = e
+            continue
+    else:
+        raise _last
 
     return logits

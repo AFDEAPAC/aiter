@@ -54,6 +54,7 @@ from .mfma_preshuffle_pipeline import (
     load_b_pack_k32,
     load_b_raw_w4a16,
     unpack_b_w4a16,
+    unpack_b_w4a16_fp4,
     load_b_raw_w4a16_groupwise,
     extract_bf16_scale,
     tile_chunk_coord_i32,
@@ -107,6 +108,7 @@ def compile_moe_gemm1(
     use_cshuffle_epilog: bool | None = None,
     scale_is_bf16: bool = False,
     k_batch: int = 1,
+    swiglu_limit: float | None = None,
 ):
     """Compile stage1 kernel (`moe_gemm1`) and return the compiled executable.
 
@@ -129,12 +131,14 @@ def compile_moe_gemm1(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}  # legacy; kept until stage2/reduction are migrated
 
-    _valid_dtypes = ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16")
+    _valid_dtypes = ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "fp4_bf16")
     if in_dtype not in _valid_dtypes:
         raise ValueError(f"in_dtype must be one of {_valid_dtypes}, got {in_dtype!r}")
-    is_int4_bf16 = (
-        in_dtype == "int4_bf16"
-    )  # W4A16: bf16 activations, packed int4 weights
+    # W4A16: bf16 activations, packed 4-bit weights. fp4_bf16 reuses the entire int4_bf16
+    # groupwise structure (load/scale/bf16-MFMA/deferred dequant); only the unpack differs
+    # (E2M1->bf16 instead of int4->bf16), selected by is_fp4_bf16 at the dequant site.
+    is_fp4_bf16 = in_dtype == "fp4_bf16"
+    is_int4_bf16 = (in_dtype == "int4_bf16") or is_fp4_bf16
     is_f16 = in_dtype == "fp16"
     is_bf16 = is_int4_bf16 or in_dtype == "bf16"
     is_f16_or_bf16 = is_f16 or is_bf16
@@ -165,10 +169,15 @@ def compile_moe_gemm1(
 
     # w_is_int4: True for any variant where weights are packed int4.
     w_is_int4 = is_int4 or is_int4_bf16
+    # fp4: W4A8 = FP8 activation x FP4 (E2M1) weight, per-output-channel scale (gfx942).
+    # Reuses the fp8 MFMA + activation path (is_int8 stays False) and the int4
+    # packed-weight load (w_is_packed4), with E2M1->e4m3fnuz unpack in load_b_pack_k32.
+    is_fp4 = in_dtype == "fp4"
+    w_is_packed4 = w_is_int4 or is_fp4  # weights stored as packed 4-bit bytes (2/byte)
 
-    # Group-wise scale support for W4A16
+    # Group-wise scale support for W4A16 (int4) and W4A8 block-32 FP4.
     # NOTE: Only group_size=32 is supported due to int4 preshuffle layout constraints.
-    use_groupwise_scale = w_is_int4 and group_size > 0
+    use_groupwise_scale = (w_is_int4 or is_fp4) and group_size > 0
     if use_groupwise_scale and group_size != 32:
         raise ValueError(
             f"FlyDSL groupwise scale only supports group_size=32, got {group_size}. "
@@ -176,6 +185,9 @@ def compile_moe_gemm1(
             f"Please use Triton kernel for other group sizes."
         )
     is_int4_bf16_groupwise = is_int4_bf16 and use_groupwise_scale
+    # block-32 FP4 W4A8: per-group E8M0 scale folded into the e4m3fnuz exponent at
+    # unpack (arg_scale_w holds a precomputed i32 fold dword per (E,G,N)); fp8 MFMA.
+    is_fp4_groupwise = is_fp4 and use_groupwise_scale
     num_groups = model_dim // group_size if use_groupwise_scale else 1
     _scale_is_bf16 = scale_is_bf16 and use_groupwise_scale
     experts * (2 * inter_dim) * num_groups
@@ -251,7 +263,7 @@ def compile_moe_gemm1(
     # W is packed int4 for W4A8/W4A16/W4A_FP8: 2 values per byte.
     (
         (experts * (2 * inter_dim) * model_dim) // 2
-        if w_is_int4
+        if w_is_packed4
         else (experts * (2 * inter_dim) * model_dim)
     )
 
@@ -363,7 +375,7 @@ def compile_moe_gemm1(
             # For int4/int4_bf16, weights are stored as packed bytes (i8) and unpacked in-kernel.
             w_elem = (
                 T.i8
-                if w_is_int4
+                if w_is_packed4
                 else (
                     T.bf16
                     if is_bf16
@@ -405,8 +417,8 @@ def compile_moe_gemm1(
             # B preshuffle layout: match GEMM test helper exactly.
             c_n_total = arith.index(experts * (2 * inter_dim))
             # For packed int4 (W4A8/W4A16/W4A_FP8), kpack_bytes=8.
-            kpack_bytes = 8 if w_is_int4 else 16
-            w_elem_bytes = 1 if w_is_int4 else elem_bytes
+            kpack_bytes = 8 if w_is_packed4 else 16
+            w_elem_bytes = 1 if w_is_packed4 else elem_bytes
             b_layout = make_preshuffle_b_layout(
                 arith,
                 c_n=c_n_total,
@@ -757,6 +769,13 @@ def compile_moe_gemm1(
                         kpack_bytes=kpack_bytes,
                         elem_bytes=w_elem_bytes,
                         unpack_int4=is_int4,
+                        unpack_fp4=is_fp4,
+                        # block-32 FP4 W4A8: per-group E8M0 fold (arg_scale_w = i32 fold dword).
+                        fp4_scale_rsrc=(sw_rsrc if is_fp4_groupwise else None),
+                        fp4_expert_offset=expert_off_idx,
+                        fp4_num_groups=num_groups,
+                        fp4_group_size=group_size,
+                        fp4_n_per_expert=2 * inter_dim,
                     )
 
                 def load_b_tile(base_k, blk_list, intra_list):
@@ -1101,6 +1120,20 @@ def compile_moe_gemm1(
                                             tmp_u,
                                             sc_g,
                                             sc_u,
+                                        )
+                                    elif const_expr(is_fp4_bf16):
+                                        # W4A16 FP4: E2M1->bf16 dequant x E8M0 (2^delta) scale.
+                                        bg0, bg1 = unpack_b_w4a16_fp4(
+                                            packed_g, sc_g, arith, vector
+                                        )
+                                        gate_list[acc_idx] = mfma_k64(
+                                            gate_list[acc_idx], a0, a1, bg0, bg1
+                                        )
+                                        bu0, bu1 = unpack_b_w4a16_fp4(
+                                            packed_u, sc_u, arith, vector
+                                        )
+                                        up_list[acc_idx] = mfma_k64(
+                                            up_list[acc_idx], a0, a1, bu0, bu1
                                         )
                                     else:
                                         bg0, bg1 = unpack_b_w4a16(
@@ -1798,6 +1831,13 @@ def compile_moe_gemm1(
                             vg = vg * sx * sw_gate
                             vu = vu * sx * sw_up
 
+                            if const_expr(swiglu_limit is not None):
+                                # DeepSeek-V4 SiluAndMulWithClamp: clamp gate to
+                                # max=limit, up to [-limit, limit] before silu*mul.
+                                _sw_lim = arith.constant(float(swiglu_limit), type=T.f32)
+                                _sw_neg = arith.constant(-float(swiglu_limit), type=T.f32)
+                                vg = arith.minimumf(vg, _sw_lim)
+                                vu = arith.maximumf(arith.minimumf(vu, _sw_lim), _sw_neg)
                             y = silu(vg) * vu
                             if const_expr(doweight_stage1):
                                 y = y * tw
@@ -1933,6 +1973,13 @@ def compile_moe_gemm1(
                             vg = vg * sx * sw_gate
                             vu = vu * sx * sw_up
 
+                            if const_expr(swiglu_limit is not None):
+                                # DeepSeek-V4 SiluAndMulWithClamp: clamp gate to
+                                # max=limit, up to [-limit, limit] before silu*mul.
+                                _sw_lim = arith.constant(float(swiglu_limit), type=T.f32)
+                                _sw_neg = arith.constant(-float(swiglu_limit), type=T.f32)
+                                vg = arith.minimumf(vg, _sw_lim)
+                                vu = arith.maximumf(arith.minimumf(vu, _sw_lim), _sw_neg)
                             y = silu(vg) * vu
                             if const_expr(doweight_stage1):
                                 y = y * tw
@@ -2041,12 +2088,14 @@ def compile_moe_gemm2(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    _valid_dtypes = ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16")
+    _valid_dtypes = ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "fp4_bf16")
     if in_dtype not in _valid_dtypes:
         raise ValueError(f"in_dtype must be one of {_valid_dtypes}, got {in_dtype!r}")
-    is_int4_bf16 = (
-        in_dtype == "int4_bf16"
-    )  # W4A16: bf16 activations, packed int4 weights
+    # W4A16: bf16 activations, packed 4-bit weights. fp4_bf16 reuses the entire int4_bf16
+    # groupwise structure (load/scale/bf16-MFMA/deferred dequant); only the unpack differs
+    # (E2M1->bf16 instead of int4->bf16), selected by is_fp4_bf16 at the dequant site.
+    is_fp4_bf16 = in_dtype == "fp4_bf16"
+    is_int4_bf16 = (in_dtype == "int4_bf16") or is_fp4_bf16
     is_f16 = in_dtype == "fp16"
     is_bf16 = is_int4_bf16 or in_dtype == "bf16"
     is_f16_or_bf16 = is_f16 or is_bf16
@@ -2066,11 +2115,16 @@ def compile_moe_gemm2(
     is_int4 = in_dtype == "int4"
     # w_is_int4: True for any variant where weights are packed int4.
     w_is_int4 = is_int4 or is_int4_bf16
+    # fp4: W4A8 = FP8 activation x FP4 (E2M1) weight, per-output-channel scale (gfx942).
+    # Reuses the fp8 MFMA + activation path (is_int8 stays False) and the int4
+    # packed-weight load (w_is_packed4), with E2M1->e4m3fnuz unpack in load_b_pack_k32.
+    is_fp4 = in_dtype == "fp4"
+    w_is_packed4 = w_is_int4 or is_fp4  # weights stored as packed 4-bit bytes (2/byte)
     # INT4 here means W4A8: A2 is int8, W is packed int4 and unpacked to int8 in-kernel.
     is_int8 = (in_dtype in ("int8", "int8smooth")) or is_int4
 
-    # Group-wise scale support for W4A16
-    use_groupwise_scale = w_is_int4 and group_size > 0
+    # Group-wise scale support for W4A16 (int4) and W4A8 block-32 FP4.
+    use_groupwise_scale = (w_is_int4 or is_fp4) and group_size > 0
     if use_groupwise_scale and group_size != 32:
         raise ValueError(
             f"FlyDSL groupwise scale only supports group_size=32, got {group_size}. "
@@ -2078,6 +2132,8 @@ def compile_moe_gemm2(
             f"Please use Triton kernel for other group sizes."
         )
     is_int4_bf16_groupwise = is_int4_bf16 and use_groupwise_scale
+    # block-32 FP4 W4A8: per-group E8M0 folded into the e4m3fnuz exponent at unpack.
+    is_fp4_groupwise = is_fp4 and use_groupwise_scale
     # Stage2 K dimension is inter_dim (weight shape: [E, model_dim, inter_dim])
     num_groups = inter_dim // group_size if use_groupwise_scale else 1
     _scale_is_bf16 = scale_is_bf16 and use_groupwise_scale
@@ -2277,7 +2333,7 @@ def compile_moe_gemm2(
             # For int4/int4_bf16, weights are stored as packed bytes (i8) and unpacked in-kernel.
             w_elem = (
                 T.i8
-                if w_is_int4
+                if w_is_packed4
                 else (
                     T.bf16
                     if is_bf16
@@ -2308,8 +2364,8 @@ def compile_moe_gemm2(
             # B preshuffle layout: [experts*model_dim, inter_dim]
             c_n_total = arith.index(experts * model_dim)
             # For packed int4 (W4A8/W4A16/W4A_FP8), kpack_bytes=8.
-            kpack_bytes = 8 if w_is_int4 else 16
-            w_elem_bytes = 1 if w_is_int4 else elem_bytes
+            kpack_bytes = 8 if w_is_packed4 else 16
+            w_elem_bytes = 1 if w_is_packed4 else elem_bytes
             b_layout = make_preshuffle_b_layout(
                 arith,
                 c_n=c_n_total,
@@ -2618,6 +2674,13 @@ def compile_moe_gemm2(
                         kpack_bytes=kpack_bytes,
                         elem_bytes=w_elem_bytes,
                         unpack_int4=is_int4,
+                        unpack_fp4=is_fp4,
+                        # block-32 FP4 W4A8: per-group E8M0 fold (arg_scale_w = i32 fold dword [E,G,N=model_dim]).
+                        fp4_scale_rsrc=(sw_rsrc if is_fp4_groupwise else None),
+                        fp4_expert_offset=expert_off_idx,
+                        fp4_num_groups=num_groups,
+                        fp4_group_size=group_size,
+                        fp4_n_per_expert=model_dim,
                     )
 
                 def load_b_tile(base_k):
@@ -2941,6 +3004,14 @@ def compile_moe_gemm2(
                                                 acc_list[p_idx], p_tmp, p_sc
                                             )
                                         _pending_acc = (acc_idx, tmp, sc)
+                                    elif const_expr(is_fp4_bf16):
+                                        # W4A16 FP4: E2M1->bf16 dequant x E8M0 (2^delta) scale.
+                                        b0, b1 = unpack_b_w4a16_fp4(
+                                            packed, sc, arith, vector
+                                        )
+                                        acc_list[acc_idx] = mfma_k64(
+                                            acc_list[acc_idx], a0, a1, b0, b1
+                                        )
                                     else:
                                         b0, b1 = unpack_b_w4a16(
                                             packed,

@@ -251,6 +251,76 @@ def _unpack_int4_to_int8_pair(packed32):
     return even, odd
 
 
+def _map4_e2m1_to_e4m3fnuz(nibs, exp_add_i32=None):
+    """4 E2M1 (FP4) nibbles (one in the low 4 bits of each byte of `nibs`) ->
+    4 e4m3fnuz (FP8) bytes, packed into one i32.
+
+    Branchless SIMD over the 4 bytes, same multiply-by-mask style as the int4
+    `*0x1E` sign-extend trick: no per-lane select, no vector.extract.
+
+    Nibble bits = [s | e1 e0 | m0]; mag = e1e0m0 (0..7). Single closed form
+    (verified vs all 16 codes): magnitude_byte = 0x34 + 4*(mag + [mag>=2]),
+    then forced to 0x00 at mag==0; sign bit (bit3->bit7) is OR'd in, zero-guarded
+    so -0 -> +0 (gfx942 fp8 = e4m3fnuz, where 0x80 == NaN).
+      mag : 0    .5    1     1.5   2     3     4     6
+      out : 0x00 0x38  0x40  0x44  0x48  0x4C  0x50  0x54
+    All ops are per-byte carry-free (mag+ge2 <= 8, <<2 <= 0x20, +0x34 <= 0x54).
+
+    exp_add_i32: optional packed-per-byte exponent delta (already <<3, i.e. in the
+    e4m3fnuz exponent-field position bits 3..6), used to FOLD the MXFP4 block-32
+    E8M0 weight scale into the e4m3fnuz exponent (W4A8 block-32 path). Bit-exact for
+    in-range weights (verified 0% saturate/underflow on DSV4); no saturation yet.
+    """
+    M = nibs & fx.Int32(0x07070707)                       # magnitude bits per byte
+    M1 = M >> fx.Int32(1)
+    M2 = M >> fx.Int32(2)
+    ge1 = (M | M1 | M2) & fx.Int32(0x01010101)            # per byte: 1 if mag>=1
+    ge2 = (M1 | M2) & fx.Int32(0x01010101)                # per byte: 1 if mag>=2
+    mag_byte = fx.Int32(0x34343434) + ((M + ge2) << fx.Int32(2))  # 0x34 + 4*(mag + [mag>=2])
+    if exp_add_i32 is not None:
+        # Fold MXFP4 block-32 E8M0 scale: per-byte (carry-suppressed SWAR) add of the
+        # exponent delta (= delta<<3, broadcast x4) into the e4m3fnuz exponent field.
+        # per-byte (a+b) mod 256 = ((a&0x7F..)+(b&0x7F..)) ^ ((a^b)&0x80..).
+        _a = mag_byte
+        _b = exp_add_i32
+        _swar = ((_a & fx.Int32(0x7F7F7F7F)) + (_b & fx.Int32(0x7F7F7F7F))) ^ (
+            (_a ^ _b) & fx.Int32(0x80808080)
+        )
+        # Clamp per-byte out-of-range exponents (bit7 set in the carry-free result):
+        # delta>=0 (exp_add bit7=0) -> overflow -> saturate 0x7F; delta<0 -> underflow
+        # -> flush 0x00. Real MXFP4 weights have ~1% blocks whose exp+delta leaves
+        # e4m3fnuz's range; without this they wrap to 0x80(NaN)/garbage -> model NaN.
+        _oor = ((_swar >> fx.Int32(7)) & fx.Int32(0x01010101)) * fx.Int32(0xFF)
+        _neg = ((_b >> fx.Int32(7)) & fx.Int32(0x01010101)) * fx.Int32(0xFF)
+        _clampv = fx.Int32(0x7F7F7F7F) ^ (_neg & fx.Int32(0x7F7F7F7F))
+        mag_byte = _swar ^ (_oor & (_swar ^ _clampv))
+    mag_byte = mag_byte & (ge1 * fx.Int32(0xFF))          # -> 0x00 where mag==0
+    # Sign only where the FINAL mag_byte != 0. Covers mag==0, underflow-flush AND the
+    # exp+delta==0 edge (SWAR yields 0x00 with bit7 clear, so an out-of-range mask would
+    # MISS it -> 0x00|0x80=NaN). Per-byte "byte!=0" via carry-free SWAR hasvalue:
+    # (((b&0x7F..)+0x7F..) | b) & 0x80.. sets bit7 per byte iff that byte is nonzero.
+    _nz80 = (((mag_byte & fx.Int32(0x7F7F7F7F)) + fx.Int32(0x7F7F7F7F)) | mag_byte) & fx.Int32(
+        0x80808080
+    )
+    sign = ((nibs & fx.Int32(0x08080808)) << fx.Int32(4)) & _nz80
+    return mag_byte | sign
+
+
+def _unpack_fp4_to_fp8_pair(packed32, exp_add_i32=None):
+    """Split packed FP4 (E2M1) dword into two FP8 (e4m3fnuz) dwords (even/odd nibbles).
+
+    Mirrors `_unpack_int4_to_int8_pair`: even = low nibble of each byte, odd = high nibble.
+    Feeds rocdl.mfma_f32_16x16x32_fp8_fp8 (W4A8 FP8-act x FP4-weight on gfx942/CDNA3).
+
+    exp_add_i32: optional MXFP4 block-32 E8M0 fold (see _map4_e2m1_to_e4m3fnuz). Both
+    nibbles of a byte are adjacent K -> same 32-block -> one delta for even and odd.
+    """
+    c_0f = fx.Int32(0x0F0F0F0F)
+    even = _map4_e2m1_to_e4m3fnuz(packed32 & c_0f, exp_add_i32)
+    odd = _map4_e2m1_to_e4m3fnuz((packed32 >> fx.Int32(4)) & c_0f, exp_add_i32)
+    return even, odd
+
+
 def _pack_i32_pair_to_i64(lo, hi, vector):
     """Pack two i32 values into one i64 via vector bitcast."""
     v2 = vector.from_elements(T.vec(2, T.i32), [lo, hi])
@@ -293,6 +363,59 @@ def _i8x4_in_i32_to_bf16x4_i64(val_i32, arith, vector, scale_val=None):
     v2 = vector.from_elements(vec2_i32, [i32_lo, i32_hi])
     v64 = vector.bitcast(vec1_i64, v2)
     return vector.extract(v64, static_position=[0], dynamic_position=[])
+
+
+def _e4m3x4_in_i32_to_bf16x4_i64(val_i32, arith, vector, scale_val=None):
+    """4 e4m3fnuz bytes (NATURAL E2M1 magnitudes from _map4, all normal exp 7..10 or 0x00)
+    packed in an i32 -> 4 bf16 packed as i64, optionally x scale_val (f32). W4A16 FP4 weight
+    dequant: e4m3fnuz(bias 8) -> f32(bias 127) is exp += 119, mant <<= 20, plus sign; then
+    x scale (E8M0 = 2^(e8m0-127), supplied as f32). Operates on the i32 (byte i shifted to
+    low 8 bits) to avoid i8 signedness. (Natural E2M1 has no subnormals; the rare code-0
+    weight maps to ~2^-8 x scale ~= 2^-15, negligible.)"""
+    from flydsl._mlir.dialects._arith_ops_gen import MulFOp as _MulFOp
+
+    _uw = _arith._to_raw
+    _av = _arith.ArithValue
+    f32_vals = []
+    for i in range(4):
+        bsh = val_i32 >> fx.Int32(i * 8)
+        bexp = (bsh >> fx.Int32(3)) & fx.Int32(0xF)
+        bmant = bsh & fx.Int32(0x7)
+        bsign = (bsh & fx.Int32(0x80)) << fx.Int32(24)
+        fbits = bsign | ((bexp + fx.Int32(119)) << fx.Int32(23)) | (bmant << fx.Int32(20))
+        # Zero the code-0 weight (E2M1 0.0 -> e4m3 byte 0x00 -> bexp 0). Without this it
+        # maps to 2^-8 x scale: a SYSTEMATIC positive bias on every ~zero weight (~10% of
+        # weights) that is tiny per-layer (cosine 0.99999) but compounds across 60 layers
+        # and drifts GSM8K. Natural E2M1 nonzero codes have bexp in 7..10, so bexp!=0 marks
+        # nonzero. nzmask = 0xFFFFFFFF iff bexp!=0 else 0.
+        _bnz = (
+            bexp | (bexp >> fx.Int32(1)) | (bexp >> fx.Int32(2)) | (bexp >> fx.Int32(3))
+        ) & fx.Int32(1)
+        fbits = fbits & (fx.Int32(0) - _bnz)
+        # bitcast needs a raw mlir Value; _uw unwraps the ArithValue operator result.
+        v = arith.bitcast(T.f32, _uw(fbits))
+        f32_vals.append(v)
+    if scale_val is not None:
+        raw_scale = _uw(scale_val)
+        f32_vals = [_MulFOp(v, raw_scale).result for v in f32_vals]
+    c16_shift = fx.Int32(16)
+    c_ffff0000 = fx.Int32(0xFFFF0000)
+    bf16_vals = [arith.bitcast(T.i32, _av(v)) for v in f32_vals]
+    i32_lo = (bf16_vals[0] >> c16_shift) | (bf16_vals[1] & c_ffff0000)
+    i32_hi = (bf16_vals[2] >> c16_shift) | (bf16_vals[3] & c_ffff0000)
+    v2 = vector.from_elements(T.vec(2, T.i32), [i32_lo, i32_hi])
+    v64 = vector.bitcast(T.vec(1, T.i64), v2)
+    return vector.extract(v64, static_position=[0], dynamic_position=[])
+
+
+def unpack_b_w4a16_fp4(packed32, scale_val, arith, vector):
+    """W4A16 FP4 (E2M1) groupwise unpack: packed FP4 dword -> (b0, b1) two i64 of 4 bf16
+    each, x scale. Mirrors unpack_b_w4a16 (int4) but with E2M1->bf16 dequant + E8M0 scale
+    (2^delta as f32). Feeds rocdl.mfma_f32_16x16x16_bf16 (bf16-act x FP4-weight W4A16)."""
+    even, odd = _unpack_fp4_to_fp8_pair(packed32)  # natural E2M1 -> e4m3 (no fold)
+    b0 = _e4m3x4_in_i32_to_bf16x4_i64(even, arith, vector, scale_val=scale_val)
+    b1 = _e4m3x4_in_i32_to_bf16x4_i64(odd, arith, vector, scale_val=scale_val)
+    return (b0, b1)
 
 
 def load_b_raw_w4a16(
@@ -469,15 +592,26 @@ def load_b_pack_k32(
     kpack_bytes: int = 16,
     elem_bytes: int = 1,
     unpack_int4: bool = False,
+    unpack_fp4: bool = False,
+    fp4_scale_rsrc=None,
+    fp4_expert_offset=None,
+    fp4_num_groups: int = 1,
+    fp4_group_size: int = 32,
+    fp4_n_per_expert: int = 0,
 ) -> ir.Value:
     """Load one B pack for one MFMA(x32) micro-step.
 
     Returns an i64 Value containing 8 bytes consumed by MFMA.
+
+    unpack_int4: packed int4 -> int8 (W4A8 int8 MFMA path).
+    unpack_fp4:  packed E2M1 -> e4m3fnuz (W4A8 FP8 MFMA / afp8_wfp4 path).
     """
     if kpack_bytes not in (8, 16):
         raise ValueError(f"kpack_bytes must be 8 or 16, got {kpack_bytes!r}")
-    if unpack_int4 and kpack_bytes != 8:
-        raise ValueError("unpack_int4 requires kpack_bytes=8 (packed int4 layout)")
+    if (unpack_int4 or unpack_fp4) and kpack_bytes != 8:
+        raise ValueError("unpack_int4/unpack_fp4 requires kpack_bytes=8 (packed 4-bit layout)")
+    if unpack_int4 and unpack_fp4:
+        raise ValueError("unpack_int4 and unpack_fp4 are mutually exclusive")
     if elem_bytes not in (1, 2):
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
 
@@ -492,7 +626,7 @@ def load_b_pack_k32(
     coord_pack = (n_blk, k0, k1, n_intra, fx.Index(0))
     idx_pack = crd2idx(coord_pack, layout_b)
 
-    if unpack_int4:
+    if unpack_int4 or unpack_fp4:
         idx_bytes = idx_pack + k2_base
         b4 = _buffer_load_vec(
             buffer_ops,
@@ -509,7 +643,36 @@ def load_b_pack_k32(
             static_position=[0],
             dynamic_position=[],
         )
-        even, odd = _unpack_int4_to_int8_pair(packed32)
+        if unpack_fp4:
+            exp_add_i32 = None
+            if fp4_scale_rsrc is not None:
+                # block-32 FP4 W4A8 group mapping (verified by probe):
+                #   ku = ki_step//2 (K64 micro-step); within a ku the 64 K = two 32-blocks
+                #   (2*ku, 2*ku+1) and the 4 K-lanes split lanes{0,1}->block 2ku,
+                #   lanes{2,3}->block 2ku+1; ki_step%2 is the 16-K half (same block).
+                #   => group = base_k//32 + 2*(ki_step//2) + lane_div_16//2.
+                lane_blk = lane_div_16 // fx.Index(2)
+                k_pos = (
+                    base_k
+                    + fx.Index(2 * (ki_step // 2) * fp4_group_size)
+                    + lane_blk * fx.Index(fp4_group_size)
+                )
+                exp_add_i32 = _load_groupwise_scale(
+                    buffer_ops,
+                    arith,
+                    scale_rsrc=fp4_scale_rsrc,
+                    expert_offset=fp4_expert_offset,
+                    n_blk=n_blk,
+                    n_intra=n_intra,
+                    k_pos=k_pos,
+                    num_groups=fp4_num_groups,
+                    group_size=fp4_group_size,
+                    n_per_expert=fp4_n_per_expert,
+                    scale_dtype=T.i32,
+                )
+            even, odd = _unpack_fp4_to_fp8_pair(packed32, exp_add_i32)
+        else:
+            even, odd = _unpack_int4_to_int8_pair(packed32)
         return _pack_i32_pair_to_i64(even, odd, vector)
 
     vec_elems = kpack_bytes // int(elem_bytes)
@@ -775,6 +938,18 @@ def _load_groupwise_scale(
         # Return raw i32 dword — extraction deferred to compute phase.
         scale_val = buffer_ops.buffer_load(
             scale_rsrc, dword_idx, vec_width=1, dtype=T.i32
+        )
+    elif scale_dtype == T.i32:
+        # MXFP4 block-32 fold delta: (E, G, N) layout, one precomputed i32 dword
+        # per (expert, group, n) = ((e8m0-127)<<3 & 0xFF) broadcast x4. Loaded raw
+        # and SWAR-added into the e4m3fnuz exponent in _map4_e2m1_to_e4m3fnuz
+        # (W4A8 block-32 FP4 path). Same flat index as the f32 (E, G, N) path.
+        c_gm1 = fx.Index(num_groups - 1)
+        base_scale = expert_offset * c_gm1 + n_global
+        elem_idx = base_scale + group_idx * c_npe
+        scale_idx_i32 = arith.index_cast(T.i32, elem_idx)
+        scale_val = buffer_ops.buffer_load(
+            scale_rsrc, scale_idx_i32, vec_width=1, dtype=T.i32
         )
     else:
         # (E, G, N) layout with f32 dtype

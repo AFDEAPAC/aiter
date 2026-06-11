@@ -292,6 +292,7 @@ def compile_flydsl_moe_stage1(
     enable_bias: bool = False,
     a_scale_one: bool = False,
     xcd_swizzle: int = 0,
+    swiglu_limit: float | None = None,
 ):
     """Compile stage1 kernel (cached via underlying lru_cache)."""
     if b_dtype == "fp4":
@@ -322,6 +323,48 @@ def compile_flydsl_moe_stage1(
             a_scale_one=a_scale_one,
             xcd_swizzle=xcd_swizzle,
         )
+    elif a_dtype == "fp8" and b_dtype == "fp4pc":
+        # Per-channel FP4 (W4A8: fp8 act x E2M1 weight, per-output-channel scale) on gfx942.
+        from .kernels.moe_gemm_2stage import compile_moe_gemm1
+
+        return compile_moe_gemm1(
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            doweight_stage1=doweight_stage1,
+            in_dtype="fp4",
+            group_size=0,
+            out_dtype=out_dtype,
+            use_cshuffle_epilog=(None if k_batch > 1 else False),
+            k_batch=k_batch,
+            swiglu_limit=swiglu_limit,
+        )
+    elif a_dtype == "fp8" and b_dtype == "fp4g32":
+        # Block-32 FP4 (W4A8: fp8 act x E2M1 weight, per-32 E8M0 scale FOLDED into the
+        # e4m3fnuz exponent at unpack) on gfx942. arg_scale_w = precomputed i32 fold dword
+        # [E, G=model_dim/32, N] (group-major). Reuses the per-channel fp4 path otherwise.
+        from .kernels.moe_gemm_2stage import compile_moe_gemm1
+
+        return compile_moe_gemm1(
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            doweight_stage1=doweight_stage1,
+            in_dtype="fp4",
+            group_size=32,
+            out_dtype=out_dtype,
+            use_cshuffle_epilog=(None if k_batch > 1 else False),
+            k_batch=k_batch,
+            swiglu_limit=swiglu_limit,
+        )
     elif a_dtype == "bf16" and b_dtype == "int4":
         # a16wi4: bf16 activations, int4 weights with groupwise scale
         from .kernels.moe_gemm_2stage import compile_moe_gemm1
@@ -344,6 +387,30 @@ def compile_flydsl_moe_stage1(
             use_cshuffle_epilog=_use_cshuffle,
             scale_is_bf16=True,
             k_batch=k_batch,
+        )
+    elif a_dtype == "bf16" and b_dtype == "fp4a16":
+        # W4A16 block-32 FP4: bf16 activations, packed E2M1 weights, bf16 (2^delta) groupwise
+        # scale. Reuses the int4_bf16 (a16w4) load/scale/bf16-MFMA path; only the unpack is
+        # E2M1->bf16 (selected by in_dtype="fp4_bf16" in compile_moe_gemm1).
+        from .kernels.moe_gemm_2stage import compile_moe_gemm1
+
+        _use_cshuffle = None if k_batch > 1 else False
+        return compile_moe_gemm1(
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            doweight_stage1=doweight_stage1,
+            in_dtype="fp4_bf16",
+            group_size=32,
+            out_dtype=out_dtype,
+            use_cshuffle_epilog=_use_cshuffle,
+            scale_is_bf16=True,
+            k_batch=k_batch,
+            swiglu_limit=swiglu_limit,
         )
     else:
         raise ValueError(
@@ -416,6 +483,61 @@ def compile_flydsl_moe_stage2(
             accumulate=accumulate,
             scale_is_bf16=True,
         )
+    elif a_dtype == "bf16" and b_dtype == "fp4a16":
+        # W4A16 block-32 FP4 stage2 (mirrors int4_bf16; unpack is E2M1->bf16).
+        from .kernels.moe_gemm_2stage import compile_moe_gemm2
+
+        return compile_moe_gemm2(
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            doweight_stage2=doweight_stage2,
+            in_dtype="fp4_bf16",
+            group_size=32,
+            out_dtype=out_dtype,
+            accumulate=accumulate,
+            scale_is_bf16=True,
+        )
+    elif a_dtype == "fp8" and b_dtype == "fp4pc":
+        # Per-channel FP4 (W4A8: fp8 act x E2M1 weight, per-output-channel scale) on gfx942.
+        from .kernels.moe_gemm_2stage import compile_moe_gemm2
+
+        return compile_moe_gemm2(
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            doweight_stage2=doweight_stage2,
+            in_dtype="fp4",
+            group_size=0,
+            out_dtype=out_dtype,
+            accumulate=accumulate,
+        )
+    elif a_dtype == "fp8" and b_dtype == "fp4g32":
+        # Block-32 FP4 (W4A8: per-32 E8M0 folded into e4m3fnuz exponent at unpack) on gfx942.
+        from .kernels.moe_gemm_2stage import compile_moe_gemm2
+
+        return compile_moe_gemm2(
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            doweight_stage2=doweight_stage2,
+            in_dtype="fp4",
+            group_size=32,
+            out_dtype=out_dtype,
+            accumulate=accumulate,
+        )
     else:
         raise ValueError(
             f"Unsupported stage2 dtype combination: a_dtype={a_dtype}, b_dtype={b_dtype}"
@@ -423,6 +545,164 @@ def compile_flydsl_moe_stage2(
 
 
 # Private helpers
+
+
+def fused_moe_fp4pc(
+    hidden_states,   # [tokens, model_dim] bf16/fp16
+    w1,              # [E, 2*inter_dim, model_dim//2] uint8 packed-fp4 (e2m1), preshuffled
+    w2,              # [E, model_dim, inter_dim//2] uint8 packed-fp4 (e2m1), preshuffled
+    w1_scale,        # [E*2*inter_dim] f32  per-output-channel
+    w2_scale,        # [E*model_dim]   f32  per-output-channel
+    topk_weights,    # [tokens, topk]
+    topk_ids,        # [tokens, topk]
+    block_m: int = 32,
+    tile_n: int = 128,
+    swiglu_limit: float | None = None,
+):
+    """Two-stage afp8wfp4 fused MoE (fp8 per-token act x per-channel fp4/E2M1 weight) on gfx942.
+
+    Weights must already be e2m1-quantised, ``shuffle_weight((16,16))``-preshuffled and
+    packed 2-per-byte; scales are flat per-output-channel f32. Activations are quantised
+    to fp8 (e4m3fnuz) per-token internally. Returns [tokens, model_dim] in hidden dtype.
+    """
+    from aiter.fused_moe import moe_sorting  # lazy to avoid circular import
+
+    _FP8 = dtypes.fp8
+    _FP8_MAX = 240.0
+    tokens, model_dim = hidden_states.shape
+    topk = topk_ids.shape[1]
+    E = w1.shape[0]
+    inter_dim = w1.shape[1] // 2
+
+    def _q_fp8(x):
+        s = (x.abs().amax(dim=-1, keepdim=True) / _FP8_MAX).clamp_min(1e-8)
+        q = (x / s).clamp(-_FP8_MAX, _FP8_MAX).to(_FP8)
+        return q.view(torch.uint8).contiguous(), s.squeeze(-1).float().contiguous()
+
+    sorted_ids, sorted_weights, sorted_eids, num_valid, _ = moe_sorting(
+        topk_ids, topk_weights, E, model_dim, hidden_states.dtype, block_m
+    )
+    a1_qt, a1_scale = _q_fp8(hidden_states)
+    o1 = flydsl_moe_stage1(
+        a=a1_qt, w1=w1, sorted_token_ids=sorted_ids, sorted_expert_ids=sorted_eids,
+        num_valid_ids=num_valid, topk=topk, tile_m=block_m, tile_n=tile_n, tile_k=256,
+        a_dtype="fp8", b_dtype="fp4pc", out_dtype="bf16",
+        w1_scale=w1_scale, a1_scale=a1_scale, sorted_weights=None,
+        swiglu_limit=swiglu_limit,
+    )
+    o1 = o1 if torch.is_tensor(o1) else o1[0]
+    a2_qt, a2_scale = _q_fp8(o1.view(tokens * topk, inter_dim))
+    o2 = flydsl_moe_stage2(
+        inter_states=a2_qt.view(tokens, topk, inter_dim), w2=w2,
+        sorted_token_ids=sorted_ids, sorted_expert_ids=sorted_eids, num_valid_ids=num_valid,
+        topk=topk, tile_m=block_m, tile_n=tile_n, tile_k=256,
+        a_dtype="fp8", b_dtype="fp4pc", out_dtype="bf16", mode="atomic",
+        w2_scale=w2_scale, a2_scale=a2_scale, sorted_weights=sorted_weights,
+    )
+    return (o2 if torch.is_tensor(o2) else o2[0]).view(tokens, model_dim)
+
+
+def fused_moe_fp4_block32(
+    hidden_states,   # [tokens, model_dim] bf16/fp16
+    w1,              # [E, 2*inter_dim, model_dim//2] uint8 packed-fp4 (e2m1), preshuffled
+    w2,              # [E, model_dim, inter_dim//2] uint8 packed-fp4 (e2m1), preshuffled
+    w1_fold,         # [E, model_dim//32, 2*inter_dim] int32  E8M0 exponent-fold dword
+    w2_fold,         # [E, inter_dim//32, model_dim]   int32  E8M0 exponent-fold dword
+    topk_weights,    # [tokens, topk]
+    topk_ids,        # [tokens, topk]
+    block_m: int = 32,
+    tile_n: int = 128,
+    swiglu_limit: float | None = None,
+):
+    """Two-stage block-32 FP4 W4A8 fused MoE (fp8 per-token act x block-32 E2M1 weight,
+    per-32 E8M0 folded into the e4m3fnuz exponent at unpack) on gfx942.
+
+    Same packing/preshuffle as fused_moe_fp4pc; the per-output-channel f32 scale is
+    REPLACED by a precomputed i32 fold dword per (E, K//32 group, N) -- see the
+    DeepseekV4Fp4Block32 weight-processing. Activations are quantised to fp8 per-token.
+    """
+    from aiter.fused_moe import moe_sorting  # lazy to avoid circular import
+
+    _FP8 = dtypes.fp8
+    _FP8_MAX = 240.0
+    tokens, model_dim = hidden_states.shape
+    topk = topk_ids.shape[1]
+    E = w1.shape[0]
+    inter_dim = w1.shape[1] // 2
+
+    def _q_fp8(x):
+        s = (x.abs().amax(dim=-1, keepdim=True) / _FP8_MAX).clamp_min(1e-8)
+        q = (x / s).clamp(-_FP8_MAX, _FP8_MAX).to(_FP8)
+        return q.view(torch.uint8).contiguous(), s.squeeze(-1).float().contiguous()
+
+    sorted_ids, sorted_weights, sorted_eids, num_valid, _ = moe_sorting(
+        topk_ids, topk_weights, E, model_dim, hidden_states.dtype, block_m
+    )
+    a1_qt, a1_scale = _q_fp8(hidden_states)
+    o1 = flydsl_moe_stage1(
+        a=a1_qt, w1=w1, sorted_token_ids=sorted_ids, sorted_expert_ids=sorted_eids,
+        num_valid_ids=num_valid, topk=topk, tile_m=block_m, tile_n=tile_n, tile_k=256,
+        a_dtype="fp8", b_dtype="fp4g32", out_dtype="bf16",
+        w1_scale=w1_fold, a1_scale=a1_scale, sorted_weights=None, swiglu_limit=swiglu_limit,
+    )
+    o1 = o1 if torch.is_tensor(o1) else o1[0]
+    a2_qt, a2_scale = _q_fp8(o1.view(tokens * topk, inter_dim))
+    o2 = flydsl_moe_stage2(
+        inter_states=a2_qt.view(tokens, topk, inter_dim), w2=w2,
+        sorted_token_ids=sorted_ids, sorted_expert_ids=sorted_eids, num_valid_ids=num_valid,
+        topk=topk, tile_m=block_m, tile_n=tile_n, tile_k=256,
+        a_dtype="fp8", b_dtype="fp4g32", out_dtype="bf16", mode="atomic",
+        w2_scale=w2_fold, a2_scale=a2_scale, sorted_weights=sorted_weights,
+    )
+    return (o2 if torch.is_tensor(o2) else o2[0]).view(tokens, model_dim)
+
+
+def fused_moe_fp4_block32_w4a16(
+    hidden_states,   # [tokens, model_dim] bf16
+    w1,              # [E, 2*inter_dim, model_dim//2] uint8 packed-fp4 (e2m1), a16w4-preshuffled
+    w2,              # [E, model_dim, inter_dim//2] uint8 packed-fp4 (e2m1), a16w4-preshuffled
+    w1_scale,        # [E, 2*inter_dim, model_dim//32] bf16  per-32 E8M0 -> 2^(e8m0-127), a16w4-shuffled
+    w2_scale,        # [E, model_dim, inter_dim//32]   bf16
+    topk_weights,    # [tokens, topk]
+    topk_ids,        # [tokens, topk]
+    block_m: int = 32,
+    tile_n: int = 128,
+    swiglu_limit: float | None = None,
+):
+    """Two-stage block-32 FP4 W4A16 fused MoE (bf16 act x block-32 E2M1 weight, per-32 E8M0
+    as a bf16 2^delta groupwise scale) on gfx942.
+
+    Mirrors the int4_bf16 (a16w4) path exactly -- weights are E2M1 codes packed 2-per-byte
+    and preshuffled like int4 (shuffle_weight_a16w4), the scale is bf16 (shuffle_scale_a16w4).
+    The ONLY difference vs int4_bf16 is the in-kernel unpack (E2M1->bf16 instead of int4->bf16),
+    so this isolates the weight path with FULL-precision (bf16) activations: the W4A16 control
+    for the W4A8 (fp8-act) block-32 result. NO activation quantization.
+    """
+    from aiter.fused_moe import moe_sorting  # lazy to avoid circular import
+
+    tokens, model_dim = hidden_states.shape
+    topk = topk_ids.shape[1]
+    E = w1.shape[0]
+    inter_dim = w1.shape[1] // 2
+
+    sorted_ids, sorted_weights, sorted_eids, num_valid, _ = moe_sorting(
+        topk_ids, topk_weights, E, model_dim, hidden_states.dtype, block_m
+    )
+    o1 = flydsl_moe_stage1(
+        a=hidden_states, w1=w1, sorted_token_ids=sorted_ids, sorted_expert_ids=sorted_eids,
+        num_valid_ids=num_valid, topk=topk, tile_m=block_m, tile_n=tile_n, tile_k=256,
+        a_dtype="bf16", b_dtype="fp4a16", out_dtype="bf16",
+        w1_scale=w1_scale, a1_scale=None, sorted_weights=None, swiglu_limit=swiglu_limit,
+    )
+    o1 = o1 if torch.is_tensor(o1) else o1[0]
+    o2 = flydsl_moe_stage2(
+        inter_states=o1.view(tokens, topk, inter_dim), w2=w2,
+        sorted_token_ids=sorted_ids, sorted_expert_ids=sorted_eids, num_valid_ids=num_valid,
+        topk=topk, tile_m=block_m, tile_n=tile_n, tile_k=256,
+        a_dtype="bf16", b_dtype="fp4a16", out_dtype="bf16", mode="atomic",
+        w2_scale=w2_scale, a2_scale=None, sorted_weights=sorted_weights,
+    )
+    return (o2 if torch.is_tensor(o2) else o2[0]).view(tokens, model_dim)
 
 
 _DLPACK_SAFE = (torch.uint8, torch.float16, torch.bfloat16, torch.float32)
@@ -659,6 +939,7 @@ def flydsl_moe_stage1(
     bias: Optional[torch.Tensor] = None,
     a_scale_one: bool = False,
     xcd_swizzle: int = 0,
+    swiglu_limit: float | None = None,
 ):
     """Fused gate+up GEMM (MOE stage1).
 
@@ -836,6 +1117,7 @@ def flydsl_moe_stage1(
         enable_bias=(bias is not None),
         a_scale_one=a_scale_one,
         xcd_swizzle=xcd_swizzle,
+        swiglu_limit=swiglu_limit,
     )
     _run_compiled(exe, args)
 
