@@ -251,9 +251,90 @@ class QManager8bitsV3
     public:
     __device__ QManager8bitsV3() {}
 
+    // bf16 Q LDS bounce: per-warp 16 rows x kQkHeadDim cols of bf16, laid out as
+    // contiguous 16x32 sub-blocks (no padding) matching KvManager's bf16 layout.
+    static constexpr uint32_t kQSubBlockBytes16 = 16u * 32u * 2u;                  // 1024
+    static constexpr uint32_t kQNumColTiles16   = T::kQkHeadDim / 32u;            // 18
+    static constexpr uint32_t kQLdsPerWarp16    = kQNumColTiles16 * kQSubBlockBytes16; // 18432
+
     __device__ __forceinline__ static constexpr uint32_t get_lds_size_in_byte()
     {
-        return T::kNumWarps * get_lds_size_per_warp_in_byte();
+        if constexpr(sizeof(q_t) == 2)
+        {
+            return T::kNumWarps * kQLdsPerWarp16; // 4*18432 = 73728
+        }
+        else
+        {
+            return T::kNumWarps * get_lds_size_per_warp_in_byte();
+        }
+    }
+
+    // bf16 Q load: VRAM bf16 -> LDS bounce (b128, no-pad 16x32 sub-blocks) -> ds_read_b128
+    // into the q-nope/q-rope AGPR ranges in mfma B-operand layout. Per warp loads its own
+    // 16-row head slice (no cross-warp dependency -> vmcnt wait, no barrier).
+    template <uint32_t GPR_NOPE_START, uint32_t GPR_ROPE_START>
+    __device__ __forceinline__ void load_q_to_gpr_bf16(const typename T::gl_q& q_buffer,
+                                                       const int32_t warp_idx,
+                                                       const int32_t q_start,
+                                                       const uintptr_t p_lds)
+    {
+        const uint32_t lane_idx     = opus::lane_id();
+        const uintptr_t p_lds_warp  = p_lds + warp_idx * kQLdsPerWarp16;
+        // Base at head-group 0 (like the fp8 path); the warp's 16-head slice is
+        // reached via the wave-uniform s_offset = warp_idx * 16 * kQkHeadDim * 2 B.
+        const q_t* p_q_base         = &q_buffer[{q_start, 0, 0, 0}];
+        // BOUND num_records to the remaining query bytes from p_q_base so a miscompiled OOB/stray
+        // lane's buffer_load_lds returns 0 instead of page-faulting (same fix as the KV load).
+        const uint32_t q_total_bytes =
+            static_cast<uint32_t>(q_buffer.batch() - q_start) * static_cast<uint32_t>(q_buffer.depth()) *
+            static_cast<uint32_t>(q_buffer.rows()) * static_cast<uint32_t>(q_buffer.cols()) *
+            static_cast<uint32_t>(sizeof(q_t));
+        auto g_q = opus::make_gmem(reinterpret_cast<const uint8_t*>(p_q_base), q_total_bytes);
+        // Warp's 16-head slice via a per-lane v_off term (NOT soffset: for the
+        // buffer_load_lds scatter, keep s_off=0 like V40 -- soffset semantics on the
+        // LDS-dst path are unsafe).
+        const uint32_t v_off_warp   = warp_idx * 16u * T::kQkHeadDim * 2u;
+
+        // Phase 1: vmem -> LDS. lane t -> 8 bf16 (16B) of row=t/4, col=(t&3)*8.
+        const uint32_t st_row       = lane_idx >> 2;        // 0..15
+        const uint32_t st_col_group = lane_idx & 3u;        // 0..3
+        opus::static_for<kQNumColTiles16>([&](auto ctv) {
+            constexpr uint32_t ct = ctv.value;
+            const uint32_t v_off =
+                v_off_warp + (st_row * T::kQkHeadDim + ct * 32u + st_col_group * 8u) * 2u;
+            const uintptr_t p_dst = p_lds_warp + ct * kQSubBlockBytes16 + lane_idx * 16u;
+            __builtin_amdgcn_raw_ptr_buffer_load_lds(g_q.cached_rsrc,
+                                                     (hk::as3_uint32_ptr)(p_dst),
+                                                     /*size=*/16,
+                                                     static_cast<int>(v_off),
+                                                     /*s_off=*/0,
+                                                     /*i_off=*/0,
+                                                     /*aux=*/0);
+        });
+        asm volatile("s_waitcnt vmcnt(0)");
+
+        // Phase 2: LDS -> AGPR. lane t -> row=t%16, col=(t/16)*8; in_sb = row*64 + col*2.
+        const uint32_t ld_row = lane_idx % 16u;
+        const uint32_t ld_col = (lane_idx / 16u) * 8u;
+        const uint32_t in_sb  = ld_row * 64u + ld_col * 2u;
+        // ONE per-lane base; the per-col-tile sub-block offset (ct*1024, <=17408 < 64KB ds-imm)
+        // goes into the ds offset immediate so the compiler keeps a SINGLE address VGPR instead of
+        // materializing 18 separate addresses (was ~18 scratch VGPRs of register pressure).
+        const uint32_t q_base            = static_cast<uint32_t>(p_lds_warp) + in_sb;
+        constexpr uint32_t kNumNopeTiles = T::kQkNopeHeadDim / 32u; // 16
+        opus::static_for<kQNumColTiles16>([&](auto ctv) {
+            constexpr uint32_t ct  = ctv.value;
+            constexpr uint32_t off = ct * kQSubBlockBytes16;
+            if constexpr(ct < kNumNopeTiles)
+            {
+                hkm::ds_read_b128<GPR_NOPE_START + ct * 4u>(q_base, off);
+            }
+            else
+            {
+                hkm::ds_read_b128<GPR_ROPE_START + (ct - kNumNopeTiles) * 4u>(q_base, off);
+            }
+        });
+        asm volatile("s_waitcnt lgkmcnt(0)");
     }
 
     template <uint32_t GPR_NOPE_START, uint32_t GPR_ROPE_START>
@@ -1121,11 +1202,162 @@ class KvManager8bitsV3
     }
 
     public:
+    // ---- bf16 no-padding 16x32 sub-block layout (V40-style) ----------------
+    // For bf16 the KV tile is stored as plain contiguous 16-row x 32-col sub-blocks
+    // (no bank-conflict padding) so b128 buffer_load_lds (16 B/lane, lane t -> LDS
+    // t*16) lands cleanly and a single warp fills one sub-block. Sub-blocks are in
+    // col-major order: (rt,ct) -> (ct*kNumRowTiles16 + rt)*kSubBlockBytes16.
+    static constexpr uint32_t kSubBlockRows16  = 16;
+    static constexpr uint32_t kSubBlockCols16  = 32;
+    static constexpr uint32_t kSubBlockBytes16 = kSubBlockRows16 * kSubBlockCols16 * 2; // 1024
+    static constexpr uint32_t kNumRowTiles16   = T::kBlockN / kSubBlockRows16;          // 4
+    static constexpr uint32_t kNumColTiles16   = T::kQkHeadDim / kSubBlockCols16;       // 18
+    __device__ __forceinline__ static constexpr uint32_t
+    sub_block_byte_offset_16(const uint32_t row_tile, const uint32_t col_tile)
+    {
+        return (col_tile * kNumRowTiles16 + row_tile) * kSubBlockBytes16;
+    }
+
     // There are 576 / 64 = 9 blocks. Each block contains 32x64 elements.
     // The number of sub-blocks is 8. Each sub-block contains 2 blocks of 4x32 elements.
     __device__ __forceinline__ static constexpr uint32_t get_lds_size_in_byte()
     {
-        return kNumBytesPerBlock * kNumBlocks; // 2112*9=19008
+        if constexpr(sizeof(kv_t) == 2)
+        {
+            return T::kBlockN * T::kQkHeadDim * 2; // 64*576*2 = 73728 (no padding)
+        }
+        else
+        {
+            return kNumBytesPerBlock * kNumBlocks; // 2112*9=19008
+        }
+    }
+
+    // bf16 direct vmem->LDS tile loader (b128). Each warp loads ONE 16-row tile
+    // (warp_idx -> row_tile) across all kNumColTiles16 col-tiles. lane t writes 16 B
+    // (8 bf16) to LDS sub_block(row_tile,ct) + t*16; the per-lane source row is
+    // row_tile*16 + (lane>>2), col = ct*32 + (lane&3)*8. OOB rows are zero-filled.
+    // p_kv_indices/kPageSize resolve the physical KV page like get_kv_ld_row.
+    // Resolve the per-(warp) physical KV row for the bf16 b128 loader. Bounds-checked
+    // (returns -1 for OOB; never faults). Factor out so the SPREAD loader (below) computes
+    // it ONCE per tile instead of per col-tile -- get_kv_ld_row does a p_kv_indices buffer
+    // load, so re-doing it per col-tile would add 18x VMEM traffic (defeats the spread).
+    template <bool kCheckBoundary, int32_t kPageSize>
+    __device__ __forceinline__ static int32_t
+    resolve_kv_phys_row_bf16(const int32_t* p_kv_indices,
+                             const int32_t kv_row_base_idx, // get_kv_ld_row_base_idx16(warp)
+                             const int32_t kv_tile_start,
+                             const int32_t kv_end)
+    {
+        return get_kv_ld_row<kCheckBoundary, kPageSize>(
+            p_kv_indices, kv_row_base_idx, kv_tile_start, kv_end);
+    }
+
+    // Split of resolve_kv_phys_row_bf16 into (issue load) + (finalize use) so the caller can
+    // NOTE: a split issue/finalize variant of resolve_kv_phys_row_bf16 was tried (STAGE-10d, to
+    // hide the page-index load before the tile-top drain) but it issued the p_kv_indices buffer
+    // load UNCONDITIONALLY (no bounds check before the load), unlike get_kv_ld_row which only
+    // loads in-bounds. For a split's last tile the next-tile idx exceeds the real p_kv_indices
+    // length; the buffer rsrc (num_records=0xffffffff) does NOT clamp it -> reads unmapped memory
+    // -> GPU memfault (only at large-ctx multi-split configs, e.g. ctx8192 B1/16/32, ctx16384 B16).
+    // It was also perf-NEUTRAL, so it was reverted. Use the bounds-checked resolve above.
+
+    // Load col-tiles [kCtStart, kCtStart+kCtCount) of one 16-row KV sub-tile (warp_idx ->
+    // row_tile) into LDS via b128 buffer_load_lds, given a PRECOMPUTED phys_row. Splitting
+    // the 18 col-tiles into ranges lets the caller SPREAD the issues across the QK MFMA loop
+    // (fp8/asm pattern) so the VMEM load FIFO never fills and vmcnt stays high instead of a
+    // top-of-tile burst that fills the FIFO and forces a vmcnt(0) drain stall (ATT STAGE-10b).
+    template <uint32_t kCtStart, uint32_t kCtCount, bool kCheckBoundary>
+    __device__ __forceinline__ static void
+    async_load_kv_cols_bf16(const uintptr_t p_lds_kv,
+                            const uint32_t warp_idx,
+                            const typename T::gl_kv& kv_buffer,
+                            const int32_t phys_row)
+    {
+        if(warp_idx >= kNumRowTiles16)
+        {
+            return; // only 4 warps load (one row-tile each); extras idle.
+        }
+        const uint32_t lane_idx  = opus::lane_id();
+        const uint32_t col_group = lane_idx & 3u; // 0..3 -> 8 cols each
+
+        const kv_t* p_kv_buffer = &kv_buffer[{0, 0, 0, 0}];
+        // Byte-addressed buffer resource (stride 1) so the byte v_off below is used
+        // directly by the raw b128 buffer_load_lds (matches V40's RoPE loader).
+        auto g_kv = opus::make_gmem<uint8_t>(reinterpret_cast<const uint8_t*>(p_kv_buffer));
+
+        // Clamp phys_row to 0 in the load address (OOB lane safety; see history below).
+        const uint32_t row_byte_base =
+            static_cast<uint32_t>(phys_row < 0 ? 0 : phys_row) * T::kQkHeadDim * 2u;
+
+        // STAGE 13a: oob (=phys_row<0) is per-lane divergent but CONSTANT across the
+        // kCtCount col-tiles, so the old per-ct `if(oob)` re-emitted the exec-mask
+        // save/restore + execz + descriptor reload for EVERY col-tile (top SALU cost
+        // in ATT, ~4.5x asm). Hoist it: when kCheckBoundary==false (full tile, the
+        // caller guarantees phys_row>=0) the loads are fully branchless; when true the
+        // single divergent oob branch wraps the whole unrolled loop once.
+        bool do_zero = false;
+        if constexpr(kCheckBoundary)
+        {
+            do_zero = (phys_row < 0);
+        }
+        if(do_zero)
+        {
+            opus::static_for<kCtCount>([&](auto cv) {
+                constexpr uint32_t ct      = kCtStart + cv.value;
+                const uintptr_t p_lds_base = p_lds_kv + sub_block_byte_offset_16(warp_idx, ct);
+                // OOB zero-fill is a plain ds_write (no HW lane fan-out) -> per-lane address.
+                const v4ui z = {0u, 0u, 0u, 0u};
+                hkm::ds_write_b128(z, static_cast<uint32_t>(p_lds_base + lane_idx * 16u), 0);
+            });
+        }
+        else
+        {
+            opus::static_for<kCtCount>([&](auto cv) {
+                constexpr uint32_t ct = kCtStart + cv.value;
+                // UNIFORM per-wave LDS base (NO lane_idx term). For buffer_load_lds the hardware
+                // fans the wave out by lane*size (=lane*16 for b128), so the lds_dst arg is the
+                // per-wave M0 base, not a per-lane address (STAGE-10b: removing the lane_idx term
+                // dropped the per-ct v_readfirstlane).
+                const uintptr_t p_lds_base = p_lds_kv + sub_block_byte_offset_16(warp_idx, ct);
+                // Full per-lane byte offset in the voffset VGPR (NOT the buffer i_off immediate): the
+                // buffer_load_lds OFFSET immediate range is too small for the upper col-tiles (rope).
+                const uint32_t v_off = row_byte_base + (ct * 32u + col_group * 8u) * 2u;
+                __builtin_amdgcn_raw_ptr_buffer_load_lds(g_kv.cached_rsrc,
+                                                         (hk::as3_uint32_ptr)(p_lds_base),
+                                                         /*size=*/16,
+                                                         static_cast<int>(v_off),
+                                                         /*s_off=*/0,
+                                                         /*i_off=*/0,
+                                                         /*aux=*/0);
+            });
+        }
+    }
+
+    // Full-tile burst (all 18 col-tiles). Used for the FIRST tile (prologue), where there is
+    // no prior compute to spread the loads under. Steady-state next-tile prefetch uses the
+    // spread async_load_kv_cols_bf16 across the QK loop instead.
+    template <bool kCheckBoundary, int32_t kPageSize>
+    __device__ __forceinline__ static void
+    async_load_kv_tile_bf16(const uintptr_t p_lds_kv,
+                            const uint32_t warp_idx,
+                            const typename T::gl_kv& kv_buffer,
+                            const int32_t* p_kv_indices,
+                            const int32_t kv_row_base_idx, // get_kv_ld_row_base_idx16(warp)
+                            const int32_t kv_tile_start,
+                            const int32_t kv_end)
+    {
+        const int32_t phys_row = resolve_kv_phys_row_bf16<kCheckBoundary, kPageSize>(
+            p_kv_indices, kv_row_base_idx, kv_tile_start, kv_end);
+        async_load_kv_cols_bf16<0, kNumColTiles16, kCheckBoundary>(
+            p_lds_kv, warp_idx, kv_buffer, phys_row);
+    }
+
+    // bf16 per-lane logical row within the kBlockN tile for async_load_kv_tile_bf16.
+    __device__ __forceinline__ static int32_t get_kv_ld_row_base_idx16(const int32_t warp_idx)
+    {
+        const uint32_t lane_idx = opus::lane_id();
+        return warp_idx * static_cast<int32_t>(kSubBlockRows16) +
+               static_cast<int32_t>(lane_idx >> 2);
     }
 
     // Each warp takes two 4x32 blocks (rows r..r+3 and r+16..r+19); each row is handled by 8
@@ -1313,15 +1545,38 @@ class KvManager8bitsV3
         const uintptr_t p_lds_kv_lane   = p_lds_kv + get_block_lane_offset(row, col);
         constexpr uint32_t kFixedOffset = get_block_fixed_offset<kRowOffset, kColOffset>();
 
-        // RT must hold exactly one 2-vgpr range (one mfma A-tile = 16x32 = 2 vgprs).
+        // RT must hold exactly one mfma A-tile (16x32). fp8: 2 vgprs (8 bytes,
+        // ds_read_b64). bf16: 4 vgprs (16 bytes, ds_read_b128). The 8 contiguous K
+        // elements per lane are contiguous in the LDS sub-block, so a single wide
+        // ds_read covers them; get_block_lane_offset already scales by sizeof(kv_t).
         // Caller passes the appropriate sub-view per kRowOffset; the function always
         // writes to range 0. This decouples the destination VGPR from the LDS source
         // address (selected by kFixedOffset via kRowOffset, including pass bits for
         // the upper N-half on kBlockN=64).
         using range_type = hkdart::get_nth_range_t<typename RT::register_ranges, 0>;
-        static_assert(range_type::lo + 1 == range_type::hi,
-                      "ds_read_b64 requires 2 consecutive registers");
-        hkm::ds_read_b64<range_type::lo>(p_lds_kv_lane, kFixedOffset);
+        if constexpr(sizeof(kv_t) == 1)
+        {
+            static_assert(range_type::lo + 1 == range_type::hi,
+                          "ds_read_b64 requires 2 consecutive registers");
+            hkm::ds_read_b64<range_type::lo>(p_lds_kv_lane, kFixedOffset);
+        }
+        else
+        {
+            // bf16: no-padding 16x32 sub-block layout (V40-style). row=lane%16,
+            // col=(lane/16)*8; in-sub-block byte = row*64 + col*2. The sub-block is
+            // selected by (kRowOffset/16, kColOffset/32). Fold the (large) sub-block
+            // offset into the runtime address (exceeds the 16-bit DS imm).
+            static_assert(range_type::lo + 3 == range_type::hi,
+                          "ds_read_b128 requires 4 consecutive registers");
+            constexpr uint32_t kSbFixed =
+                sub_block_byte_offset_16(kRowOffset / kSubBlockRows16, kColOffset / kSubBlockCols16);
+            // ds-immediate form (matching fp8): shared per-lane base + constant in the ds
+            // immediate -> no per-col-tile address spilled into q/kv AGPRs.
+            constexpr uint32_t kImm  = kSbFixed & 0xFFFFu;
+            constexpr uint32_t kAddr = kSbFixed & ~0xFFFFu;
+            const uint32_t in_sb     = row * (kSubBlockCols16 * 2u) + col * 2u;
+            hkm::ds_read_b128<range_type::lo>(p_lds_kv + in_sb + kAddr, kImm);
+        }
     }
 
     // Load un-transposed vector from LDS to GPR.
@@ -1392,21 +1647,53 @@ class KvManager8bitsV3
 #if defined(__gfx950__)
         static_assert(((kRowOffset % 16) == 0) && (kRowOffset < T::kBlockN),
                       "load_transpose_v_to_gpr(): Unsupported row offset!");
-        static_assert(((kColOffset % 32) == 0) && (kColOffset < 512),
+        // bf16: kColOffset now selects outcol at 16-granularity (the top/bot operand differ by
+        // +16 outcol, NOT by kvpos). fp8 path keeps the 32-multiple assumption.
+        static_assert((sizeof(kv_t) == 2 ? ((kColOffset % 16) == 0) : ((kColOffset % 32) == 0)) &&
+                          (kColOffset < 512),
                       "load_transpose_v_to_gpr(): Unsupported column offset!");
 
-        // Per-lane (row, col): ds_read_b64_tr_b8 input footprint (see header above).
-        //   row = (lane_idx / 16) * 4 + ((lane_idx % 16) / 2) % 4    ? [0, 16)
-        //   col = ((lane_idx % 2) + ((lane_idx % 16) / 8) * 2) * 8   ? {0, 8, 16, 24}
-        // See get_block_lane_offset() / get_block_fixed_offset() for the address math.
-        const uint32_t lane_idx         = opus::lane_id();
-        const uint32_t lane_idx_in_grp  = lane_idx % 16;
-        const uint32_t row              = (lane_idx / 16) * 4 + (lane_idx_in_grp / 2) % 4;
-        const uint32_t col              = ((lane_idx % 2) + (lane_idx_in_grp / 8) * 2) * 8;
-        const uintptr_t p_lds_v_lane    = p_lds_v + get_block_lane_offset(row, col);
         constexpr uint32_t kFixedOffset = get_block_fixed_offset<kRowOffset, kColOffset>();
-
-        hkm::ds_read_b64_tr_b8<GPR>(p_lds_v_lane, kFixedOffset);
+        const uint32_t lane_idx         = opus::lane_id();
+        if constexpr(sizeof(kv_t) == 1)
+        {
+            // Per-lane (row, col): ds_read_b64_tr_b8 input footprint (see header above).
+            //   row = (lane_idx / 16) * 4 + ((lane_idx % 16) / 2) % 4    ? [0, 16)
+            //   col = ((lane_idx % 2) + ((lane_idx % 16) / 8) * 2) * 8   ? {0, 8, 16, 24}
+            const uint32_t lane_idx_in_grp = lane_idx % 16;
+            const uint32_t row             = (lane_idx / 16) * 4 + (lane_idx_in_grp / 2) % 4;
+            const uint32_t col             = ((lane_idx % 2) + (lane_idx_in_grp / 8) * 2) * 8;
+            const uintptr_t p_lds_v_lane   = p_lds_v + get_block_lane_offset(row, col);
+            hkm::ds_read_b64_tr_b8<GPR>(p_lds_v_lane, kFixedOffset);
+        }
+        else
+        {
+            // bf16 no-padding 16x32 sub-block (V40-style). A 16x32 V tile = 4 vgprs =
+            // two ds_read_b64_tr_b16 issues over the two 16-col halves of the sub-block.
+            // Per-lane source: row_in_sb = lane>>2, in_sb = row_in_sb*64 + (lane&3)*8.
+            // No bank swizzle (correctness-first) and no finalize swap (tr_b16 -> mfma A).
+            constexpr uint32_t kSb = sub_block_byte_offset_16(kRowOffset / kSubBlockRows16,
+                                                              kColOffset / kSubBlockCols16);
+            // ds-immediate form (same fix as load_k_to_gpr): shared per-lane base + constant in
+            // the ds immediate, so V col-tile reads don't spill per-col-tile addresses into AGPRs.
+            constexpr uint32_t kImm  = kSb & 0xFFFFu;
+            constexpr uint32_t kAddr = kSb & ~0xFFFFu;
+            // VERIFIED tr_b16 V addressing matching p_mfma's kvpos order (cdna4-isa probe MODE 7).
+            // The PV mma contracts A[lane][i] with B[lane][i] at the SAME slot, so V (A) must use the
+            // SAME physical-kvpos-per-slot as p_mfma (B). p_mfma keeps the QK D-layout order
+            // (pack is order-preserving): g_B(lane,i) = (i/4)*16 + (lane/16)*4 + (i%4). Solving the
+            // tr_b16 contract out[lane][e]=M[4e+l/4][l%4] for that target gives:
+            //   row_off = (lane/16)*4 + (lane%16)/4 ; col_off = (lane%4)*4 + (kColOffset%32)
+            //   2nd issue = +16 K-rows (+1024B) because g_B's i=4..7 are kvpos+16 (NOT +4).
+            // => kv_0_top[lane][i] = V[kvpos = kRowOffset + g_B(lane,i)][outcol = kColOffset + lane%16].
+            constexpr uint32_t kColHalf = kColOffset % kSubBlockCols16; // 0 or 16 (outcol half)
+            const uint32_t row_off = (lane_idx / 16u) * 4u + ((lane_idx % 16u) / 4u);
+            const uint32_t col_off = (lane_idx % 4u) * 4u + kColHalf;
+            const uint32_t in_sb   = row_off * (kSubBlockCols16 * 2u) + col_off * 2u;
+            const uintptr_t base   = p_lds_v + in_sb + kAddr;
+            hkm::ds_read_b64_tr_b16<GPR>(base, kImm);
+            hkm::ds_read_b64_tr_b16<GPR + 2>(base, kImm + 16u * kSubBlockCols16 * 2u); // +1024B = +16 kvpos
+        }
 #else
         static_assert(false,
                       "KVManager8bitsV3::load_transposed_v_to_gpr() is not expected to be called.");
@@ -1434,7 +1721,12 @@ class KvManager8bitsV3
     __device__ __forceinline__ void static finalize_load_transposed_v_to_gpr()
     {
 #if defined(__gfx950__)
-        asm volatile("v_swap_b32 v[%0], v[%1]" : : "i"(GPR_0 + 1), "i"(GPR_1));
+        // bf16 uses ds_read_b64_tr_b16 which already yields the col-major MFMA B
+        // layout -> no swap needed. fp8 (tr_b8) needs the intra-lane v_swap.
+        if constexpr(sizeof(kv_t) == 1)
+        {
+            asm volatile("v_swap_b32 v[%0], v[%1]" : : "i"(GPR_0 + 1), "i"(GPR_1));
+        }
 #else
         static_assert(
             false,

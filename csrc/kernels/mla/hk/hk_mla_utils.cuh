@@ -215,6 +215,16 @@ __device__ __forceinline__ void pack_4f32_to_fp8()
     }
 }
 
+// Pack 2 f32 (SRC_GPR, SRC_GPR+1) into 1 bf16 vgpr (DST_GPR). bf16 analogue of
+// pack_4f32_to_fp8 (which is 4:1); v_cvt_pk_bf16_f32 is 2:1.
+template <uint32_t DST_GPR, uint32_t SRC_GPR>
+__device__ __forceinline__ void pack_2f32_to_bf16()
+{
+    asm volatile("v_cvt_pk_bf16_f32 v[%0], v[%1], v[%2]"
+                 :
+                 : "n"(DST_GPR), "n"(SRC_GPR), "n"(SRC_GPR + 1));
+}
+
 template <uint32_t GPR_START, typename comp_t>
 __device__ __forceinline__ comp_t max_8()
 {

@@ -945,6 +945,9 @@ def test_mla(
 ):
     ret = {}
 
+    if os.environ.get("DBG_LOAD") or os.environ.get("DBG_SEED"):
+        torch.manual_seed(0)  # deterministic KV/Q so e2e sorted-diff is comparable across runs
+
     out_dtype = torch.bfloat16
     kv_max_sz = (
         65536 * 32
@@ -992,6 +995,17 @@ def test_mla(
         dtype=torch.bfloat16,
     )
 
+    _sent = os.environ.get("DBG_SENT")
+    if _sent:
+        # Sentinel V injection: V[kvpos][outcol] = outcol ("col") or kvpos ("row")
+        # so the dumped kv_0 decodes EXACTLY (integers, bf16-exact) with no false matches.
+        _qhdl = kv_lora_rank + qk_rope_head_dim
+        _kvf = kv_buffer.reshape(num_page, _qhdl)
+        for _kp in range(min(64, num_page)):
+            _pg = int(kv_indices[_kp].item())
+            for _c in range(512):
+                _kvf[_pg, _c] = float(_c if _sent == "col" else _kp)
+
     kv_nope_scale_factors_fp32 = None
     kv_nope_buffer_fp8 = None
     kv_rope_buffer_bf16 = None
@@ -1027,6 +1041,19 @@ def test_mla(
     qo_indptr[1 : batch_size + 1] = torch.cumsum(seq_lens_qo, dim=0)
     total_q = qo_indptr[-1].item()
     q = torch.randn((total_q, nhead, qk_head_dim), dtype=torch.bfloat16)
+    if os.environ.get("DBG_ZERO_QROPE"):
+        _m = os.environ.get("DBG_ZERO_QROPE")
+        # "1"/"0": both rope=that. "one": both=1. "q1k0": q_rope=1,k_rope=0. "q0k1": q_rope=0,k_rope=1.
+        if _m == "q1k0":
+            _qv, _kv = 1.0, 0.0
+        elif _m == "q0k1":
+            _qv, _kv = 0.0, 1.0
+        elif _m == "one":
+            _qv, _kv = 1.0, 1.0
+        else:
+            _qv, _kv = 0.0, 0.0
+        q[:, :, kv_lora_rank:] = _qv
+        kv_buffer.reshape(num_page, kv_lora_rank + qk_rope_head_dim)[:, kv_lora_rank:] = _kv
     # troch implementation
     out_ref, lse_ref = torch_mla_extend(
         q,
@@ -1311,6 +1338,311 @@ def test_mla(
             return_lse=return_lse,
         )
 
+        if os.environ.get("DBG_LOAD"):
+            qk_head_dim_l = kv_lora_rank + qk_rope_head_dim  # 576
+            kvc = kv_buffer.reshape(num_page, qk_head_dim_l)[kv_indices.long()]
+            Kg = kvc[:64].float().cpu()  # gathered K tile rows 0..63
+            mode = os.environ.get("DBG_LOAD")
+            if mode == "pcomp":
+                # Stage-2: raw QK scores p_comp for warp 0 (qheads 0..15).
+                # out32[lane*16 + r], r=base*4+k -> score[kvpos=base*16+(lane//16)*4+k][qhead=lane%16]
+                Qg = q[0, 0:16, :].float().cpu()  # [16 qhead, 576]
+                qk = (Kg @ Qg.T).cpu()  # [64 kvpos, 16 qhead], raw (no scale)
+                dumped = attn_logits.reshape(-1).float()[:1024].cpu()  # warp0: 64 lanes*16
+                exp = torch.zeros(64 * 16, device="cpu")
+                for lane in range(64):
+                    for r in range(16):
+                        base = r // 4
+                        k = r % 4
+                        kvpos = base * 16 + (lane // 16) * 4 + k
+                        qhead = lane % 16
+                        exp[lane * 16 + r] = qk[kvpos, qhead]
+                # layout-independent check: does the multiset of dumped scores match qk?
+                qk_nope = (Kg[:, :512] @ Qg[:, :512].T).cpu()
+                qk_rope = (Kg[:, 512:] @ Qg[:, 512:].T).cpu()
+                ds = torch.sort(dumped)[0]
+                md_full = (ds - torch.sort(qk.reshape(-1))[0]).abs().max().item()
+                md_nope = (ds - torch.sort(qk_nope.reshape(-1))[0]).abs().max().item()
+                md_rope = (ds - torch.sort(qk_rope.reshape(-1))[0]).abs().max().item()
+                ntile = {}
+                for N in (1, 2, 4, 8, 16):
+                    qkN = (Kg[:, : N * 32] @ Qg[:, : N * 32].T).cpu()
+                    ntile[N] = (ds - torch.sort(qkN.reshape(-1))[0]).abs().max().item()
+                print(
+                    f"DBG_LOAD(pcomp) SORTED: full={md_full:.2f} nope={md_nope:.2f} rope={md_rope:.2f} "
+                    f"| first-N-tiles: " + " ".join(f"N{N}={ntile[N]:.2f}" for N in (1, 2, 4, 8, 16))
+                )
+                d = (dumped - exp).abs()
+                # relative: scores can be ~24, use rel tol
+                rel = d / (exp.abs() + 1e-3)
+                print(
+                    f"DBG_LOAD(pcomp): max_abs_diff={d.max().item():.4f} "
+                    f"max_rel={rel.max().item():.4f} "
+                    f"mismatch={(rel > 0.05).float().mean().item() * 100:.2f}% "
+                    f"dumped[:6]={[round(x,2) for x in dumped[:6].tolist()]} "
+                    f"exp[:6]={[round(x,2) for x in exp[:6].tolist()]}"
+                )
+                return None, 0.0
+            if mode == "smax":
+                # Stage-2: p_comp after softmax = P = exp(score*sm_scale - rowmax[qhead]).
+                Qg = q[0, 0:16, :].float().cpu()
+                qk = (Kg @ Qg.T).cpu()  # [64 kvpos, 16 qhead]
+                sms = 1.0 / (qk_head_dim_l**0.5)
+                scaled = qk * sms
+                rowmax = scaled.max(dim=0).values  # [16] per qhead (max over 64 kvpos)
+                P = torch.exp(scaled - rowmax)  # [64, 16]
+                dumped = attn_logits.reshape(-1).float()[:1024].cpu()
+                exp = torch.zeros(64 * 16, device="cpu")
+                for lane in range(64):
+                    for r in range(16):
+                        kvpos = (r // 4) * 16 + (lane // 16) * 4 + (r % 4)
+                        exp[lane * 16 + r] = P[kvpos, lane % 16]
+                ds = torch.sort(dumped)[0]
+                md = (ds - torch.sort(P.reshape(-1))[0]).abs().max().item()
+                d = (dumped - exp).abs()
+                rel = d / (exp.abs() + 1e-3)
+                print(
+                    f"DBG_LOAD(smax) SORTED multiset diff={md:.5f} | "
+                    f"max_abs_diff={d.max().item():.5f} max_rel={rel.max().item():.4f} "
+                    f"mismatch={(rel > 0.02).float().mean().item() * 100:.2f}% "
+                    f"dumped[:6]={[round(x,4) for x in dumped[:6].tolist()]} "
+                    f"exp[:6]={[round(x,4) for x in exp[:6].tolist()]}"
+                )
+                return None, 0.0
+            if mode == "ppack":
+                # Stage-3a: p_mfma = bf16(P). 8 u32/lane -> 16 bf16/lane (p_comp layout).
+                Qg = q[0, 0:16, :].float().cpu()
+                qk = (Kg @ Qg.T).cpu()
+                sms = 1.0 / (qk_head_dim_l**0.5)
+                scaled = qk * sms
+                rowmax = scaled.max(dim=0).values
+                P = torch.exp(scaled - rowmax)  # [64,16] fp32
+                Pb = P.to(torch.bfloat16).float()  # reference bf16(P)
+                dumped = (
+                    attn_logits.reshape(-1)[:512].contiguous().view(torch.bfloat16).float()[:1024].cpu()
+                )
+                exp = torch.zeros(64 * 16, device="cpu")
+                for lane in range(64):
+                    for r in range(16):
+                        kvpos = (r // 4) * 16 + (lane // 16) * 4 + (r % 4)
+                        exp[lane * 16 + r] = Pb[kvpos, lane % 16]
+                d = (dumped - exp).abs()
+                print(
+                    f"DBG_LOAD(ppack): max_abs_diff={d.max().item():.6f} "
+                    f"mismatch={(d > 0.004).float().mean().item() * 100:.2f}% "
+                    f"dumped[:6]={[round(x,4) for x in dumped[:6].tolist()]} "
+                    f"exp[:6]={[round(x,4) for x in exp[:6].tolist()]}"
+                )
+                return None, 0.0
+            if mode == "vload":
+                # Stage-3b-V: finalized kv_0 = V[rows0-31,cols0-31] transposed (bf16). Layout-
+                # independent multiset check vs reference V (= Kg value part, cols 0-511).
+                Vref = Kg[0:32, 0:32].reshape(-1).cpu()  # 1024 values
+                dumped = (
+                    attn_logits.reshape(-1)[:512].contiguous().view(torch.bfloat16).float()[:1024].cpu()
+                )
+                ds = torch.sort(dumped)[0]
+                vs = torch.sort(Vref)[0]
+                md = (ds - vs).abs().max().item()
+                # dumped_bf16[lane*16 + e]: e0-7 = kv_0_top, e8-15 = kv_0_bot.
+                # H1 (transposed A: row=outcol, col=kvpos): top[l][e]=Kg[(l//16)*8+e][l%16]
+                #                                            bot[l][e]=Kg[(l//16)*8+e][16+l%16]
+                # H2 (direct: row=kvpos, col=outcol):        top[l][e]=Kg[l%16][(l//16)*8+e]
+                #                                            bot[l][e]=Kg[16+l%16][(l//16)*8+e]
+                h1 = torch.zeros(1024, device="cpu")
+                h2 = torch.zeros(1024, device="cpu")
+                for lane in range(64):
+                    for e in range(8):
+                        kp = (lane // 16) * 8 + e
+                        h1[lane * 16 + e] = Kg[kp, lane % 16]
+                        h1[lane * 16 + 8 + e] = Kg[kp, 16 + lane % 16]
+                        h2[lane * 16 + e] = Kg[lane % 16, kp]
+                        h2[lane * 16 + 8 + e] = Kg[16 + lane % 16, kp]
+                d1 = (dumped - h1).abs().max().item()
+                d2 = (dumped - h2).abs().max().item()
+                print(
+                    f"DBG_LOAD(vload) SORTED diff={md:.4f} | H1(transposed) diff={d1:.4f} "
+                    f"H2(direct) diff={d2:.4f}"
+                )
+                if os.environ.get("DBG_SENT"):
+                    # Sentinel mode: dumped value = outcol (DBG_SENT=col) or kvpos (=row),
+                    # directly readable per (lane, e0..7 = kv_0_top). No false matches.
+                    field = os.environ.get("DBG_SENT")
+                    print(f"  SENTINEL field={field} (kv_0_top e0..7):")
+                    for lane in range(64):
+                        vals = [int(round(dumped[lane * 16 + e].item())) for e in range(8)]
+                        print(f"    L{lane:2d}: {vals}")
+                    return None, 0.0
+                # brute-force the actual (lane,e)->(kvpos,outcol) map for lanes 0,1,16,17
+                Kf = Kg[0:32, 0:32]
+                for lane in (0, 1, 2, 16, 17):
+                    maps = []
+                    for e in range(16):
+                        val = dumped[lane * 16 + e].item()
+                        hit = (Kf - val).abs() < 1e-4
+                        idx = hit.nonzero()
+                        maps.append(tuple(idx[0].tolist()) if len(idx) else "?")
+                    print(f"  lane {lane}: (kvpos,outcol) per e0..15 = {maps}")
+                return None, 0.0
+            if mode == "oaccu":
+                # Stage-3b: oaccu_0_a (pre-normalize PV) = O_unnorm[qhead 0-15][outcol 0-15].
+                # O_unnorm = bf16(P).T @ bf16(V); oaccu_0_a[lane][r]=O[qhead=lane%16][outcol=(lane//16)*4+r]
+                Qg = q[0, 0:16, :].float().cpu()
+                qk = (Kg @ Qg.T).cpu()
+                sms = 1.0 / (qk_head_dim_l**0.5)
+                scaled = qk * sms
+                rowmax = scaled.max(dim=0).values
+                P = torch.exp(scaled - rowmax)  # [64 kvpos,16 qhead]
+                Pb = P.to(torch.bfloat16).float()
+                Vb = Kg[:, :512].to(torch.bfloat16).float()  # [64 kvpos, 512 outcol]
+                O = (Pb.T @ Vb).cpu()  # [16 qhead, 512 outcol]
+                dumped = attn_logits.reshape(-1).float()[:256].cpu()
+                eO = torch.zeros(256, device="cpu")
+                eOT = torch.zeros(256, device="cpu")
+                for lane in range(64):
+                    for r in range(4):
+                        qh = lane % 16
+                        oc = (lane // 16) * 4 + r
+                        eO[lane * 4 + r] = O[qh, oc]
+                        eOT[lane * 4 + r] = O[oc, qh] if oc < 16 else 0.0
+                dO = (dumped - eO).abs().max().item()
+                dOT = (dumped - eOT).abs().max().item()
+                # sorted multiset: are the oaccu VALUES = O[0:16,0:16] values (layout aside)?
+                Osub = O[0:16, 0:16].reshape(-1).cpu()
+                msd = (torch.sort(dumped)[0] - torch.sort(Osub)[0]).abs().max().item()
+                print(
+                    f"DBG_LOAD(oaccu): vs O[qh][oc] diff={dO:.3f} | vs O^T diff={dOT:.3f} | "
+                    f"SORTED vs O[0:16,0:16] diff={msd:.4f} (small=>values OK, layout differs) "
+                    f"dumped[:5]={[round(x,3) for x in dumped[:5].tolist()]}"
+                )
+                if os.environ.get("DBG_SENT") == "col":
+                    # tile_idx=4 oaccu_0_a under col-sentinel: oaccu[lane*4+r] should == 256+(lane//16)*4+r
+                    print("  COL-SENT oaccu(tile4) raw (expect 256+(lane//16)*4+r):")
+                    for lane in range(0, 64, 16):
+                        got = [int(round(dumped[lane * 4 + r].item())) for r in range(4)]
+                        exp = [256 + (lane // 16) * 4 + r for r in range(4)]
+                        print(f"    lane{lane:2d}: got={got} exp={exp}")
+                return None, 0.0
+            if mode == "lds16":
+                dumped = (
+                    attn_logits.reshape(-1)[:256].contiguous().view(torch.bfloat16).float()[:512].cpu()
+                )
+                ones = (dumped - 1.0).abs() < 1e-3
+                print(
+                    f"DBG_LOAD(lds16): async wrote rope sub-block16; expect ALL 1.0 -> "
+                    f"{int(ones.float().sum())}/512 are 1.0; dumped[:8]={[round(x,3) for x in dumped[:8].tolist()]}"
+                )
+                return None, 0.0
+            if mode == "kc8":
+                # idx-4 direct LDS read of curr col-tile 8 (linear write layout).
+                dumped = (
+                    attn_logits.reshape(-1)[:256].contiguous().view(torch.bfloat16).float()[:512].cpu()
+                )
+                exp = torch.zeros(512, device="cpu")
+                for k in range(512):
+                    b = 2 * k
+                    exp[k] = Kg[b // 64, 256 + (b % 64) // 2]
+                d = (dumped - exp).abs()
+                zf = (dumped.abs() < 1e-6).float().mean().item() * 100
+                print(
+                    f"DBG_LOAD(kc8): max_abs_diff={d.max().item():.4f} lds_zero={zf:.0f}% "
+                    f"dumped[:6]={[round(x,3) for x in dumped[:6].tolist()]} "
+                    f"exp[:6]={[round(x,3) for x in exp[:6].tolist()]}"
+                )
+                return None, 0.0
+            if mode in ("agpr", "q", "kin", "qin", "qin4", "kin4", "krope"):
+                # Stage-1b/1c/1d: A/B-operand layout for warp 0, sub_block(rt0,ct0).
+                # lane l, reg k, half j -> src[l%16][(l//16)*8 + 2k + j]; idx = l*8 + 2k + j.
+                src = q[0, 0:16, :].float().cpu() if mode in ("q", "qin", "qin4") else Kg
+                col_base = 256 if mode in ("qin4", "kin4") else (512 if mode == "krope" else 0)
+                if mode in ("kin", "qin", "qin4", "kin4", "krope"):
+                    # in-loop dump went to split_output (fp32 buffer) as bf16-packed uint32.
+                    dumped = (
+                        attn_logits.reshape(-1)[:256].contiguous().view(torch.bfloat16).float()[:512].cpu()
+                    )
+                else:
+                    dumped = out_asm[0].reshape(-1).float()[:512].cpu()
+                exp = torch.zeros(512, device="cpu")
+                for lane in range(64):
+                    for k in range(4):
+                        for j in range(2):
+                            idx = lane * 8 + 2 * k + j
+                            exp[idx] = src[lane % 16, col_base + (lane // 16) * 8 + 2 * k + j]
+            else:
+                # Stage-1: raw LDS K-tile (no-pad sub-blocks).
+                dumped = out_asm[0].reshape(-1).float()[:32768].cpu()
+                i = torch.arange(32768, device="cpu")
+                b = 2 * i
+                s = b // 1024
+                exp = Kg[(s % 4) * 16 + (b % 1024) // 64, (s // 4) * 32 + ((b % 1024) % 64) // 2]
+                # per-col-tile (sub-block s = ct*4 + rt) mismatch + LDS zero-fraction
+                for ct in (0, 4, 8, 12):
+                    m = ((s // 4) == ct)
+                    dd = (dumped[m] - exp[m]).abs().max().item()
+                    zf = (dumped[m].abs() < 1e-6).float().mean().item() * 100
+                    print(f"  col-tile {ct}: max_diff={dd:.3f} lds_zero={zf:.0f}%")
+            d = (dumped - exp).abs()
+            print(
+                f"DBG_LOAD({mode}): max_abs_diff={d.max().item():.5f} "
+                f"mismatch={(d > 0.02).float().mean().item() * 100:.2f}% "
+                f"dumped[:8]={[round(x,3) for x in dumped[:8].tolist()]} "
+                f"exp[:8]={[round(x,3) for x in exp[:8].tolist()]}"
+            )
+            return None, 0.0
+
+        if os.environ.get("DBG_SENT") == "col":
+            # V[kvpos][outcol]=outcol -> normalized out[qh][oc] should == oc (independent of qh).
+            # col-sentinel is BLIND to the kvpos axis (V same for all kvpos): it ONLY validates the
+            # outcol+qhead output layout. Any deviation reveals the EXACT output permutation.
+            A = out_asm[0].float().cpu()  # [nhead, 512]
+            print("DBG_SENT(col) out (expect out[qh][oc]==oc):")
+            a0 = A[0]
+            wrong = [oc for oc in range(512) if int(round(a0[oc].item())) != oc]
+            print(f"  qh0 outcol layout: {512-len(wrong)}/512 correct; wrong positions={wrong[:40]}")
+            for oc in wrong[:16]:
+                print(f"    pos {oc:3d} holds outcol {int(round(a0[oc].item()))}")
+            # qhead axis: is every qhead identical (== oc)? count rows that are pure identity
+            ident = sum(1 for h in range(A.shape[0])
+                        if all(int(round(A[h, oc].item())) == oc for oc in range(512)))
+            print(f"  qheads with perfect identity: {ident}/{A.shape[0]}")
+            return None, 0.0
+        if os.environ.get("DBG_PERM"):
+            A = out_asm[0].float().cpu()  # [nhead, 512]
+            R = out_ref[0].float().cpu()
+            nh = A.shape[0]
+            print(f"DBG_PERM nhead={nh}")
+            # Robust outcol permutation for qh0: ref oc -> kernel oc, require EXACT (d<1e-3)
+            a0, r0 = A[0], R[0]
+            perm = {}
+            for oc in range(512):
+                diffs = (a0 - r0[oc]).abs()
+                j = int(diffs.argmin())
+                if float(diffs[j]) < 1e-3:
+                    perm[oc] = j
+            inv = {}
+            for k, v in perm.items():
+                inv.setdefault(v, []).append(k)
+            bij = sum(1 for v in inv if len(inv[v]) == 1)
+            print(f"  qh0 outcol exact matches={len(perm)}/512  unique_targets={bij}")
+            # probe powers-of-2 (reveals a bit-permutation if one exists)
+            for oc in [1, 2, 4, 8, 16, 32, 64, 128, 256, 3, 5, 17, 33, 48, 49]:
+                print(f"    ref_oc {oc:3d} -> kernel_oc {perm.get(oc,'?')}")
+            # full map first 64 (tile 0 block)
+            print("  qh0 ref_oc->kernel_oc [0..63]:")
+            print("   ", [perm.get(oc, -1) for oc in range(64)])
+            # qhead axis: does ref[qh,0] land in kernel[qh,*]?
+            for h in [0, 1, 2, 15, 16, 32, 63]:
+                v = R[h, 0].item()
+                fl = (A - v).abs()
+                idx = int(fl.argmin().item())
+                print(f"  R[qh{h:2d},oc0]={v:7.3f} -> A[qh{idx//512},oc{idx%512}] d={float(fl.reshape(-1)[idx]):.4f}")
+        _a = out_asm.reshape(-1).float().cpu()
+        _r = out_ref.reshape(-1).float().cpu()
+        _sd = (torch.sort(_a)[0] - torch.sort(_r)[0]).abs().max().item()
+        print(
+            f"DBG e2e: sorted(out) vs sorted(ref) diff={_sd:.5f} "
+            f"(small=>permutation/layout bug, values OK; large=>value bug)"
+        )
         err = checkAllclose(
             out_ref,
             out_asm,

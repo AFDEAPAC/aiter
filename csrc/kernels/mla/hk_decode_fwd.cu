@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 
+#include "hk/mi35x_v32_fwd_decode_m16x4_bf16_bf16.cuh"
 #include "hk/mi35x_v32_fwd_decode_m16x4_fp8_fp8.cuh"
 #include "hk/mi35x_v32_fwd_decode_m16x8_fp8_fp8.cuh"
 #include "hk/mi3xx_v32_fwd_decode_m16x8_fp8_fp8.cuh"
@@ -70,19 +71,39 @@ void hk_mla_decode_fwd(torch::Tensor& query,
         const std::string gfx = get_gpu_arch();
         if(gfx == "gfx950")
         {
-            hk_mi35x_mla_v32_fwd_decode_m16x4_fp8_fp8(query,
-                                                      kv_buffer,
-                                                      qo_indptr,
-                                                      kv_indptr,
-                                                      kv_page_indices,
-                                                      kv_last_page_lens,
-                                                      work_indptr,
-                                                      work_info_set,
-                                                      max_seqlen_q,
-                                                      softmax_scale,
-                                                      split_output,
-                                                      split_lse,
-                                                      final_output);
+            const bool q_is_bf16 = (query.scalar_type() == at::ScalarType::BFloat16);
+            if(q_is_bf16)
+            {
+                hk_mi35x_mla_v32_fwd_decode_m16x4_bf16_bf16(query,
+                                                            kv_buffer,
+                                                            qo_indptr,
+                                                            kv_indptr,
+                                                            kv_page_indices,
+                                                            kv_last_page_lens,
+                                                            work_indptr,
+                                                            work_info_set,
+                                                            max_seqlen_q,
+                                                            softmax_scale,
+                                                            split_output,
+                                                            split_lse,
+                                                            final_output);
+            }
+            else
+            {
+                hk_mi35x_mla_v32_fwd_decode_m16x4_fp8_fp8(query,
+                                                          kv_buffer,
+                                                          qo_indptr,
+                                                          kv_indptr,
+                                                          kv_page_indices,
+                                                          kv_last_page_lens,
+                                                          work_indptr,
+                                                          work_info_set,
+                                                          max_seqlen_q,
+                                                          softmax_scale,
+                                                          split_output,
+                                                          split_lse,
+                                                          final_output);
+            }
         }
         else
         {
