@@ -12,7 +12,7 @@ upstream aiter. Deep design notes + the full experiment ledger live in
 | impl | what it is | best shapes | perf vs hand-asm | status |
 |---|---|---|---|---|
 | **OPUS** `mla_decode_opus` | MLA decode written in aiter's OPUS single-header tile DSL. Absorbed **D=512** + a **RoPE D=576** variant; split-KV + qpack for small batch. | small/medium batch, qlen≥2 (qpack/split-KV that asm lacks); beats asm on many shapes | ~1.0–1.3× of asm; residual gap is **compiler-owned register allocation** (not algorithm/memory) | correct (pytest green); optimized to the compiler-regalloc floor |
-| **HK** `hk_mla_decode_fwd` | MLA decode in the HipKittens tile DSL (manual AGPR register control). bf16 qh64 + fp8 qh64/qh128 decode. | the hottest qh64/qh128 single-position decode | ~1.05–1.07× of asm (bf16 qh64); residual is asm's **holistic hand-schedule** | correct (staged-verified); at the HIP-source floor |
+| **HK** `hk_mla_decode_fwd` | MLA decode in the HipKittens tile DSL (manual AGPR register control). bf16 qh64 + fp8 qh64/qh128 decode. Any (qh,qlen) split of M (e.g. bf16 qh32/qlen2, qh16/qlen4) = MTP/qlen>1 supported. | the hottest qh64/qh128 single-position decode; also qlen>1 MTP | ~1.05–1.07× of asm (bf16 qh64); residual is asm's **holistic hand-schedule** | correct (staged-verified, incl. qlen>1 after the STAGE-34 split-output bound fix); at the HIP-source floor |
 
 The two are complementary: OPUS = flexible scaffolding (split-KV/qpack/dispatch) but compiler regalloc;
 HK = manual register pinning but shallower compiler-scheduled pipeline. The natural next step is a

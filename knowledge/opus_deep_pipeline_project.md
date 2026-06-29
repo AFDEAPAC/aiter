@@ -2326,3 +2326,24 @@ flat. Upstream's recipe wins in GQA prefill where the compiler would otherwise N
 mma; here the kernel author pre-clustered it by hand. CONCLUSION: explicit sched_group_barrier is a real, endorsed HK
 technique, but it only helps when there is UN-clustered VALU/EXP co-resident with binding mma; for an already-hand-
 scheduled mfma+HBM-bound kernel it is redundant. Keep it in the toolbox (STAGE 30), do not apply it here.
+
+#### STAGE 34 (2026-06): bf16 MTP (qlen>1) correctness bug -- split-output OOB-bound clipped qpos>0 to zero
+TRIGGER: tested whether the bf16 m16x4 kernel handles different (qh,qlen) splits of M=64 (qh32/qlen2, qh16/qlen4),
+since the host check (`:1677-1688`) + use_hk gate (`mla.py:439`) accept any qh*qlen==kBlockM. qh64/qlen1 PASS but
+qh32/qlen2 + qh16/qlen4 FAIL (~40% elems zero, max-abs-delta ~0.2).
+ISOLATION (decisive): fp8 m16x4 MTP (qh32/qlen2, qh16/qlen4) PASS; asm same config PASS (sorted-diff 0.001) =>
+bug is bf16-SPECIFIC, not the test/metadata. Harness self-flag `sorted(out) vs sorted(ref) diff=0.0295` (small) =>
+permutation/positional, not a value/math bug -- pointed straight at the OUTPUT write, not QK/softmax/PV.
+ROOT CAUSE (file:line evidence): the split-output epilogue writes row_vram_st = warp_idx*16 + lane (0..kBlockM-1 =
+qseqlen*num_qheads rows; `OManager32bitsV2::output_to_vram` hk_mla_buffer_managers.cuh:2261). The bf16 kernel used
+kCheckOOB=true with `qo_end = partial_qo_loc + 1` => num_records = 1*num_qheads*kVoHeadDim (`:2269-2271`), covering
+only num_qheads rows. For qlen>1 the qpos>0 warps (>= waves_per_head) write rows num_qheads..kBlockM-1 which EXCEED
+num_records => buffer_store drops them => qpos>0 output stays ZERO. qlen=1 passed because rows 0..63 <= num_qheads(64).
+fp8 used kCheckOOB=false (0xFFFFFFFF, unbounded) so it was never clipped -- which is exactly why fp8 MTP passed.
+FIX (1-liner x2, mi35x_..._bf16.cuh split epilogue): `partial_qo_loc + 1` -> `partial_qo_loc + num_wave_group`
+(num_wave_group = kBlockM>>log2_num_qheads = qseqlen), so the safety bound covers all qseqlen qo slots the write
+touches. Keeps the memfault-safety intent; correct for qlen=1 (num_wave_group==1) too.
+VERIFY: qh64/qlen1 (control, no regression) + qh32/qlen2 + qh16/qlen4 all PASS, 26/26 across b{1,3,16} x c{21,1200,8192}
+and c{64,256,16384}. Rebuilt + installed. LESSON: a kCheckOOB resource bound derived from a qlen=1 assumption silently
+clips, not faults -- and the only dtype that hit it was the one that opted INTO the bound. Cross-check sibling kernels'
+kCheckOOB true/false when a bug is dtype-specific + positional.

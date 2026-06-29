@@ -1409,14 +1409,17 @@ __global__ __launch_bounds__(T::kNumThreads, T::kOccupancy)
                     }
                     else
                     {
-                        // kCheckOOB=true + qo_end=partial_qo_loc+1 -> bound the split-output store
-                        // resource to exactly this slot (num_records=1*num_qheads*kVoHeadDim*sizeof)
-                        // so a miscompiled/clobbered store address is a no-op instead of a memfault.
+                        // kCheckOOB=true -> bound the split-output store resource to exactly this
+                        // work item's output so a miscompiled/clobbered store address is a no-op
+                        // instead of a memfault. The write spans kBlockM = qseqlen*num_qheads rows
+                        // (row_vram_st = warp_idx*16 + lane, 0..kBlockM-1), so the bound must cover
+                        // num_wave_group (=qseqlen) qo slots, NOT 1 -- otherwise qpos>0 rows
+                        // (warps >= waves_per_head) exceed num_records and get clipped to zero.
                         split_o_manager.template output_to_vram<oaccu_base, col_off, true>(
                             params.split_output.raw_ptr,
                             warp_idx,
                             partial_qo_loc,
-                            partial_qo_loc + 1,
+                            partial_qo_loc + num_wave_group,
                             p_lds_o,
                             num_qheads);
                         split_o_manager
@@ -1424,7 +1427,7 @@ __global__ __launch_bounds__(T::kNumThreads, T::kOccupancy)
                                 params.split_output.raw_ptr,
                                 warp_idx,
                                 partial_qo_loc,
-                                partial_qo_loc + 1,
+                                partial_qo_loc + num_wave_group,
                                 p_lds_o,
                                 num_qheads);
                     }
