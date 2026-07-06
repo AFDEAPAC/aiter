@@ -11,6 +11,7 @@
 #include "aiter_hip_common.h"
 #include "aiter_stream.h"
 #include "aiter_tensor.h"
+#include <cstdlib>
 
 void pa_sparse_prefill_opus_fwd(aiter_tensor_t& q,
                                 aiter_tensor_t& unified_kv,
@@ -108,20 +109,42 @@ void pa_sparse_prefill_opus_fwd(aiter_tensor_t& q,
 
     using TraitsBF16 = pa_sparse_prefill_traits<16, 32, 512, 8, bf16_t>;
     using TraitsFP16 = pa_sparse_prefill_traits<16, 32, 512, 8, fp16_t>;
+    using TraitsFP8 = pa_sparse_prefill_traits<16, 32, 512, 8, bf16_t, fp8_t>; // gfx942: bf16 LDS storage, fp8 MMA operands
 
     auto launch = [&](auto traits_tag) {
         using Traits           = decltype(traits_tag);
         const int num_h_tiles  = ceil_div(H, Traits::Q_TILE_SIZE);
         const int num_h_blocks = ceil_div(num_h_tiles, Traits::NUM_WARPS);
-        dim3 grid(N, num_h_blocks, 1);
+        static const char* _sz=std::getenv("OPUS_SPLITZ");
+        const int _splitz=(_sz&&_sz[0])?atoi(_sz):2;
+        static void* _partial=nullptr; static void* _pm=nullptr; static void* _pl=nullptr;
+        static size_t _cap_o=0; static size_t _cap_s=0;
+        if(_splitz>1){
+            size_t _pn=(size_t)_splitz*N*H*D*sizeof(float);   // un-normalized o (float)
+            size_t _ps=(size_t)_splitz*N*H*sizeof(float);     // per-(z,n,h) m and l
+            if(_pn>_cap_o){ if(_partial) HIP_CALL(hipFree(_partial)); HIP_CALL(hipMalloc(&_partial,_pn)); _cap_o=_pn; }
+            if(_ps>_cap_s){ if(_pm) HIP_CALL(hipFree(_pm)); if(_pl) HIP_CALL(hipFree(_pl)); HIP_CALL(hipMalloc(&_pm,_ps)); HIP_CALL(hipMalloc(&_pl,_ps)); _cap_s=_ps; }
+        }
+        kargs.partial_ptr=_partial;
+        kargs.partial_m_ptr=_pm;
+        kargs.partial_l_ptr=_pl;
+        kargs.splitz=_splitz;
+        dim3 grid(N, num_h_blocks, _splitz);
         dim3 block(Traits::BLOCK_SIZE);
         pa_prefill_kernel<Traits><<<grid, block, 0, stream>>>(kargs);
+        if(_splitz>1){
+            dim3 rgrid(N, num_h_blocks, 1);
+            pa_prefill_reduce_kernel<Traits><<<rgrid, block, 0, stream>>>(kargs);
+        }
         HIP_CALL_LAUNCH(hipGetLastError());
     };
 
+    const char* fp8_env = std::getenv("OPUS_FP8_MMA");
+    const bool use_fp8_mma = (fp8_env && fp8_env[0] == 0x31);
     if(q.dtype() == AITER_DTYPE_bf16)
     {
-        launch(TraitsBF16{});
+        if(use_fp8_mma) launch(TraitsFP8{});
+        else            launch(TraitsBF16{});
     }
     else
     {

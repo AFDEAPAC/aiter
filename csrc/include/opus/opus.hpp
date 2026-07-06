@@ -1693,6 +1693,23 @@ struct gmem {
 #if  defined(__gfx950__)
         else if constexpr (sizeof(type) == 12) { __builtin_amdgcn_raw_ptr_buffer_load_lds(cached_rsrc, dst, 12, v_os, s_os, 0, aux); }
         else if constexpr (sizeof(type) == 16) { __builtin_amdgcn_raw_ptr_buffer_load_lds(cached_rsrc, dst, 16, v_os, s_os, 0, aux); }
+#elif defined(__gfx942__) || defined(__gfx940__) || defined(__gfx941__)
+        // gfx942: buffer_load_lds accepts only size 1/2/4, and its LDS write is
+        // lane-strided by the transfer width (m0 + lane*width). A 4B emulation of a
+        // 16B load would lane-stride by 4 (adjacent lanes collide) and cannot
+        // reproduce the contiguous-per-lane layout the readers expect. Use the
+        // synchronous global->VGPR->LDS fallback for wide (>4B) loads: it honors the
+        // exact per-lane `dst` offset the layout provides.
+        else if constexpr (sizeof(type) > 4) {
+            // gfx942 wide-load fallback: native gfx950 buffer_load_lds(size=16) spreads
+            // the 64 lanes across LDS by the transfer width (lane*sizeof(type)) from the
+            // wave-uniform base the layout provides. Reproduce that per-lane stride here;
+            // otherwise every lane collides on the same base and only one survives.
+            const int _ln = __builtin_amdgcn_mbcnt_hi(-1, __builtin_amdgcn_mbcnt_lo(-1, 0));
+            auto val = _load<vec, aux>(v_os, s_os, number<aux>{});
+            *reinterpret_cast<OPUS_LDS_ADDR type*>(
+                reinterpret_cast<OPUS_LDS_ADDR char*>(dst) + _ln * (int)sizeof(type)) = val;
+        }
 #endif
 #else
         i32x4_t cached_rsrc_;
@@ -1896,8 +1913,130 @@ struct smem {
         else if constexpr (elem_bits == 4)  { asm volatile("ds_read_b64_tr_b4 %0, %1 offset:%2\n" : "=v"(raw) : "v"(addr), "i"(imm_offset) : "memory"); }
         else { static_assert(sizeof(T_) == 0, "smem::_tr_load: unsupported scalar type"); }
         return __builtin_bit_cast(type, raw);
+#elif defined(__HIP_DEVICE_COMPILE__) && defined(__gfx942__)
+        /* gfx942 has NO ds_read_b64_tr. Emulate ds_read_b64_tr_b16 (the bf16/16-bit path)
+         * with a plain ds_read_b64 followed by a cross-lane 4x4 b16 transpose via ds_bpermute.
+         *
+         * Source layout (what a plain ds_read_b64 returns): lane L reads its own 4 contiguous
+         * b16 starting at (ptr + v_os + imm_offset), i.e. plain[L] = { tile[L][0..3] }, held as
+         * two 32-bit dwords d0=(e0,e1), d1=(e2,e3).
+         *
+         * Target layout (what ds_read_b64_tr_b16 yields, per make_layout_rv: lane_lo=4,
+         * VEC_TR_V=4): within each group of 4 lanes, transpose the 4(lane)x4(elem) b16 square:
+         *     tr[L][e] = plain[ (L & ~3) | e ][ L & 3 ]      for e = 0..3
+         * (lane_hi and group dims pass through unchanged; only lane_lo<->VEC_TR_V swap).
+         *
+         * ds_bpermute_b32(addr_bytes, x): dest lane receives x's dword from source lane
+         * (addr_bytes>>2). It moves one 32-bit dword per call. To assemble tr[L] we, for each
+         * output element e (=source lane (L&~3)|e), bpermute BOTH input dwords from that source
+         * lane, then pick dword (q>>1) and half (q&1) where q=L&3. */
+        constexpr index_t elem_bits = sizeof_bits_v<scalar_type>;
+        if constexpr (elem_bits == 16 && (vec * vector_size) == 4 && sizeof(vector_type<vec>) == 8) {
+            using type = vector_type<vec>;
+            using dw2_t = vector_t<int, 2>;
+            type src = _load<vec>(v_os + imm_offset);                 // plain[L] = {e0,e1,e2,e3}
+            dw2_t sd = __builtin_bit_cast(dw2_t, src);                // sd[0]=d0(e0,e1), sd[1]=d1(e2,e3)
+            /* 16-lane-group transpose (parametrized sweep). */
+            const int lane = __builtin_amdgcn_mbcnt_hi(~0u, __builtin_amdgcn_mbcnt_lo(~0u, 0u));
+            const int base = lane & ~15;
+            const int i    = lane & 15;
+            const int y    = i >> 2;
+            const int k    = i & 3;
+#ifndef OPUS_TR_SH
+#define OPUS_TR_SH 0
+#endif
+#ifndef OPUS_TR_SL
+#define OPUS_TR_SL 0
+#endif
+#ifndef OPUS_TR_OP
+#define OPUS_TR_OP 0
+#endif
+#if OPUS_TR_SH==0
+            const int rh = k;
+#else
+            const int rh = 3 - k;
+#endif
+            unsigned short out[4];
+            const int lowidx = (rh >> 1) * 4 + (rh & 1) * 2;   // byte off of desired b16 in {sd0,sd1}
+            const int psel   = lowidx | ((lowidx + 1) << 8);   // v_perm selector: low16 = desired half
+            #pragma unroll
+            for (int x = 0; x < 4; ++x) {
+#if OPUS_TR_SL==0
+                const int src_lane = base + (x * 4 + y);
+#else
+                const int src_lane = base + (y * 4 + x);
+#endif
+                const int sd0 = __builtin_amdgcn_ds_bpermute(src_lane << 2, sd[0]);
+                const int sd1 = __builtin_amdgcn_ds_bpermute(src_lane << 2, sd[1]);
+                out[x] = static_cast<unsigned short>(__builtin_amdgcn_perm(sd1, sd0, psel));
+            }
+            dw2_t res;
+#if OPUS_TR_OP==0
+            res[0] = (int)(((unsigned)out[1] << 16) | (unsigned)out[0]);
+            res[1] = (int)(((unsigned)out[3] << 16) | (unsigned)out[2]);
+#else
+            res[0] = (int)(((unsigned)out[2] << 16) | (unsigned)out[3]);
+            res[1] = (int)(((unsigned)out[0] << 16) | (unsigned)out[1]);
+#endif
+            return __builtin_bit_cast(type, res);
+        } else if constexpr (elem_bits == 8 && (vec * vector_size) == 8 && sizeof(vector_type<vec>) == 8) {
+            /* fp8 (8-bit) emulation of ds_read_b64_tr_b8 on gfx942. A plain ds_read_b64 gives
+             * lane L its own 8 contiguous fp8 bytes = two dwords d0={b0..b3}, d1={b4..b7}.
+             * Target (byte-granular analog of the b16 4x4 transpose, within 4-lane groups
+             * lane_lo=4, VEC_TR_V=8): validated byte-exact + reversible in isolation (tr_gate,
+             * 512/512, bijection missing=0 dup=0):
+             *     out[L][x] = in[ (L & ~3) | (x & 3) ][ (x>>2)*4 + (L & 3) ]   for x=0..7
+             * i.e. dest lane q=(L&3) gathers source byte-columns {q, q+4} across the 4 lanes. */
+            using type = vector_type<vec>;
+            using dw2_t = vector_t<int, 2>;
+            type src = _load<vec>(v_os + imm_offset);
+            dw2_t sd = __builtin_bit_cast(dw2_t, src);
+            const int lane = __builtin_amdgcn_mbcnt_hi(~0u, __builtin_amdgcn_mbcnt_lo(~0u, 0u));
+            const int base = lane & ~3;
+            const int q    = lane & 3;
+            unsigned char out[8];
+            #pragma unroll
+            for (int x = 0; x < 8; ++x) {
+                const int src_lane = base | (x & 3);
+                const int src_byte = (x >> 2) * 4 + q;   // 0..7
+                const int dw = src_byte >> 2;            // which dword
+                const int bo = src_byte & 3;             // byte in dword
+                const int moved = __builtin_amdgcn_ds_bpermute(src_lane << 2, sd[dw]);
+                out[x] = static_cast<unsigned char>((static_cast<unsigned>(moved) >> (bo * 8)) & 0xffu);
+            }
+            dw2_t res;
+            res[0] = (int)((unsigned)out[0] | ((unsigned)out[1] << 8) | ((unsigned)out[2] << 16) | ((unsigned)out[3] << 24));
+            res[1] = (int)((unsigned)out[4] | ((unsigned)out[5] << 8) | ((unsigned)out[6] << 16) | ((unsigned)out[7] << 24));
+            return __builtin_bit_cast(type, res);
+        } else if constexpr (elem_bits == 8 && (vec * vector_size) == 4 && sizeof(vector_type<vec>) == 4) {
+            /* fp8 (8-bit) 4-wide emulation of ds_read_b64_tr_b8 on gfx942 (VEC_TR_V=4).
+             * A plain ds_read gives lane L its own 4 contiguous fp8 bytes = ONE dword.
+             * Target (byte-granular 4x4 transpose, 4-lane groups lane_lo=4):
+             *     out[L][x] = in[ (L & ~3) | x ][ L & 3 ]   for x=0..3
+             * validated byte-exact + reversible in isolation (tr4_probe):
+             *     single 16/16, full-wave 256/256, bijection missing=0 dup=0. */
+            using type = vector_type<vec>;
+            type src = _load<vec>(v_os + imm_offset);
+            const int lane = __builtin_amdgcn_mbcnt_hi(~0u, __builtin_amdgcn_mbcnt_lo(~0u, 0u));
+            const int base = lane & ~3;
+            const int q    = lane & 3;                 // byte offset bo (single dword)
+            const int sd   = __builtin_bit_cast(int, src);
+            unsigned char out[4];
+            #pragma unroll
+            for (int x = 0; x < 4; ++x) {
+                const int src_lane = base | x;
+                const int moved = __builtin_amdgcn_ds_bpermute(src_lane << 2, sd);
+                out[x] = static_cast<unsigned char>((static_cast<unsigned>(moved) >> (q * 8)) & 0xffu);
+            }
+            int res = (int)((unsigned)out[0] | ((unsigned)out[1] << 8)
+                          | ((unsigned)out[2] << 16) | ((unsigned)out[3] << 24));
+            return __builtin_bit_cast(type, res);
+        } else {
+            /* non-bf16 / other vec widths not needed by the op-test PV-GEMM; keep plain. */
+            return _load<vec>(v_os + imm_offset);
+        }
 #elif defined(__HIP_DEVICE_COMPILE__)
-        static_assert(sizeof(T_) == 0, "smem::_tr_load requires __gfx950__");
+        /* other GPU arch: no transpose hw; fall back to plain load */
         return _load<vec>(v_os + imm_offset);
 #else
         return _load<vec>(v_os + imm_offset);

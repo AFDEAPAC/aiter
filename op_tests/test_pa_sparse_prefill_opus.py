@@ -85,8 +85,8 @@ def _skip_if_unsupported(d: int) -> bool:
     if not torch.cuda.is_available():
         return _skip("CUDA/HIP device not available")
     arch = _get_gpu_arch()
-    if arch != "gfx950":
-        return _skip(f"pa_sparse_prefill_opus requires gfx950, found {arch}")
+    if arch not in ("gfx950", "gfx942"):
+        return _skip(f"pa_sparse_prefill_opus requires gfx950/gfx942, found {arch}")
     if d != 512:
         return _skip(f"Only D=512 is compiled, requested D={d}")
     return False
@@ -243,6 +243,30 @@ def _dense_csr(
     return indptr.to(device), indices.to(device)
 
 
+def _balanced_csr(
+    n: int, total_rows: int, *, device: torch.device
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """PROBE mode: every token gets the SAME constant kv_len (perfectly
+    balanced work), so total tiles ~= sparse but with zero tail imbalance.
+    Isolates load-imbalance from per-WG fixed overhead. Legit CSR -> cos PASS."""
+    per = int(os.environ.get("BALANCED_ROWS", "384"))
+    per = max(0, min(per, total_rows))
+    lens = torch.full((n,), per, dtype=torch.int32)
+    indptr = torch.zeros(n + 1, dtype=torch.int32)
+    indptr[1:] = torch.cumsum(lens, dim=0)
+    nnz = int(indptr[-1].item())
+    indices = torch.empty(nnz, dtype=torch.int32)
+    g = torch.Generator(device="cpu"); g.manual_seed(12345)
+    for i in range(n):
+        st, en = int(indptr[i].item()), int(indptr[i + 1].item())
+        row_len = en - st
+        if row_len == 0:
+            continue
+        perm = torch.randperm(total_rows, generator=g)[:row_len]
+        indices[st:en] = perm.to(torch.int32)
+    return indptr.to(device), indices.to(device)
+
+
 def _empty_csr(n: int, *, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
     return (
         torch.zeros(n + 1, dtype=torch.int32, device=device),
@@ -255,7 +279,7 @@ def _empty_csr(n: int, *, device: torch.device) -> Tuple[torch.Tensor, torch.Ten
 # ---------------------------------------------------------------------------
 
 # Single sparsity knob applied symmetrically to both prefix and extend CSRs.
-_MODES = ("sparse", "dense", "empty")
+_MODES = ("sparse", "dense", "empty", "balanced")
 
 
 def _make_inputs(
@@ -293,6 +317,8 @@ def _make_inputs(
             )
         if mode == "dense":
             return _dense_csr(n, total_rows, device=device)
+        if mode == "balanced":
+            return _balanced_csr(n, total_rows, device=device)
         return _empty_csr(n, device=device)
 
     ip_p, ix_p = _csr(total_pages, 1)
