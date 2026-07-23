@@ -282,9 +282,19 @@ class RotaryEmbedding(nn.Module):
             key_shape = key.shape
             key = key.view(1, num_tokens, -1, self.head_size)
 
-        positions = positions.view(*query.shape[:2])
+        # aiter cached-positions RoPE kernels require positions/offsets to be
+        # 2-D [s, b] with a unit-stride last dim (stride(-1)==1). On the CP +
+        # EAGLE mixed / verify path the incoming positions is a strided view;
+        # note .contiguous() is a no-op when a size-1 dim makes the tensor
+        # nominally contiguous while stride(-1) stays != 1, so force a real
+        # copy via clone() only when the last dim is not unit-stride.
+        positions = positions.reshape(*query.shape[:2])
+        if positions.stride(-1) != 1:
+            positions = positions.clone(memory_format=torch.contiguous_format)
         if offsets is not None:
-            offsets = offsets.view(*query.shape[:2])
+            offsets = offsets.reshape(*query.shape[:2])
+            if offsets.stride(-1) != 1:
+                offsets = offsets.clone(memory_format=torch.contiguous_format)
 
         if not is_nope_first:
             query_ = query[..., : self.rotary_dim]
