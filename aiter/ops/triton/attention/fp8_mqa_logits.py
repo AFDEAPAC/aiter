@@ -1,4 +1,5 @@
 import inspect
+import os
 
 import torch
 import triton
@@ -64,6 +65,10 @@ FOLDED_REDUCTED_SUPPORT = _permute_accepts_constexpr_tuple()
 
 # gfx942 (MI300X) LDS size per CU.
 _GFX942_CU_LDS_BYTES = 64 * 1024
+
+# Co-resident workgroups the LDS budget must accommodate. At 2, head_size=128
+# forces the (64, 1) tile, which costs ~17% on 64k-token prefill.
+_GFX942_LDS_OCCUPANCY = int(os.environ.get("AITER_MQA_LOGITS_OCCUPANCY", "2"))
 
 
 def _gfx942_tile_fits_lds(
@@ -137,7 +142,10 @@ def fp8_mqa_logits(
         # the default (128, 2) tile would not fit two co-resident workgroups
         # on a CU; keep the default tile otherwise.
         if arch == "gfx942" and not _gfx942_tile_fits_lds(
-            block_kv=128, head_size=head_size, num_stages=2, occupancy=2
+            block_kv=128,
+            head_size=head_size,
+            num_stages=2,
+            occupancy=_GFX942_LDS_OCCUPANCY,
         ):
             block_kv = 64
             num_stages = 1
