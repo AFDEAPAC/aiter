@@ -587,6 +587,46 @@ def fused_moe_(
     quant_type = quant_remap.get(quant_type, quant_type)
     q_dtype_w = w1.dtype
     q_dtype_a = w1.dtype if w1.dtype != torch.uint32 else dtypes.fp8
+
+    # gfx942 (CDNA3): Kimi-K3 a16w4 -- bf16 activations x MXFP4 weights, SiTUv2.
+    # The a16wmix gemm1/gemm2 pair runs as one unit rather than through the
+    # two-stage path below: that path hands stage1 -> stage2 a (token, slot)
+    # indexed intermediate of token_num*topk rows, while the pair both writes and
+    # reads a sorted-position buffer whose sorted_size exceeds that (per-expert
+    # block padding). See ops/flydsl/a16wmix_fused_moe.py.
+    if (
+        get_gfx() == "gfx942"
+        and activation == ActivationType.Situv2
+        and quant_type == QuantType.per_1x32
+        and q_dtype_w == dtypes.fp4x2
+        and hidden_states.dtype == dtypes.bf16
+        and isShuffled
+        and expert_mask is None
+        and not doweight_stage1
+        and num_local_tokens is None
+        and bias1 is None
+        and bias2 is None
+        and is_flydsl_available()
+    ):
+        from aiter.ops.flydsl.a16wmix_fused_moe import fused_moe_a16wmix
+
+        return fused_moe_a16wmix(
+            hidden_states,
+            w1,
+            w2,
+            topk_weight,
+            topk_ids,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            situ_beta=1.0 if beta is None else float(beta),
+            situ_linear_beta=1.0 if linear_beta is None else float(linear_beta),
+            act="situv2",
+            block_m=32 if block_size_M is None else int(block_size_M),
+            # bf16 activations only reach here, and vLLM applies the gate/up
+            # interleaved shuffle solely on its a8w4 path, so W1 is the separated
+            # layout. Verified by layout A/B against a torch reference.
+            w1_layout="standard",
+        )
     # If input is already FP8-quantized (e.g. from FP8 dispatch) with block scale,
     # use FP8 as activation dtype to skip redundant re-quantization
     if (
