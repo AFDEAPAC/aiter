@@ -17,6 +17,7 @@ from .utils import (
     _a16w4_swizzle_xor16,
     _buffer_i32_scalar_read,
     _e8m0_byte_to_f32,
+    _fp4_nibble_to_bf16x8_lut,
     _fp4_nibble_to_bf16x8_sw,
     _gep3,
     _global_i32_at,
@@ -448,8 +449,8 @@ def _gemm1_body_a16w4(
         if const_expr(_is_int4):
             return _int4_nibble_to_bf16x8(fx.Int32(i32_val), scale_f32, use_k16=use_k16)
         if const_expr(use_k16):
-            # gfx942: v_cvt_scalef32_pk_bf16_fp4 is gfx950-only -> software E2M1 decode.
-            return _fp4_nibble_to_bf16x8_sw(fx.Int32(i32_val), scale_f32)
+            # gfx942: v_cvt_scalef32_pk_bf16_fp4 is gfx950-only -> byte-lookup E2M1 decode.
+            return _fp4_nibble_to_bf16x8_lut(fx.Int32(i32_val), scale_f32)
         # raw[ku//4][ku%4] i32 holds 8 fp4 -> 4x cvt (v2bf16, sel 0..3) -> v8bf16.
         s_raw = _raw(scale_f32)
         i32s = []
