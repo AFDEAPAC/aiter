@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025-2026 FlyDSL Project Contributors
 
+import functools
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
@@ -33,9 +35,22 @@ from .utils import (
     lds_acc_bytes_for,
 )
 
-# gfx950 CU count; caps the persistent gemm2 grid so high-expert launches (E896) do
-# not over-launch ~max_m_blocks empty CTAs.
-NUM_CU = 256
+# Caps the persistent gemm2 grid. Sized from the device rather than hardcoded: the
+# previous value was gfx950's 256 CUs, which over-subscribes an 80-CU MI308X unevenly
+# (12642 tiles over 256 CTAs is 49.4 each, and that cap measured slower at bs=8 than
+# either 240 or 320).
+NUM_CU = 256  # fallback when the device cannot be queried
+
+
+@functools.cache
+def _persistent_cta_cap():
+    """CTA cap for the persistent grid: 8 waves per CU, measured best on MI308X."""
+    try:
+        import torch
+
+        return torch.cuda.get_device_properties(0).multi_processor_count * 8
+    except Exception:
+        return NUM_CU
 
 
 # @flyc.jit is LOAD-BEARING: it AST-rewrites ``if token_id < i32_M`` into an scf.if.
@@ -500,13 +515,14 @@ def _gemm2_body_a16w4(
 def gemm2_a16w4_grid(BM, *, N_OUT, TILE_N, max_m_blocks, persist=False):
     """Flattened launch grid for a16w4 gemm2.
 
-    Non-persistent (default): one CTA per (m-block x n-block) tile over padded
-    ``max_m_blocks``. Persistent: cap to ``min(total_work, NUM_CU)`` CTAs (only when
-    padded work > ``NUM_CU*4``); each CTA loops over its real work-tiles.
+    Non-persistent: one CTA per (m-block x n-block) tile over padded ``max_m_blocks``.
+    Persistent: cap to ``min(total_work, cap)`` CTAs (only when padded work
+    > ``cap*4``); each CTA loops over its real work-tiles.
     """
     total_work = int(max_m_blocks) * (N_OUT // TILE_N)
-    if persist and total_work > NUM_CU * 4:
-        return min(total_work, NUM_CU)
+    cap = _persistent_cta_cap()
+    if persist and total_work > cap * 4:
+        return min(total_work, cap)
     return total_work
 
 

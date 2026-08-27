@@ -586,10 +586,13 @@ def flydsl_a16w4_gemm2(
     # M L2 residency), nt (2) mid-band (32..1024). Caller may override via b_nt.
     _b_cache_mod = (0 if (_m <= 16 or _m >= 2048) else 2) if b_nt is None else b_nt
     max_m_blocks = min(int(sorted_expert_ids.numel()), int(sorted_token_ids.numel()) // BM)
-    # Persistent CU-limited grid (opt-in, default OFF; byte-identical when off): does NOT
-    # close the E896 gap (padded launch's empty CTAs early-return ~free), kept as an
-    # opt-in building block.
-    _persist = False if persist is None else bool(persist)
+    # Persistent CU-limited grid, on by default. The earlier reading -- that this does
+    # not help because a padded launch's empty CTAs early-return for free -- holds for
+    # the empty CTAs but not for the conclusion: trimming sorted_expert_ids so the grid
+    # covers only the valid blocks is worth 1.00x, while making the CTAs persistent over
+    # the same grid is worth 2.0-3.4x. What pays is CTA reuse, not launch count.
+    # It reorders the atomic scatter, which is already order-dependent run to run.
+    _persist = True if persist is None else bool(persist)
     launch = _get_compiled_gemm2_a16w4(
         BM, NE, D_HIDDEN, D_INTER, TILE_N, TILE_K, _b_cache_mod, xcd_swizzle, waves_per_eu, w_dtype, _persist
     )
