@@ -582,6 +582,10 @@ def compile_gemm2_a16w4_port(
         wave = rocdl.readfirstlane(T.i32, tx_i32 // fx.Int32(64))
         cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
         total_m_blocks = cumsum0 // fx.Int32(BM)
+        # Clamp to the host-side buffer size. The kernel previously trusted
+        # cumsum0 unconditionally; a recycled/corrupted value walks off
+        # sorted_ids / A / out and raises a GPU Memory Fault.
+        total_m_blocks = fx.Int32(arith.minsi(_raw(total_m_blocks), _raw(i32_max_m_blocks)))
         bound = total_m_blocks * fx.Int32(_num_n_blocks)
 
         # Bijective XCD round-robin over valid tiles [0, bound) to balance per-XCD/HBM
