@@ -565,15 +565,17 @@ def flydsl_a16w4_gemm2(
             tokens=_m,
             tile_m=BM,
         )
-        # gemm2 tile_n is not token-dependent (fixed 256 default; explicit tile_n=None
-        # means adaptive _default_tile_n, handled below), so only tile_k/b_nt/xcd are
-        # filled from the resolver here.
+        # gemm2's tile_n IS token-dependent, so take it from the resolver like the
+        # other fields. The adaptive default below stays as the fallback for shapes the
+        # resolver has no row for.
         if tile_k == 256:
             TILE_K = _o["tile_k"]
         if b_nt is None:
             b_nt = _o["b_nt"]
         if xcd_swizzle == 1:
             xcd_swizzle = _o["xcd_swizzle"]
+        if TILE_N is None:
+            TILE_N = _o["tile_n"]
     if TILE_N is None:
         # Adaptive default: largest N tile dividing model_dim (int4 prefers 128).
         TILE_N = _default_tile_n(D_HIDDEN, w_dtype=w_dtype)
