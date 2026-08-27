@@ -460,7 +460,7 @@ def flydsl_a16w4_gemm1(
         w_layout,
         k_wave,
     )
-    max_m_blocks = int(sorted_expert_ids.numel())
+    max_m_blocks = min(int(sorted_expert_ids.numel()), int(m_indices.numel()) // BM)
     grid = gemm1_a16w4_grid(BM, INTER=D_INTER, TILE_N=TILE_N, max_m_blocks=max_m_blocks)
     # SiTUv2 beta/linear_beta + swiglu_limit -> runtime f32 scalars (host precomputes
     # reciprocals; no device rcp). swiglu_limit is the SiTUv2 clamp bound (+inf = no
@@ -585,7 +585,7 @@ def flydsl_a16w4_gemm2(
     # B cache modifier per-token U-shape: cached (0) at both ends (small M reuse / large
     # M L2 residency), nt (2) mid-band (32..1024). Caller may override via b_nt.
     _b_cache_mod = (0 if (_m <= 16 or _m >= 2048) else 2) if b_nt is None else b_nt
-    max_m_blocks = int(sorted_expert_ids.numel())
+    max_m_blocks = min(int(sorted_expert_ids.numel()), int(sorted_token_ids.numel()) // BM)
     # Persistent CU-limited grid (opt-in, default OFF; byte-identical when off): does NOT
     # close the E896 gap (padded launch's empty CTAs early-return ~free), kept as an
     # opt-in building block.

@@ -239,14 +239,17 @@ def _gemm1_body_a16w4(
     # create_buffer_resource_from_addr + buffer_load.
     sw_tiles = None if _is_bf16 else _global_i32_buffer_tiles(arg_bscale, min(_sw_bytes, 0xFFFFFFFF), 1)
     sw_read_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(0), fx.Int32)
-    # Intermediate [sorted_size, inter] bf16: num_records = cumsum0*inter*2, so masked
-    # (clamped) stores land OOB. KEPT RAW: the output resource + masked buffer_store need a
-    # dynamic (runtime cumsum0) num_records and per-store predication; the fx.copy layout
-    # API does not express the masked scalar scatter this epilogue relies on.
-    _cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
+    # Intermediate [sorted_size, inter] bf16. KEPT RAW: the output resource +
+    # masked buffer_store need a dynamic num_records and per-store predication;
+    # the fx.copy layout API does not express the masked scalar scatter this
+    # epilogue relies on. Size num_records from the allocated buffer (grid is
+    # max_m_blocks * NUM_N_BLOCKS), not from cumsum0: a corrupted cumsum0
+    # disables hardware OOB clamp and stores hit unmapped pages.
+    _max_m = fx.Int32(gpu.grid_dim.x) // fx.Int32(INTER // TILE_N)
+    _max_sorted = fx.Int64(_max_m) * fx.Int64(BM)
     out_rsrc = buffer_ops.create_buffer_resource_from_addr(
         _raw(fx.Int64(arg_out)),
-        num_records_bytes=_raw(fx.Int64(_cumsum0) * fx.Int64(INTER * 2)),
+        num_records_bytes=_raw(_max_sorted * fx.Int64(INTER * 2)),
     )
 
     # ---- A gather rows (per-thread) -------------------------------------------
@@ -820,6 +823,13 @@ def compile_gemm1_a16w4_port(
         wave = rocdl.readfirstlane(T.i32, tx_i32 // fx.Int32(64))
         cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
         total_m_blocks = cumsum0 // fx.Int32(BM)
+        # Clamp to the host-side buffer size. gemm1 does not take
+        # i32_max_m_blocks; the launch grid is max_m_blocks * NUM_N_BLOCKS, so
+        # grid_dim.x / NUM_N_BLOCKS is that cap. Must clamp *before* the XCD
+        # remap, which is bijective over [0, bound) and will otherwise send
+        # in-range CTAs to unmapped tiles.
+        _max_m = fx.Int32(gpu.grid_dim.x) // fx.Int32(NUM_N_BLOCKS)
+        total_m_blocks = fx.Int32(arith.minsi(_raw(total_m_blocks), _raw(_max_m)))
         bound = total_m_blocks * fx.Int32(NUM_N_BLOCKS)
 
         # Bijective XCD round-robin over valid tiles [0, bound) to balance per-XCD/HBM
