@@ -110,10 +110,36 @@ def _global_i32_at(addr_i64, idx):
     return _global_i32_ptr(addr_i64)[idx]
 
 
+def _global_f32_at(addr_i64, idx):
+    ptr_ty = fx.PointerType.get(T.f32, address_space=fx.AddressSpace.Global, alignment=4)
+    return fx.inttoptr(ptr_ty, fx.Int64(addr_i64))[idx]
+
+
+def _global_u8_at(addr_i64, idx):
+    """One byte from a global u8 array, zero-extended to i32.
+
+    The fp8 path's per-column reference exponent is a byte per (expert, column); a
+    scalar byte load keeps it off the dword-aligned paths the rest of the kernel uses.
+    """
+    ptr_ty = fx.PointerType.get(T.i8, address_space=fx.AddressSpace.Global, alignment=1)
+    b = fx.inttoptr(ptr_ty, fx.Int64(addr_i64))[idx]
+    return fx.Int32(arith.extui(T.i32, _raw(b)))
+
+
 def _e8m0_byte_to_f32(packed_i32, byte_pos):
     shift = byte_pos * fx.Int32(8)
     b = packed_i32.shrui(shift) & fx.Int32(0xFF)
     return fx.Float32(_raw(b << fx.Int32(23)).bitcast(T.f32))
+
+
+def _e8m0_byte_raw(packed_i32, byte_pos):
+    """The e8m0 byte as an integer, not the 2^(b-127) float.
+
+    The fp8 path needs the exponent itself so it can form the per-column residual
+    ``s_ref(n) - s(n, kg)`` and pick a magnitude table with 2^r already folded in;
+    :func:`_e8m0_byte_to_f32` throws that away.
+    """
+    return packed_i32.shrui(byte_pos * fx.Int32(8)) & fx.Int32(0xFF)
 
 
 def _cvt_pk_bf16_f32_se(src_a_f32, src_b_f32):
@@ -285,6 +311,26 @@ def _fp4_mag_dwords(raw_i32):
     ]
 
 
+def _fp4_nibble_to_bf16x8_raw(raw_i32):
+    """FP4 (E2M1) -> v8bf16 for one MFMA K32 step, WITHOUT the groupwise scale.
+
+    Same magnitudes as :func:`_fp4_nibble_to_bf16x8_lut`; the e8m0 scale is left for
+    the caller to apply once per K-group on the MFMA accumulator (``_mma_scaled_add``
+    in the stage bodies). Both halves stay exact: E2M1 magnitudes are representable
+    in bf16, and the scale is a power of two, so folding it into the f32 accumulator
+    instead of into each weight changes nothing numerically.
+
+    What it saves is the scale chain in ``_fp4_nibble_to_bf16x8_lut`` -- per dword an
+    lshl, an and, a pk_mul, an lshr and an and_or. Measured on the prefill shape
+    (bm32/tn192, prof/isa_summary_prefill_bm32.json) that chain is 21.5 of the 39.5
+    VALU each 8-weight group costs, against 4 accumulator FMAs per (mi, ni) to put
+    the scale back.
+    """
+    return fx.Vector.from_elements(
+        [_raw(d) for d in _fp4_mag_dwords(raw_i32)], fx.Int32
+    ).bitcast(fx.BFloat16)  # v8bf16
+
+
 def _fp4_nibble_to_bf16x8_lut(raw_i32, scale_f32):
     """FP4 (E2M1) -> v8bf16 for one MFMA K32 step, with the groupwise scale applied.
 
@@ -303,6 +349,165 @@ def _fp4_nibble_to_bf16x8_lut(raw_i32, scale_f32):
         hi_b = fx.Int32(_raw(hi_f * scale).bitcast(T.i32)) & fx.Int32(0xFFFF0000)
         out.append(lo_b | hi_b)
     return fx.Vector.from_elements([_raw(x) for x in out], fx.Int32).bitcast(fx.BFloat16)
+
+
+# ---------------------------------------------------------------------------
+# FP4 (E2M1) -> e4m3fnuz byte-lookup decode, for the fp8 MFMA path.
+#
+# An fp8 weight operand cannot carry the MXFP4 groupwise scale: e8m0 spans 2^-127..
+# 2^127 and e4m3fnuz only about 2^-10..240. Nor can the accumulator absorb it -- the
+# K-group index depends on lane_div_16, so one MFMA contracts four groups and an
+# accumulator element mixes four scales (see acc_scale_for).
+#
+# What works is splitting the scale by what each side can legally hold:
+#
+#   s(n, kg) = s_ref(n) + r(n, kg),   s_ref(n) = max over kg,  so r <= 0
+#
+# 2^s_ref(n) depends only on the output column, which is constant across a lane's
+# accumulator, so the epilogue applies it once. 2^r rides in the weight -- and
+# measurement makes that nearly free: on the real checkpoint r takes three values
+# (0: 44.5%, -1: 49.4%, -2: 6.2%, -3 twice in 5.5M groups, never below), so instead of
+# any per-element exponent arithmetic the decode just picks one of four constant
+# v_perm_b32 pools. See prof/e8m0_residual_scan.json and tools/gen_fp8_lut.py.
+#
+# Every E2M1 magnitude times 2^r stays exactly representable in e4m3fnuz for those r,
+# so the weight side of the fp8 path carries no error at all.
+#
+# Index 0 maps to 0x01 (smallest subnormal, 2^-10) rather than 0x00. e4m3fnuz has no
+# negative zero -- 0x80 is NaN -- and 5.765% of the checkpoint's nibbles are 0x8
+# (-0.0), so folding the sign onto a 0x00 magnitude would put a NaN in essentially
+# every K-group (prof/fp4_negzero_scan.json). +-2^-10 against a group maximum of
+# 6*scale is a relative 1.6e-4, far under fp8's own ~6% resolution.
+#
+# Tables are derived and round-trip checked by tools/gen_fp8_lut.py.
+# Reference tables, kept for documentation and for test_fp8_lut to check the SWAR form
+# against. r = 0 .. -6 is the whole exactly-representable range: every table is the
+# previous one with 0x08 taken off each magnitude byte (one e4m3 exponent step), and at
+# r = -7 the smallest magnitude (0.5) would leave the normal range, so the pattern
+# stops being a plain subtract.
+_FP8_MAG_TABLE = (
+    (0x44403801, 0x54504C48),  # r =  0
+    (0x3C383001, 0x4C484440),  # r = -1
+    (0x34302801, 0x44403C38),  # r = -2
+    (0x2C282001, 0x3C383430),  # r = -3
+    (0x24201801, 0x34302C28),  # r = -4
+    (0x1C181001, 0x2C282420),  # r = -5
+    (0x14100801, 0x24201C18),  # r = -6
+)
+FP8_MAX_NEG_RESIDUAL = len(_FP8_MAG_TABLE) - 1
+
+# SWAR form of the table above: subtract 0x08 per binade from all four magnitude bytes
+# at once. Byte 0 of the low dword is the 0x01 zero placeholder, and subtracting from
+# 0x01 would borrow into byte 1, so the base carries 0x40 there instead -- big enough
+# that 8*6 never borrows out of it -- and byte 0 is overwritten afterwards.
+_FP8_SWAR_LO_BASE = 0x44403840
+_FP8_SWAR_HI_BASE = 0x54504C48
+
+
+def _fp8_table_select(neg_r):
+    """The (lo, hi) v_perm pool for residual r = -``neg_r``, clamped to the exact range.
+
+    Computed rather than selected. A select chain costs two v_cndmask per table and
+    caps the residual at however many tables are compiled in; this is a multiply and
+    two subtracts for any r, so it is both slightly cheaper and good to -6. That
+    matters: the down projection reaches -4 on the real checkpoint (10 groups in 4.13
+    billion, see prof/w2_sharded_residual.json), which four tables did not cover.
+
+    Hoisted per (lane, k0-block) -- a lane reads one e8m0 group per 4 K-steps, i.e. per
+    32 weights -- so it is well under 0.2 instructions per weight either way.
+
+    ``neg_r`` should be a non-negative i32; it is clamped on both sides because a
+    negative value would mean the reference is not the column maximum, and a wrong
+    magnitude is preferable to a borrow cascade across the packed bytes.
+    """
+    t = fx.Int32(arith.minsi(_raw(fx.Int32(neg_r)), _raw(fx.Int32(FP8_MAX_NEG_RESIDUAL))))
+    t = fx.Int32(arith.maxsi(_raw(t), _raw(fx.Int32(0))))
+    sub = t * fx.Int32(0x08080808)
+    lo = ((fx.Int32(_FP8_SWAR_LO_BASE) - sub) & fx.Int32(0xFFFFFF00)) | fx.Int32(0x01)
+    hi = fx.Int32(_FP8_SWAR_HI_BASE) - sub
+    return lo, hi
+
+
+def _fp4_nibble_to_fp8x8(raw_i32, tab_lo, tab_hi):
+    """8 FP4 nibbles -> 8 e4m3fnuz bytes, as two dwords (one MFMA 16x16x32 B operand).
+
+    ``raw_i32`` holds nibble j in bits[4j+3:4j], the same K order the bf16 path uses,
+    so element j lands in byte j and the operand layout is unchanged.
+
+    All eight magnitudes fit one v_perm_b32 pool (unlike bf16, which needs a high-byte
+    and a low-byte pool), so four nibbles decode per perm instead of two perms plus a
+    repack. Twelve instructions for eight weights, against 39.5 for the scaled bf16
+    decode measured in prof/isa_summary_prefill_bm32.json.
+    """
+    raw = fx.Int32(raw_i32)
+    # v_perm honours selector values 0..7 only, so mask the sign off and fold it back
+    # into bit 7 afterwards -- which is where it already sits in the nibble.
+    sel_even = raw & fx.Int32(0x07070707)  # low nibble of each byte -> elements 0,2,4,6
+    sel_odd = raw.shrui(fx.Int32(4)) & fx.Int32(0x07070707)  # -> elements 1,3,5,7
+
+    mag_even = _perm(tab_hi, tab_lo, sel_even)
+    mag_odd = _perm(tab_hi, tab_lo, sel_odd)
+    mag_even = mag_even | ((raw & fx.Int32(0x08080808)) << fx.Int32(4))
+    mag_odd = mag_odd | (raw & fx.Int32(0x80808080))
+
+    # mag_even = [e0,e2,e4,e6], mag_odd = [e1,e3,e5,e7]; interleave to K order.
+    d0 = _perm(mag_odd, mag_even, fx.Int32(0x05010400))  # e0,e1,e2,e3
+    d1 = _perm(mag_odd, mag_even, fx.Int32(0x07030602))  # e4,e5,e6,e7
+    return d0, d1
+
+
+def _fp4_nibble_to_fp8x8_vec(raw_i32, tab_lo, tab_hi):
+    """:func:`_fp4_nibble_to_fp8x8` as a v8 fp8 vector, ready for an MMA fragment."""
+    d0, d1 = _fp4_nibble_to_fp8x8(raw_i32, tab_lo, tab_hi)
+    return fx.Vector.from_elements([_raw(d0), _raw(d1)], fx.Int32).bitcast(fp8_elem_type())
+
+
+def fp8_elem_type():
+    """gfx942 MFMA reads e4m3**fnuz**; gfx950 and gfx12 use OCP e4m3fn."""
+    arch = str(get_rocm_arch() or "")
+    return fx.Float8E4M3FN if ("gfx95" in arch or "gfx12" in arch) else fx.Float8E4M3FNUZ
+
+
+def acc_scale_for(w_dtype, m_repeat):
+    """Can the groupwise scale be applied on the MFMA accumulator, not per weight?
+
+    **No, not with this weight layout.** Off by default for every dtype. The env
+    override exists only to reproduce the analysis below.
+
+    The idea is to emit unscaled weights and fold the groupwise scale into the small
+    f32 accumulator once per K-group, which for mxfp4 would drop 21.5 of the 39.5 VALU
+    an 8-weight group costs. It is worth real time -- forced on, gemm1 at 8 decode
+    tokens goes 319.2 -> 224.4 us -- but it is **numerically wrong**, and the speed is
+    the speed of computing the wrong answer:
+
+        tile_m=16  cos=0.870992  rel_fro=5.671e-01   (against the op_test reference)
+
+    The reason is the K-group index in ``load_b_scale`` / ``load_b_scale_int4``::
+
+        adj_ku = base_k // 32 + (ku // 4) * 4 + lane_div_16
+
+    It depends on ``lane_div_16``, so within one MFMA K32 step the four lane groups
+    read four *different* e8m0 groups. Scaling each lane's own weights handles that
+    correctly. The accumulator cannot: an accumulator element is a sum contributed by
+    all 64 lanes, so it mixes all four scales, and there is no single scalar to pull
+    out. Confirmed by construction -- force every e8m0 byte to a single value and the
+    two arms agree bit for bit (gemm1 max|delta| = 0.0); let the scales vary and they
+    diverge. See tools/verify_acc_scale.py --const-scale.
+
+    This also means the pre-existing int4 path is affected: ``load_b_scale_int4`` uses
+    the same ``adj_ku`` expression, so a16wi4 at BM16 has the same flaw. It was never
+    caught because op_tests/test_moe_a16w4_gfx942.py only covers mxfp4. Hoisting the
+    scale would need a weight preshuffle whose K-group index does not vary with the
+    lane group, which ``shuffle_weight_a16w4`` does not provide.
+
+    ``FLYDSL_A16WMIX_ACC_SCALE=0|1`` forces the arm. NOTE: flydsl caches compiled
+    kernels in ~/.flydsl/cache and both arms share one kernel name, so an A/B also
+    needs FLYDSL_RUNTIME_ENABLE_CACHE=0 or it silently measures one arm twice.
+    """
+    forced = os.environ.get("FLYDSL_A16WMIX_ACC_SCALE")
+    if forced is not None and forced != "auto":
+        return forced not in ("0", "", "false", "False")
+    return False
 
 
 def kmchunks_for(BM):
