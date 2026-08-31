@@ -13,6 +13,8 @@ dequant reference is an explicit E2M1 table, so nothing outside aiter is needed.
 Run:  python3 op_tests/test_moe_a16w4_gfx942.py
 """
 
+import os
+
 import pytest
 import torch
 
@@ -168,12 +170,32 @@ def test_a16w4_situv2_fused_moe(tokens, model_dim, inter_dim, experts, topk):
     cos, rel, gain = _metrics(got, ref_situ)
     print(f"  a16w4 SiTUv2: cos={cos:.6f} rel_fro={rel:.3e} best_fit_gain={gain:.6f}")
 
+    # The distance bars depend on which MFMA path is active, because they are measured
+    # against an EXACT bf16 reference: an fp8 arm quantizes the activation (and, with
+    # stage2, the intermediate) and is supposed to sit further away. Holding all arms to
+    # the bf16 bar would fail the fp8 paths for doing exactly what they were built to
+    # do. Values are the worst measured over these shapes plus margin -- bf16 2.99e-3,
+    # stage1 fp8 4.38e-2, both stages 5.03e-2.
+    #
+    # These bars cannot tell a kernel bug from the quantization, and are not meant to:
+    # that needs a second reference whose activation went through the same quantizer
+    # (tools/verify_fp8.py in the kimi-k3 workspace), which pins the fp8 arms to
+    # ~3e-3 of their own reference.
+    _arm1 = os.environ.get("AITER_A16WMIX_FP8", "0") not in ("0", "", "false", "False")
+    _arm2 = os.environ.get("AITER_A16WMIX_FP8_S2", "0") not in ("0", "", "false", "False")
+    arm, cos_bar, rel_bar = "bf16", 0.999, 5e-2
+    if _arm1 and _arm2:
+        arm, cos_bar, rel_bar = "fp8 stage1+stage2", 0.998, 7e-2
+    elif _arm1:
+        arm, cos_bar, rel_bar = "fp8 stage1", 0.9985, 6e-2
+
     # The gain check is the one that catches a systematic scale error; cosine alone
     # does not. Cross-checking against the wrong activation shows why: it still
-    # scores cos ~0.96 while the gain collapses to ~0.48.
-    assert cos > 0.999, f"cosine {cos:.6f} below the fp4 bar"
-    assert rel < 5e-2, f"relative Frobenius error {rel:.3e} too large"
-    assert abs(gain - 1.0) < 2e-2, f"systematic gain error {gain:.6f}"
+    # scores cos ~0.96 while the gain collapses to ~0.48. It is arm-independent --
+    # quantization adds noise, not bias -- so it stays at 2e-2 for everything.
+    assert cos > cos_bar, f"cosine {cos:.6f} below the {arm} bar {cos_bar}"
+    assert rel < rel_bar, f"relative Frobenius error {rel:.3e} above the {arm} bar {rel_bar:.0e}"
+    assert abs(gain - 1.0) < 2e-2, f"systematic gain error {gain:.6f} ({arm})"
 
     ref_silu = _torch_moe(x_bf16.float(), w1_deq, w2_deq, topk_ids, topk_weights, inter_dim, _silu_mul)
     _, _, gain_wrong = _metrics(got, ref_silu)
