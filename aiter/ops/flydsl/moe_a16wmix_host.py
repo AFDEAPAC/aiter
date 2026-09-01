@@ -289,6 +289,10 @@ def _fp8_tile_override(cfg, *, stage, tile_m):
         cfg["xcd_swizzle"] = 0
     elif int(tile_m) <= 16:
         cfg["tile_k"] = 256
+        # fp8 bumps K-tile 128->256; k_wave=4 slice-K needs K % (4*128)==0 and
+        # breaks once TILE_K becomes 256 (3584 % 1024 != 0).
+        if int(cfg.get("k_wave", 1)) > 1:
+            cfg["k_wave"] = 1
     return cfg
 
 
