@@ -187,7 +187,13 @@ def fused_moe_a16wmix(
         )
 
     sorted_size = int(sorted_ids.numel())
-    inter_sorted = torch.zeros(
+    # empty, not zeros: no reader can act on an unwritten row. gemm1 stores under
+    # ``mask=valid`` so it does leave padding rows untouched, but gemm2 clamps its block
+    # count to ``cumsum0 // BM`` and its epilogue drops rows on ``token_id >= i32_M``, and
+    # the stage2 quant is bounded by the same ``num_valid_ids``. So an untouched row can
+    # only reach its own accumulator, which is then dropped. Zeroing the whole sorted_size
+    # buffer cost one ~6.6 us fill per layer per rank at decode.
+    inter_sorted = torch.empty(
         sorted_size, inter_dim, dtype=torch.bfloat16, device=hidden_states.device
     )
 
@@ -275,11 +281,20 @@ def fused_moe_a16wmix(
     # A row of inter_sorted is one route and stage2 contracts over inter_dim, so the
     # per-row scale per_token_quant_hip produces is exactly the per-A-operand scale the
     # fp8 MFMA needs -- no new kernel, and stage1 keeps writing bf16.
-    # Padding rows are quantized too and may come out all-zero or NaN-scaled; harmless,
-    # since a row's A only feeds its own accumulator and the epilogue drops those rows.
+    # Quantize only the rows gemm2 can read. It clamps its block count to
+    # ``cumsum0 // BM`` from the same ``num_valid_ids`` (gemm2.py, _gemm2 prologue), so the
+    # tail of the ``sorted_size`` buffer is dead: at decode that is 14576 allocated rows
+    # against 3680 live ones, and quantizing all of them measured 30 us against 18 us.
+    # Intra-expert padding *inside* the live region still gets quantized, and since
+    # inter_sorted is torch.empty those rows hold whatever the allocator handed over. That
+    # is safe but only because of the epilogue's ``token_id >= i32_M`` drop, not because
+    # they are zero: verified by filling them with NaN, which moved the output by 1.0x the
+    # kernel's own atomic-fadd noise while the same NaN over live rows moved it 95x.
     _s2_dtype, _s2_scale, _w2_sref = "bf16", None, None
     if _s2_fp8:
-        _inter_q, _s2_scale = per_token_quant_hip(inter_sorted, quant_dtype=dtypes.fp8)
+        _inter_q, _s2_scale = per_token_quant_hip(
+            inter_sorted, quant_dtype=dtypes.fp8, num_rows=num_valid_ids
+        )
         try:
             _w2_sref = get_sref_u8(
                 w2_scale.view(torch.uint8),
