@@ -207,7 +207,7 @@ def fused_moe_a16wmix(
         # Imported lazily: the bf16 path must not pay for, or depend on, any of this.
         from aiter import dtypes
         from aiter.ops.flydsl.a16wmix_fp8_prep import get_sref_u8
-        from aiter.ops.quant import per_token_quant_hip
+        from aiter.ops.quant import dynamic_per_token_scaled_quant, per_token_quant_hip
         from aiter.ops.shuffle import shuffle_scale_a16w4
         from aiter.utility.fp4_utils import e8m0_shuffle
     if _s1_fp8:
@@ -292,8 +292,35 @@ def fused_moe_a16wmix(
     # kernel's own atomic-fadd noise while the same NaN over live rows moved it 95x.
     _s2_dtype, _s2_scale, _w2_sref = "bf16", None, None
     if _s2_fp8:
-        _inter_q, _s2_scale = per_token_quant_hip(
-            inter_sorted, quant_dtype=dtypes.fp8, num_rows=num_valid_ids
+        # num_rows bounds the WORK but not the LAUNCH: it is a device pointer, so
+        # quant_kernels.cu takes its row count from input.numel()/cols and launches one
+        # block per allocated row, most of which then exit immediately. The live prefix
+        # does have a host-computable supremum though -- every active expert's run is
+        # padded up to bm, and at most min(routes, experts) experts are active, so
+        #     num_valid <= routes + min(routes, experts) * (bm - 1)
+        # which at decode is 4096 against a sorted_size of 14576. (The bound already used
+        # for local_max_sorted above, routes + experts*bm - topk, is the loose one: it
+        # assumes every expert is active and equals sorted_size here.) Outputs stay full
+        # height so every downstream shape and buffer descriptor is untouched; only the
+        # prefix is quantized, and rows past it are unreachable for the same reason the
+        # rest of this buffer's tail is.
+        # sorting_experts, not experts: under an expert mask moe_sorting lays out that many
+        # slots, so it is the one that bounds how many runs can be active. Using the
+        # smaller of the two would make this bound too small, which is the one direction
+        # that is unsafe -- it would leave live rows unquantized.
+        _routes = int(topk_ids.numel())
+        _live_max = min(_routes + min(_routes, sorting_experts) * (bm - 1), sorted_size)
+        _inter_q = torch.empty(
+            sorted_size, inter_dim, dtype=dtypes.fp8, device=hidden_states.device
+        )
+        _s2_scale = torch.empty(
+            sorted_size, 1, dtype=torch.float32, device=hidden_states.device
+        )
+        dynamic_per_token_scaled_quant(
+            _inter_q[:_live_max],
+            inter_sorted[:_live_max],
+            _s2_scale[:_live_max],
+            num_rows=num_valid_ids,
         )
         try:
             _w2_sref = get_sref_u8(

@@ -149,27 +149,33 @@ def test_padding_rows_cannot_reach_the_output():
 def padding_rows_two_sided_control():
     """The above passing only means something if corrupting LIVE rows does move the output.
 
-    Hook per_token_quant_hip rather than an allocation: at that call inter_sorted already
-    holds gemm1's output and the num_rows kwarg carries num_valid, so both ranges are
+    Hook the quantization call rather than an allocation: at that point inter_sorted
+    already holds gemm1's output and num_rows carries num_valid, so both ranges are
     addressable. Patch it on aiter.ops.quant -- the wrapper imports the name inside the
     function body, so the wrapper module has no such attribute.
+
+    The wrapper drives ``dynamic_per_token_scaled_quant(out, input, scales, ...)``
+    directly, so that is what is hooked; ``input`` is already the live-prefix view, and
+    the padding range inside it is [num_valid, view_rows). Rows past the view are never
+    quantized at all and are covered by the allocation-poison test above instead.
     """
-    real_q = quant_mod.per_token_quant_hip
+    real_q = quant_mod.dynamic_per_token_scaled_quant
 
     def run(d, corrupt):
         info = {"nv": None, "rows": 0}
 
-        def patched(x, *a, **k):
+        def patched(out, x, scales, *a, **k):
             nr = k.get("num_rows")
             if corrupt and x.dim() == 2 and x.shape[1] == INTER_DIM and nr is not None:
                 nv = int(nr.flatten()[0].item())
                 info["nv"] = nv
                 sl = slice(nv, x.shape[0]) if corrupt == "pad" else slice(0, nv)
-                info["rows"] = sl.stop - sl.start
-                x[sl].fill_(float("nan"))
-            return real_q(x, *a, **k)
+                info["rows"] = max(sl.stop - sl.start, 0)
+                if info["rows"]:
+                    x[sl].fill_(float("nan"))
+            return real_q(out, x, scales, *a, **k)
 
-        quant_mod.per_token_quant_hip = patched
+        quant_mod.dynamic_per_token_scaled_quant = patched
         try:
             out = a16wmix.fused_moe_a16wmix(
                 d["x"], d["w1"], d["w2"], d["topk_weights"], d["topk_ids"],
@@ -177,7 +183,7 @@ def padding_rows_two_sided_control():
                 act="situv2", block_m=16, tile_m=16, w1_layout="standard",
             ).clone()
         finally:
-            quant_mod.per_token_quant_hip = real_q
+            quant_mod.dynamic_per_token_scaled_quant = real_q
         return out, info
 
     for tokens in (1, 16, 1024):
