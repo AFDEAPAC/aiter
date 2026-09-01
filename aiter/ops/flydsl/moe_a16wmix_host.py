@@ -264,7 +264,35 @@ def _default_tiles_fallback(*, D_HIDDEN, D_INTER, tokens, w_dtype, tile_m, stage
     }
 
 
-def resolve_a16wmix_gemm1_config(*, w_dtype, model_dim, inter_dim, experts, topk, tokens, tile_m, csv_path=None):
+
+def _fp8_tile_override(cfg, *, stage, tile_m):
+    """Tiles chosen while A was bf16 are not the fp8 optimum.
+
+    a16wmix_tuned.csv predates the fp8 path and has no a_dtype column, so the fp8 arm has
+    always inherited bf16's tiles. Swept against the fp8 kernels at production dims
+    (3584/384/896, topk 16), the two that move are:
+
+      stage 2  tile_n 256 -> 128, xcd 1 -> 0.  tile_n=128 won at every token count tried
+               (1, 2, 8, 16, 32, 8192) and the gap to 256 is a cliff, not a slope: at
+               prefill the four best configs are all tile_n=128 (3523-3792 us) and the
+               best 256 is 5660 us. Gains where the CSV picks 256 -- which is the decode
+               band -- are 1.13x / 1.17x / 1.11x / 1.06x at token 1 / 2 / 8 / 16. Token
+               counts whose CSV row already says 128 are unaffected.
+      stage 1  tile_k 128 -> 256 at BM<=16, worth 1.06-1.08x at the decode shape. Prefill
+               (BM=32) measured no gain, so it keeps 128.
+
+    bf16 is untouched: this runs only when a_dtype == "fp8".
+    """
+    cfg = dict(cfg)
+    if stage == 2:
+        cfg["tile_n"] = 128
+        cfg["xcd_swizzle"] = 0
+    elif int(tile_m) <= 16:
+        cfg["tile_k"] = 256
+    return cfg
+
+
+def resolve_a16wmix_gemm1_config(*, w_dtype, model_dim, inter_dim, experts, topk, tokens, tile_m, csv_path=None, a_dtype="bf16"):
     """Resolve the ours-tuned gemm1 tile-config: exact CSV row if present, else the
     slim documented fallback. Never returns None (arbitrary shapes still run)."""
     cfg = _resolve_ours_tuned(
@@ -278,9 +306,10 @@ def resolve_a16wmix_gemm1_config(*, w_dtype, model_dim, inter_dim, experts, topk
         csv_path=csv_path,
     )
     if cfg is None:
-        return _default_tiles_fallback(
+        cfg = _default_tiles_fallback(
             D_HIDDEN=model_dim, D_INTER=inter_dim, tokens=tokens, w_dtype=w_dtype, tile_m=tile_m, stage=1
         )
+        return _fp8_tile_override(cfg, stage=1, tile_m=tile_m) if a_dtype == "fp8" else cfg
     # int4 gemm1 tile_n is tile_m-dependent (the BM==64 W1-reuse occupancy gate), while
     # the CSV row assumes the recommended tile_m. Re-derive tile_n from the ACTUAL BM so
     # an explicit caller tile_m stays correct; the CSV row still owns the other fields.
@@ -288,10 +317,10 @@ def resolve_a16wmix_gemm1_config(*, w_dtype, model_dim, inter_dim, experts, topk
     if w_dtype == "int4" and inter_dim % 64 == 0:
         cfg["tile_n"] = 64 if int(tile_m) == 64 else _default_tile_n(inter_dim, w_dtype=w_dtype)
     cfg["tile_m"] = int(tile_m)
-    return cfg
+    return _fp8_tile_override(cfg, stage=1, tile_m=tile_m) if a_dtype == "fp8" else cfg
 
 
-def resolve_a16wmix_gemm2_config(*, w_dtype, model_dim, inter_dim, experts, topk, tokens, tile_m, csv_path=None):
+def resolve_a16wmix_gemm2_config(*, w_dtype, model_dim, inter_dim, experts, topk, tokens, tile_m, csv_path=None, a_dtype="bf16"):
     """Resolve the ours-tuned gemm2 tile-config: exact CSV row if present, else the
     slim documented fallback. Never returns None."""
     cfg = _resolve_ours_tuned(
@@ -304,11 +333,11 @@ def resolve_a16wmix_gemm2_config(*, w_dtype, model_dim, inter_dim, experts, topk
         stage=2,
         csv_path=csv_path,
     )
-    if cfg is not None:
-        return cfg
-    return _default_tiles_fallback(
-        D_HIDDEN=model_dim, D_INTER=inter_dim, tokens=tokens, w_dtype=w_dtype, tile_m=tile_m, stage=2
-    )
+    if cfg is None:
+        cfg = _default_tiles_fallback(
+            D_HIDDEN=model_dim, D_INTER=inter_dim, tokens=tokens, w_dtype=w_dtype, tile_m=tile_m, stage=2
+        )
+    return _fp8_tile_override(cfg, stage=2, tile_m=tile_m) if a_dtype == "fp8" else cfg
 
 
 def a16wi4_recommend_block_m(tokens, experts, topk, *, base_block_m=32):
@@ -447,6 +476,7 @@ def flydsl_a16w4_gemm1(
     # them from a tuned row would make it measure the wrong kernel.
     if not use_csv_config and os.environ.get("A16WMIX_FORCE_TILES", "0") != "1":
         _o = resolve_a16wmix_gemm1_config(
+            a_dtype=a_dtype,
             w_dtype=w_dtype,
             model_dim=D_HIDDEN,
             inter_dim=D_INTER,
@@ -625,6 +655,7 @@ def flydsl_a16w4_gemm2(
     # them from a tuned row would make it measure the wrong kernel.
     if not use_csv_config and os.environ.get("A16WMIX_FORCE_TILES", "0") != "1":
         _o = resolve_a16wmix_gemm2_config(
+            a_dtype=a_dtype,
             w_dtype=w_dtype,
             model_dim=D_HIDDEN,
             inter_dim=D_INTER,

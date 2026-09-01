@@ -193,6 +193,13 @@ def padding_rows_two_sided_control():
         floor = (a.float() - b.float()).abs().max().item()
         pa, ia = run(d, "pad")
         pl, il = run(d, "live")
+        if ia["nv"] is None:
+            # The hook is on the stage2 quantization, which only runs with
+            # AITER_A16WMIX_FP8_S2=1. On the bf16 and stage1-only arms there is nothing to
+            # hook, so skip rather than crash on a None -- the allocation-poison test below
+            # still covers those arms, and it is the one that exercises torch.empty.
+            print("  stage2 quant did not run (arm has FP8_S2 off) -- control not applicable")
+            return
         da = (a.float() - pa.float()).abs().max().item()
         dl = (a.float() - pl.float()).abs().max().item()
         print(
