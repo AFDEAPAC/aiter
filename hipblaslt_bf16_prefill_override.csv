@@ -1,0 +1,23 @@
+Git Version: 5b515cf1bc
+transA,transB,batch_count,m,n,k,a_type,b_type,c_type,compute_type,solution_index
+T,N,1,64,16384,4096,bf16_r,bf16_r,bf16_r,f32_r,204345
+transA,transB,batch_count,m,n,k,a_type,b_type,c_type,compute_type,solution_index
+T,N,1,256,16384,4096,bf16_r,bf16_r,bf16_r,f32_r,204387
+transA,transB,batch_count,m,n,k,a_type,b_type,c_type,compute_type,solution_index
+T,N,1,512,16384,4096,bf16_r,bf16_r,bf16_r,f32_r,204387
+transA,transB,batch_count,m,n,k,a_type,b_type,c_type,compute_type,solution_index
+T,N,1,1024,16384,4096,bf16_r,bf16_r,bf16_r,f32_r,204387
+transA,transB,batch_count,m,n,k,a_type,b_type,c_type,compute_type,solution_index
+T,N,1,64640,1,4096,bf16_r,bf16_r,bf16_r,f32_r,197063
+transA,transB,batch_count,m,n,k,a_type,b_type,c_type,compute_type,solution_index
+T,N,1,64,14336,4096,bf16_r,bf16_r,bf16_r,f32_r,196160
+transA,transB,batch_count,m,n,k,a_type,b_type,c_type,compute_type,solution_index
+T,N,1,64,4096,4096,bf16_r,bf16_r,bf16_r,f32_r,196465
+transA,transB,batch_count,m,n,k,a_type,b_type,c_type,compute_type,solution_index
+T,N,1,512,4096,4096,bf16_r,bf16_r,bf16_r,f32_r,195974
+transA,transB,batch_count,m,n,k,a_type,b_type,c_type,compute_type,solution_index
+T,N,1,1024,4096,4096,bf16_r,bf16_r,bf16_r,f32_r,204218
+transA,transB,batch_count,m,n,k,a_type,b_type,c_type,compute_type,solution_index
+T,N,1,2048,4096,4096,bf16_r,bf16_r,bf16_r,f32_r,204387
+transA,transB,batch_count,m,n,k,a_type,b_type,c_type,compute_type,solution_index
+T,N,4,1024,4096,4096,bf16_r,bf16_r,bf16_r,f32_r,204387
