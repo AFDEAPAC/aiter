@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
+import functools
+import json
+import os
+
 import triton
 import triton.language as tl
 from aiter.ops.triton.utils._triton.pid_preprocessing import pid_grid, remap_xcd
@@ -426,6 +430,37 @@ def _gemm_a8w8_blockscale_preshuffle_kernel(
         tl.store(c_ptrs, c, mask=c_mask)
 
 
+@functools.lru_cache(maxsize=1)
+def _load_tuned_configs() -> dict:
+    """Load AITER_TUNED_CONFIGS_JSON: {"N,K": {"M_LEQ_<bound>" | "any": config}}.
+
+    Deliberately not shipped as configs/{arch}-GEMM-A8W8_BLOCKSCALE-N=..-K=..json:
+    such a table is searched with STANDARD_M_BOUNDS only, which would silently
+    drop the DeepSeek-V4-Pro bounds (1, 320, 400, 480, 560, 640), and a shape
+    with no "any" entry would raise instead of falling back to the shipped table.
+    """
+    path = os.environ.get("AITER_TUNED_CONFIGS_JSON", "")
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _pick_tuned_config(M: int, N: int, K: int) -> dict | None:
+    buckets = _load_tuned_configs().get(f"{N},{K}")
+    if buckets is None:
+        return None
+    for bound, key in sorted(
+        (int(k[len("M_LEQ_") :]), k) for k in buckets if k.startswith("M_LEQ_")
+    ):
+        if M <= bound:
+            return buckets[key]
+    return buckets.get("any")
+
+
 def _get_config(
     M: int,
     N: int,
@@ -433,6 +468,12 @@ def _get_config(
     shuffle: bool = False,
     backend: str | None = None,
 ):
+    tuned = _pick_tuned_config(M, N, K)
+    if tuned is not None:
+        # Fresh copy: callers mutate the returned config (SPLITK_BLOCK_SIZE,
+        # GROUP_K, GROUP_N) before handing it to the kernel.
+        return dict(tuned), True
+
     shuffle_suffix = "_PRESHUFFLED" if shuffle else ""
     config_name = f"GEMM-A8W8_BLOCKSCALE{shuffle_suffix}"
 
