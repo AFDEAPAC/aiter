@@ -2,6 +2,7 @@
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
 import functools
+import glob
 import hashlib
 import importlib
 import json
@@ -661,17 +662,49 @@ def _config_tune_files(md_name):
     # bake the tuned table into the module's source (GENERATE_LOOKUP_TABLE) at
     # build time, so a module keeps dispatching from the table of whichever CSV
     # was selected when its .so was linked, whatever AITER_CONFIG_* says later.
+    #
+    # one argument can carry an os.pathsep-joined list of glob patterns rather
+    # than a single path -- opus_gemm's --tune_files passes three that way --
+    # so expand each token the same way the generator's own _expand_tune_paths
+    # does (split, strip, glob, sorted, dedup, csrc/opus_gemm/gen_instances.py)
+    # and the stamp covers exactly the files the build read. matching on the
+    # token as a whole instead resolves nothing and stamps nothing.
+    #
+    # returns (resolved, declared): declared is every path the command named,
+    # so a module that resolves nothing can be told apart from one that has no
+    # tuned config to begin with.
     cmd = get_args_of_build(md_name).get("blob_gen_cmd") or ""
-    files = []
+    declared, files = [], []
     for c in cmd if isinstance(cmd, (list, tuple)) else [cmd]:
         for tok in shlex.split(str(c)):
-            if tok.endswith(".csv") and os.path.isfile(tok):
-                files.append(tok)
-    return files
+            for pat in tok.split(os.pathsep):
+                pat = pat.strip()
+                if not pat.endswith(".csv"):
+                    continue
+                declared.append(pat)
+                hits = sorted(p for p in glob.glob(pat) if os.path.isfile(p))
+                if not hits and os.path.isfile(pat):
+                    # a literal path that glob would read as a pattern
+                    hits = [pat]
+                for p in hits:
+                    if p not in files:
+                        files.append(p)
+    return files, declared
 
 
-def _config_stamp(md_name):
-    files = _config_tune_files(md_name)
+def _config_stamp(md_name, files=None, declared=None):
+    if files is None:
+        files, declared = _config_tune_files(md_name)
+    if declared and not files:
+        # an unstamped module is expected; a module that asks for tuned configs
+        # and finds none is a bug, and staying quiet about it would look like
+        # protection while giving none.
+        logger.warning(
+            f"[{md_name}] blob_gen_cmd names {len(declared)} tuned-config "
+            f"path(s), none of which resolve to a readable file: {declared}. "
+            f"the module will not be stamped, so a stale compiled-in lookup "
+            f"table cannot be detected."
+        )
     if not files:
         return ""
     h = hashlib.md5()
@@ -705,8 +738,8 @@ def _needs_config_rebuild(md_name):
     if not AITER_CONFIG_STAMP:
         return False
     try:
-        files = _config_tune_files(md_name)
-        want = _config_stamp(md_name)
+        files, declared = _config_tune_files(md_name)
+        want = _config_stamp(md_name, files, declared)
     except Exception:
         # an unreadable config must not be able to block an import
         return False
