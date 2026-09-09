@@ -6,14 +6,22 @@ Unit tests for mp_tuner polling loop logic.
 Simulates async_result behavior without GPU/multiprocessing to verify:
 1. consecutive_timeouts tracks correctly and resets on success
 2. half-GPU threshold triggers break at the right time
-3. KeyError tasks stay in remaining_tasks and get retried after root-cause restart
+3. KeyError ("PID not in gpu_map") tasks request a pool restart, are retried on the
+   rebuilt pool, and are dropped once MAPPING_ERROR_MAX_RETRIES is reached
 
-Run: python3 -m unittest op_tests.test_mp_tuner_logic -v
+TestRealMpTunerMappingError drives the real mp_tuner() loop with a fake pool, so it
+covers the shipped code rather than the simulation below.
+
+Run: python3 -m unittest op_tests.tuning_tests.test_mp_tuner_logic -v
 """
 
 import time
 import unittest
+from unittest import mock
 from multiprocessing import TimeoutError as MPTimeoutError
+
+from aiter.utility import mp_tuner as mp_tuner_mod
+from aiter.utility.mp_tuner import MAPPING_ERROR_MAX_RETRIES
 
 
 class FakeAsyncResult:
@@ -38,11 +46,19 @@ class FakeAsyncResult:
             raise type("AcceleratorError", (Exception,), {})("GPU fault")
 
 
-def simulate_poll_round(remaining_tasks, task_start_times, mp_num, timeout):
+def simulate_poll_round(
+    remaining_tasks, task_start_times, mp_num, timeout, mapping_error_retries=None
+):
     """
     Simulate one round of the mp_tuner polling loop.
+
+    mapping_error_retries: per-task KeyError counter, carried across rounds by the
+    caller exactly as mp_tuner does. Omit it for single-round tests.
+
     Returns (completed, dummy_failed, pool_restart_needed, broke_early)
     """
+    if mapping_error_retries is None:
+        mapping_error_retries = {}
     completed_this_round = []
     dummy_failed_tasks = []
     consecutive_timeouts = 0
@@ -82,7 +98,11 @@ def simulate_poll_round(remaining_tasks, task_start_times, mp_num, timeout):
             is_mapping_error = error_type == "KeyError"
 
             if is_mapping_error:
+                mapping_error_retries[k] = mapping_error_retries.get(k, 0) + 1
                 dummy_failed_tasks.append((k, "mapping error"))
+                pool_restart_needed = True
+                if mapping_error_retries[k] >= MAPPING_ERROR_MAX_RETRIES:
+                    completed_this_round.append((k, async_result))
             elif error_type == "AcceleratorError":
                 completed_this_round.append((k, async_result))
                 pool_restart_needed = True
@@ -202,8 +222,12 @@ class TestConsecutiveTimeouts(unittest.TestCase):
 
 class TestKeyErrorHandling(unittest.TestCase):
 
-    def test_keyerror_stays_in_remaining(self):
-        """KeyError tasks should NOT be in completed_this_round."""
+    def test_keyerror_stays_in_remaining_until_retries_exhausted(self):
+        """A first KeyError keeps the task queued but must request a pool restart.
+
+        gpu_map is only rebuilt by a restart, so without one the task can never
+        succeed; it is kept queued so the retry lands on the rebuilt pool.
+        """
         mp_num = 4
         timeout = 0.0
         now = time.time()
@@ -217,10 +241,10 @@ class TestKeyErrorHandling(unittest.TestCase):
             remaining, start_times, mp_num, timeout
         )
         completed_ids = {k for k, _ in completed}
-        self.assertNotIn(0, completed_ids, "KeyError task should NOT be completed")
+        self.assertNotIn(0, completed_ids, "KeyError task should be retried, not dropped")
         self.assertIn(1, completed_ids, "OK task should be completed")
         self.assertEqual(len(dummy), 1, "KeyError task should be in dummy_failed")
-        self.assertFalse(restart, "KeyError alone should NOT trigger restart")
+        self.assertTrue(restart, "KeyError must request the restart that rebuilds gpu_map")
 
     def test_keyerror_with_timeout_gets_resubmitted(self):
         """KeyError tasks wait for root-cause timeout to trigger restart."""
@@ -241,14 +265,21 @@ class TestKeyErrorHandling(unittest.TestCase):
         self.assertIn(1, completed_ids, "Root-cause timeout is completed")
         self.assertTrue(restart, "Timeout should trigger restart")
 
+
         new_remaining = [(k, ar) for k, ar in remaining if k not in completed_ids]
         self.assertEqual(len(new_remaining), 1)
         self.assertEqual(
             new_remaining[0][0], 0, "Only KeyError task remains for resubmit"
         )
 
-    def test_keyerror_no_restart_without_root_cause(self):
-        """If only KeyError tasks remain, no restart, they keep polling."""
+    def test_keyerror_only_tasks_still_terminate(self):
+        """KeyError-only tasks must drain, not poll forever.
+
+        A KeyError is raised immediately, so it never reaches the MPTimeoutError
+        branch and the task's timeout is never evaluated. Before the retry bound
+        existed these tasks were never completed and never triggered a restart, so
+        the loop spun at 1 Hz forever whenever no other task supplied a root cause.
+        """
         mp_num = 4
         timeout = 100.0
         now = time.time()
@@ -257,13 +288,19 @@ class TestKeyErrorHandling(unittest.TestCase):
             (1, FakeAsyncResult("keyerror")),
         ]
         start_times = {k: now for k, _ in remaining}
+        retries = {}
 
-        completed, dummy, restart, broke = simulate_poll_round(
-            remaining, start_times, mp_num, timeout
+        for round_idx in range(MAPPING_ERROR_MAX_RETRIES):
+            completed, dummy, restart, broke = simulate_poll_round(
+                remaining, start_times, mp_num, timeout, retries
+            )
+            self.assertTrue(restart, "every mapping error must request a restart")
+            for item in completed:
+                remaining.remove(item)
+
+        self.assertEqual(
+            remaining, [], "all KeyError tasks must be drained within the retry bound"
         )
-        self.assertFalse(restart, "No restart without root cause")
-        self.assertEqual(len(completed), 0, "Nothing completed")
-        self.assertEqual(len(dummy), 2, "Both are mapping errors")
 
 
 class TestAcceleratorError(unittest.TestCase):
@@ -289,6 +326,97 @@ class TestAcceleratorError(unittest.TestCase):
         self.assertIn(0, completed_ids)
         self.assertIn(1, completed_ids)
         self.assertNotIn(2, completed_ids, "Task 2 not reached due to break")
+
+
+class FakePool:
+    """Stands in for mp.Pool so the real mp_tuner loop can run without GPUs.
+
+    script: task index -> list of FakeAsyncResult behaviors, consumed one entry per
+    submission, so a task can behave differently before and after a pool restart.
+    The last entry is reused if the task is submitted more times than scripted.
+    """
+
+    instances = 0
+
+    def __init__(self, script, submit_counts, processes=None, **kwargs):
+        self.script = script
+        # Shared across pool restarts: a resubmitted task must advance to its next
+        # scripted behavior, not replay the first one on the fresh pool.
+        self.submit_counts = submit_counts
+        FakePool.instances += 1
+
+    def apply_async(self, func, args=()):
+        if func.__name__ == "get_pid":
+            # Distinct fake PIDs so mp_tuner can build gpu_map.
+            return FakeAsyncResult("ok", value=10000 + FakePool.instances)
+        # work_group submission: args = (gpu_map, fast_mode, err_ratio, in_data,
+        # task_group[k], verbose); recover k from the task payload's info field.
+        info = args[4][0]
+        k = int(info.split("_")[1])
+        n = self.submit_counts.get(k, 0)
+        self.submit_counts[k] = n + 1
+        behaviors = self.script[k]
+        return FakeAsyncResult(behaviors[min(n, len(behaviors) - 1)], value=[(info, 1.0, 0.0)])
+
+    def close(self):
+        pass
+
+    def terminate(self):
+        pass
+
+    def join(self):
+        pass
+
+
+class TestRealMpTunerMappingError(unittest.TestCase):
+    """Drives the shipped mp_tuner() loop, not the simulation above."""
+
+    def _run(self, script, n_tasks):
+        tasks = [(f"task_{k}",) for k in range(n_tasks)]
+        in_datas = [(n_tasks, None)]
+        FakePool.instances = 0
+        submit_counts = {}
+
+        def make_pool(processes=None, **kwargs):
+            return FakePool(script, submit_counts, processes=processes, **kwargs)
+
+        with mock.patch.object(
+            mp_tuner_mod.torch.cuda, "device_count", return_value=2
+        ), mock.patch.object(mp_tuner_mod.mp, "set_start_method"), mock.patch.object(
+            mp_tuner_mod.mp, "Pool", side_effect=make_pool
+        ):
+            return mp_tuner_mod.mp_tuner(tasks, in_datas, mp_num=2, timeout=None)
+
+    def test_permanent_mapping_error_terminates(self):
+        """The regression: a task whose PID is never in gpu_map must not spin forever.
+
+        timeout=None disables the only other exit, and a KeyError raises instantly so
+        it never reaches the timeout branch. Before the retry bound this loop never
+        exited. Returning at all is the assertion; the values just confirm the task is
+        reported as failed rather than silently dropped.
+        """
+        script = {0: ["keyerror"], 1: ["keyerror"]}
+        t0 = time.time()
+        out = self._run(script, 2)
+        self.assertLess(time.time() - t0, 60, "mp_tuner must terminate, not hang")
+        self.assertEqual(len(out), 2, "one result per task, cardinality preserved")
+        for info, latency, err in out:
+            self.assertEqual(latency, float("inf"), "failed task reported as inf")
+
+    def test_mapping_error_recovers_after_restart(self):
+        """A transient mapping error must not cost the task its real result.
+
+        Task 0 hits a stale gpu_map once, then succeeds on the rebuilt pool. The
+        retry bound must not turn that into a dummy failure.
+        """
+        script = {0: ["keyerror", "ok"], 1: ["ok"]}
+        out = self._run(script, 2)
+        self.assertEqual(len(out), 2)
+        latencies = {info: latency for info, latency, _ in out}
+        self.assertEqual(
+            latencies["task_0"], 1.0, "task 0 should keep its post-restart result"
+        )
+        self.assertEqual(latencies["task_1"], 1.0)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,11 @@ from aiter.test_common import checkAllclose
 from aiter import dtypes
 from aiter import logger
 
+# How many times a single task may fail with "PID not in gpu_map" before it is
+# recorded as failed and dropped. Each failure also requests a pool restart, which
+# rebuilds gpu_map; this bound is the backstop for the case where that does not help.
+MAPPING_ERROR_MAX_RETRIES = 3
+
 
 def _is_mapping_error(exc: BaseException) -> bool:
     return isinstance(exc, KeyError)
@@ -456,10 +461,11 @@ def mp_tuner(
     logged_error_types = (
         set()
     )  # Track error types that already logged to avoid duplicates
+    # Per-task count of "PID not in gpu_map" failures; bounds the retry loop.
+    mapping_error_retries = {}
 
     while remaining_tasks:
         completed_this_round = []
-        dummy_failed_tasks = []
         consecutive_timeouts = 0
         half_gpu = max(1, (mp_num + 1) // 2)
 
@@ -526,10 +532,32 @@ def mp_tuner(
                 error_type = type(e).__name__
                 is_mapping_error = _is_mapping_error(e)
                 is_accelerator_error = _is_accelerator_error(e)
-                # not restart as this is not root use
                 if is_mapping_error:
-                    error_msg = f"[Mapping Error] Task {k} - Process PID not in GPU map: {error_type} - {e}"
-                    dummy_failed_tasks.append((k, "mapping error"))
+                    # mp.Pool silently replaces a dead worker, so the replacement's PID is
+                    # absent from gpu_map and every task it picks up raises KeyError. That
+                    # raise is immediate, so it never reaches the MPTimeoutError branch and
+                    # the task's timeout is never evaluated: the task cannot fail out on its
+                    # own no matter how long it is polled. Rebuilding gpu_map via a pool
+                    # restart is the only remedy, so request one here rather than waiting for
+                    # some other task to trigger it -- if none does, the loop never exits.
+                    # Retries are bounded so termination does not depend on the restart
+                    # actually clearing the condition.
+                    mapping_error_retries[k] = mapping_error_retries.get(k, 0) + 1
+                    attempt = mapping_error_retries[k]
+                    error_msg = (
+                        f"[Mapping Error] Task {k} - Process PID not in GPU map: "
+                        f"{error_type} - {e} (attempt {attempt}/{MAPPING_ERROR_MAX_RETRIES})"
+                    )
+                    pool_restart_needed = True
+                    if attempt >= MAPPING_ERROR_MAX_RETRIES:
+                        print(f"{error_msg} - giving up on this task", flush=True)
+                        failed_tasks.append((k, "mapping error"))
+                        dummy_results = []
+                        add_dummy_result(k, dummy_results)
+                        result_dict[k] = (
+                            dummy_results if shape_grouped else [dummy_results[0]]
+                        )
+                        completed_this_round.append((k, async_result))
                 elif is_accelerator_error:
                     # GPU fault (e.g. illegal memory access): worker returns exception instead of
                     # hanging. Unlike hang->timeout, the faulting worker may stay alive and accept
@@ -639,7 +667,10 @@ def mp_tuner(
     # Print summary
     if failed_tasks:
         timeout_count = sum(1 for _, reason in failed_tasks if reason == "timeout")
-        crash_count = len(failed_tasks) - timeout_count
+        mapping_count = sum(
+            1 for _, reason in failed_tasks if reason == "mapping error"
+        )
+        crash_count = len(failed_tasks) - timeout_count - mapping_count
         summary = (
             f"\n{'=' * 60}\n"
             f"Tuning Summary:\n"
@@ -648,6 +679,7 @@ def mp_tuner(
             f"  Failed: {len(failed_tasks)}\n"
             f"    - Timeouts (GPU hang): {timeout_count}\n"
             f"    - Crashes (memory fault): {crash_count}\n"
+            f"    - Worker died, PID not in gpu_map: {mapping_count}\n"
             f"{'=' * 60}"
         )
         logger.warning(summary)
