@@ -16,8 +16,17 @@ from ..ops.gemm_op_common import get_padded_m
 from ..utility import dtypes
 
 
+# Name-qualified on purpose. aiter/__init__.py star-imports gemm_op_a8w8 and then
+# gemm_op_a4w4, so while this was also called compute_gemm_SplitK it replaced the
+# a8w8 function of that name in the aiter namespace. Every a8w8-family tuner calls
+# aiter.compute_gemm_SplitK and so silently received the constant below instead of
+# the computed split-K bound. The a4w4 constant is deliberate (added in 28c197351,
+# "enable gemm_a4w4 asm kernel to tune splitk"), so it is kept for a4w4 and the
+# collision is removed instead.
 @functools.lru_cache(maxsize=1024)
-def compute_gemm_SplitK(M: int, N: int, K: int, tile_m: int, tile_n: int, tile_k: int):
+def compute_gemm_SplitK_a4w4(
+    M: int, N: int, K: int, tile_m: int, tile_n: int, tile_k: int
+):
     cu_num = get_cu_num()
     tile_num = ((M + tile_m - 1) // tile_m) * ((N + tile_n - 1) // tile_n)
     cusPerTile = cu_num / tile_num

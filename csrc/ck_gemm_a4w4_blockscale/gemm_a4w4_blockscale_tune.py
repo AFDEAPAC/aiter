@@ -268,7 +268,7 @@ class GemmA4W4BlockScaleTuner(GemmCommonTuner):
             for kernel_idx in range(ck_kernels_num):
                 kernel = kernels_list[kernel_idx]
                 maxsplitK = (
-                    aiter.compute_gemm_SplitK(
+                    aiter.compute_gemm_SplitK_a4w4(
                         M,
                         N,
                         K,
@@ -319,7 +319,7 @@ class GemmA4W4BlockScaleTuner(GemmCommonTuner):
             for key in asm_tiles:
                 tile_m, tile_n, splitk = key
                 maxsplitK = (
-                    aiter.compute_gemm_SplitK(M, N, K, tile_m, tile_n, 256)
+                    aiter.compute_gemm_SplitK_a4w4(M, N, K, tile_m, tile_n, 256)
                     if useSplitK
                     else 0
                 )
