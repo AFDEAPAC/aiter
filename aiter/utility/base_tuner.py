@@ -612,7 +612,15 @@ class TunerCommon:
         return old_val, old_rebuild
 
     def _restore_config_env(self, env_name, old_val, old_rebuild=0):
-        """Restore the config env var and AITER_REBUILD to original values."""
+        """Restore the config env var, AITER_REBUILD and the rebuilt modules.
+
+        Restoring the env var is not enough. Every module rebuilt while
+        AITER_REBUILD was on has the *candidate* tuned table compiled into it,
+        and that .so outlives this process: the JIT only rebuilds a module when
+        its .so is missing, so every later run in the same container silently
+        dispatches from the candidate table instead of the restored config.
+        Drop those .so files and let the next import rebuild them.
+        """
         if env_name is None:
             return
         if old_val is None:
@@ -623,6 +631,17 @@ class TunerCommon:
             from aiter.jit import core as jit_core
 
             jit_core.AITER_REBUILD = old_rebuild
+            mds = getattr(jit_core, "__mds", None) or {}
+            for md in list(mds):
+                so = os.path.join(jit_core.get_user_jit_dir(), f"{md}.so")
+                try:
+                    os.remove(so)
+                except OSError:
+                    continue
+                logger.info(f"removed {so} rebuilt against the candidate config")
+            mds.clear()
+            jit_core.get_module.cache_clear()
+            jit_core.AITER_CONFIGS.get_config_file.cache_clear()
         except ImportError:
             pass
 
