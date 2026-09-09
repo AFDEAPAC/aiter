@@ -2,6 +2,7 @@
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
 import functools
+import hashlib
 import importlib
 import json
 import logging
@@ -27,6 +28,10 @@ from file_baton import FileBaton  # noqa: E402
 from torch_guard import torch_compile_guard  # noqa: E402
 
 AITER_REBUILD = int(os.environ.get("AITER_REBUILD", "0"))
+# 0: never check the compiled-in tuned table. 1 (default): rebuild when the .so
+# was built from different tuned-config contents than the ones selected now; an
+# unstamped .so is adopted with a warning. 2: an unstamped .so counts as stale.
+AITER_CONFIG_STAMP = int(os.environ.get("AITER_CONFIG_STAMP", "1"))
 ENABLE_CK = int(os.environ.get("ENABLE_CK", "1")) != 0
 AITER_DISABLE_KERNARG_PRELOAD = (
     int(os.environ.get("AITER_DISABLE_KERNARG_PRELOAD", "0")) != 0
@@ -651,10 +656,94 @@ def _needs_arch_rebuild(md_name):
     return True
 
 
+def _config_tune_files(md_name):
+    # tuned-config files that feed this module's blob_gen_cmd. the generators
+    # bake the tuned table into the module's source (GENERATE_LOOKUP_TABLE) at
+    # build time, so a module keeps dispatching from the table of whichever CSV
+    # was selected when its .so was linked, whatever AITER_CONFIG_* says later.
+    cmd = get_args_of_build(md_name).get("blob_gen_cmd") or ""
+    files = []
+    for c in cmd if isinstance(cmd, (list, tuple)) else [cmd]:
+        for tok in shlex.split(str(c)):
+            if tok.endswith(".csv") and os.path.isfile(tok):
+                files.append(tok)
+    return files
+
+
+def _config_stamp(md_name):
+    files = _config_tune_files(md_name)
+    if not files:
+        return ""
+    h = hashlib.md5()
+    for path in files:
+        h.update(path.encode())
+        with open(path, "rb") as f:
+            h.update(f.read())
+    return h.hexdigest()
+
+
+def _stamp_path(md_name):
+    return os.path.join(get_user_jit_dir(), f"{md_name}.config_stamp")
+
+
+def _write_config_stamp(md_name, stamp=None):
+    try:
+        stamp = _config_stamp(md_name) if stamp is None else stamp
+        if not stamp:
+            return
+        path = _stamp_path(md_name)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            f.write(stamp)
+        os.replace(tmp, path)
+    except Exception:
+        # the stamp is a staleness guard, never a hard build requirement
+        logger.warning(f"[{md_name}] could not write a config stamp", exc_info=True)
+
+
+def _needs_config_rebuild(md_name):
+    if not AITER_CONFIG_STAMP:
+        return False
+    try:
+        files = _config_tune_files(md_name)
+        want = _config_stamp(md_name)
+    except Exception:
+        # an unreadable config must not be able to block an import
+        return False
+    if not want:
+        return False
+    try:
+        with open(_stamp_path(md_name)) as f:
+            have = f.read().strip()
+    except OSError:
+        have = None
+    if have == want:
+        return False
+    if have is None:
+        if AITER_CONFIG_STAMP < 2:
+            logger.warning(
+                f"[{md_name}] .so predates config stamping, so the tuned table "
+                f"it was built from is unknown; assuming it matches {want}. "
+                f"Set AITER_CONFIG_STAMP=2 to rebuild instead."
+            )
+            _write_config_stamp(md_name, want)
+            return False
+        logger.warning(
+            f"[{md_name}] .so predates config stamping and AITER_CONFIG_STAMP=2; "
+            f"rebuilding against {files}"
+        )
+    else:
+        logger.warning(
+            f"[{md_name}] compiled-in tuned table is stale (stamp {have} != "
+            f"{want}); rebuilding against {files}"
+        )
+    return True
+
+
 @functools.lru_cache(maxsize=1024)
 def get_module(md_name):
     check_numa()
-    if _needs_arch_rebuild(md_name):
+    if _needs_arch_rebuild(md_name) or _needs_config_rebuild(md_name):
         raise ModuleNotFoundError(md_name)
     get_module_custom_op(md_name)
     return __mds[md_name]
@@ -1004,6 +1093,7 @@ def build_module(
             )
             if is_python_module and not is_standalone:
                 shutil.copy(f"{opbd_dir}/{target_name}", f"{get_user_jit_dir()}")
+                _write_config_stamp(md_name)
             else:
                 shutil.copy(
                     f"{opbd_dir}/{target_name}", f"{AITER_ROOT_DIR}/op_tests/cpp/mha"
@@ -1256,7 +1346,11 @@ def _ctypes_call(func, fc_name, md_name):
         if _cache:
             return
         so_path = os.path.join(get_user_jit_dir(), f"{md_name}.so")
-        if not os.path.exists(so_path) or _needs_arch_rebuild(md_name):
+        if (
+            not os.path.exists(so_path)
+            or _needs_arch_rebuild(md_name)
+            or _needs_config_rebuild(md_name)
+        ):
             d_args = get_args_of_build(md_name)
             d_args["torch_exclude"] = True
             build_module(
