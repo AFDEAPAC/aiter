@@ -92,3 +92,4 @@ aiter/ops/opus/configs/
 # vim swaps
 *.swo
 *.swp
+*.config_stamp
