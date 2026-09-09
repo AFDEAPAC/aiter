@@ -9,6 +9,13 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
+# Set before aiter is imported: importing aiter opens /dev/kfd and initialises
+# ROCr, which reads this flag once at that point. Without it a GPU exception makes
+# ROCr write a core file the size of the process's GPU footprint into the current
+# working directory. The container's core_pattern is a systemd pipe that does not
+# exist here, and "ulimit -c" does not restrain ROCr: ROCr is not the kernel dumper.
+os.environ.setdefault("HSA_DISABLE_COREDUMP_ON_EXCEPTION", "1")
+
 import aiter
 from aiter import dtypes
 from aiter.jit.core import (

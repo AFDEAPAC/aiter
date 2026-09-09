@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+import os
+
+# Set before aiter is imported: importing aiter opens /dev/kfd and initialises
+# ROCr, which reads this flag once at that point. Without it a GPU exception makes
+# ROCr write a core file the size of the process's GPU footprint into the current
+# working directory. The container's core_pattern is a systemd pipe that does not
+# exist here, and "ulimit -c" does not restrain ROCr: ROCr is not the kernel dumper.
+os.environ.setdefault("HSA_DISABLE_COREDUMP_ON_EXCEPTION", "1")
+
 import aiter
 import torch
 import torch.nn.functional as F
