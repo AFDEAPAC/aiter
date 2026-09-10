@@ -185,7 +185,15 @@ def compile_moe_gemm1(
 
     _is_gfx950 = "gfx95" in get_hip_arch()
     _has_cvt_off_f32_i4 = hasattr(rocdl, "cvt_off_f32_i4")
-    use_gfx950_cvt = is_int4_bf16 and _is_gfx950 and _has_cvt_off_f32_i4
+    # Two instructions hid behind one predicate. v_cvt_off_f32_i4 -- including
+    # the SDWA byte_sel form flydsl emits -- is gfx9xx-wide and encodes for
+    # gfx942; only v_cvt_pk_bf16_f32, reached via defer_scale16, is gfx950-only.
+    # Splitting them lets gfx942 take the single-instruction nibble->f32 convert
+    # and the lshr-16 pack instead of a 9-op bit unpack plus a per-byte sitofp.
+    # Output is bitwise identical: (n/16) * (16*scale) rounds exactly as
+    # n * scale for every bf16 group scale whose x16 is finite.
+    use_cvt_off_i4 = is_int4_bf16 and _has_cvt_off_f32_i4
+    use_gfx950_cvt = use_cvt_off_i4 and _is_gfx950
 
     # Split-K validation
     _is_splitk = k_batch > 1
@@ -1110,7 +1118,7 @@ def compile_moe_gemm1(
                                             arith,
                                             vector,
                                             scale_val=sc_g,
-                                            use_gfx950_cvt=use_gfx950_cvt,
+                                            use_gfx950_cvt=use_cvt_off_i4,
                                             defer_scale16=use_gfx950_cvt,
                                         )
                                         gate_list[acc_idx] = mfma_k64(
@@ -1121,7 +1129,7 @@ def compile_moe_gemm1(
                                             arith,
                                             vector,
                                             scale_val=sc_u,
-                                            use_gfx950_cvt=use_gfx950_cvt,
+                                            use_gfx950_cvt=use_cvt_off_i4,
                                             defer_scale16=use_gfx950_cvt,
                                         )
                                         up_list[acc_idx] = mfma_k64(
@@ -2087,7 +2095,15 @@ def compile_moe_gemm2(
 
     _is_gfx950 = "gfx95" in get_hip_arch()
     _has_cvt_off_f32_i4 = hasattr(rocdl, "cvt_off_f32_i4")
-    use_gfx950_cvt = is_int4_bf16 and _is_gfx950 and _has_cvt_off_f32_i4
+    # Two instructions hid behind one predicate. v_cvt_off_f32_i4 -- including
+    # the SDWA byte_sel form flydsl emits -- is gfx9xx-wide and encodes for
+    # gfx942; only v_cvt_pk_bf16_f32, reached via defer_scale16, is gfx950-only.
+    # Splitting them lets gfx942 take the single-instruction nibble->f32 convert
+    # and the lshr-16 pack instead of a 9-op bit unpack plus a per-byte sitofp.
+    # Output is bitwise identical: (n/16) * (16*scale) rounds exactly as
+    # n * scale for every bf16 group scale whose x16 is finite.
+    use_cvt_off_i4 = is_int4_bf16 and _has_cvt_off_f32_i4
+    use_gfx950_cvt = use_cvt_off_i4 and _is_gfx950
 
     mfma_i32_k32 = None
     if is_int8:
@@ -2945,7 +2961,7 @@ def compile_moe_gemm2(
                                             arith,
                                             vector,
                                             scale_val=sc,
-                                            use_gfx950_cvt=use_gfx950_cvt,
+                                            use_gfx950_cvt=use_cvt_off_i4,
                                             defer_scale16=use_gfx950_cvt,
                                         )
                                         acc_list[acc_idx] = mfma_k64(
