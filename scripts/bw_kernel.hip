@@ -53,6 +53,28 @@ __global__ void read_rowmajor(const float4* __restrict__ src, int n4_per_row,
   if (acc != acc) sink[blockIdx.x] = acc;
 }
 
+// The actual Phase B shape: read the whole row, write W 8-byte candidates per
+// row in contiguous bursts. This is the floor Phase B can be judged against --
+// a read-only floor ignores that writes cost more per byte on HBM.
+__global__ void read_plus_sparse_write(const float4* __restrict__ src, int n4_per_row,
+                                       unsigned long long* __restrict__ out, int w_per_row,
+                                       int out_stride, float* __restrict__ sink) {
+  const int row = blockIdx.y;
+  const float4* ri = src + (size_t)row * n4_per_row;
+  unsigned long long* ro = out + (size_t)row * out_stride;
+  float acc = 0.f;
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  const int stride = gridDim.x * blockDim.x;
+  for (; i < n4_per_row; i += stride) {
+    float4 v = ri[i];
+    acc += v.x + v.y + v.z + v.w;
+  }
+  // Same burst shape as the staged flush: contiguous runs of 64 lanes.
+  for (int j = blockIdx.x * blockDim.x + threadIdx.x; j < w_per_row; j += stride)
+    ro[j] = (unsigned long long)j;
+  if (acc != acc) sink[blockIdx.x] = acc;
+}
+
 __global__ void copy_kernel(const float4* __restrict__ src, float4* __restrict__ dst, size_t n4) {
   size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
   size_t stride = (size_t)gridDim.x * blockDim.x;
@@ -147,6 +169,21 @@ int main() {
       report(tag, r, (double)bytes);
       if (r.first < r_row.first) r_row = r;
     }
+  }
+
+  // Phase B floor: full read + ~2867 candidates/row written as 8 B each.
+  {
+    const int w_per_row = 2867;
+    const int out_stride = 4096;
+    unsigned long long* d_out = nullptr;
+    HIP_CHECK(hipMalloc(&d_out, (size_t)M * out_stride * sizeof(unsigned long long)));
+    auto r = time_it([&] {
+      read_plus_sparse_write<<<dim3(1, M), 512>>>(reinterpret_cast<const float4*>(d_a), n4_per_row,
+                                                  d_out, w_per_row, out_stride, d_sink);
+    });
+    const double traffic = (double)bytes + (double)M * w_per_row * 8.0;
+    report("PHASEB_FLOOR_read+write", r, traffic);
+    HIP_CHECK(hipFree(d_out));
   }
 
   auto r_copy = time_it([&] {

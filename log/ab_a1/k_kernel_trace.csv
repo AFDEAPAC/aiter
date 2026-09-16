@@ -1,0 +1,89 @@
+"Kind","Agent_Id","Queue_Id","Stream_Id","Thread_Id","Dispatch_Id","Kernel_Id","Kernel_Name","Correlation_Id","Start_Timestamp","End_Timestamp","LDS_Block_Size","Scratch_Size","VGPR_Count","Accum_VGPR_Count","SGPR_Count","Workgroup_Size_X","Workgroup_Size_Y","Workgroup_Size_Z","Grid_Size_X","Grid_Size_Y","Grid_Size_Z"
+"KERNEL_DISPATCH","Agent 2",1,0,68,1,25,"__amd_rocclr_copyBuffer",1,4187042345470406,4187042345474966,0,0,16,0,32,512,1,1,512,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,2,11,"fill_random_fp32(float*, unsigned long, unsigned int, int, int)",2,4187042346241852,4187042346582495,0,0,36,4,64,256,1,1,16776960,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,3,26,"__amd_rocclr_fillBufferUnAligned",3,4187042346674535,4187042346682775,0,0,8,0,64,256,1,1,65536,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,5,26,"__amd_rocclr_fillBufferUnAligned",5,4187042346700935,4187042346702335,0,0,8,0,64,256,1,1,256,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,4,26,"__amd_rocclr_fillBufferUnAligned",4,4187042346693415,4187042346694935,0,0,8,0,64,256,1,1,1024,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,6,1,"phase_a_threshold(float const*, int, int, int, int, unsigned int*, float*)",6,4187042346715124,4187042346792564,1536,0,20,4,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,7,7,"phase_b_filter_wavestage(float const*, int, float const*, unsigned long*, int*, unsigned int*, int)",7,4187042346792633,4187042347334317,20992,0,24,0,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,8,5,"phase_c_select_waveseg(unsigned long const*, int const*, unsigned int const*, int, int, int, int*, int*, int*, int)",8,4187042347334380,4187042347383181,34304,0,24,0,80,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,9,10,"phase_d_fallback(float const*, int, int, int const*, int const*, int*)",9,4187042347382631,4187042354935959,1536,0,32,0,80,1024,1,1,1024,64,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,10,25,"__amd_rocclr_copyBuffer",10,4187042354963999,4187042354966719,0,0,16,0,32,512,1,1,512,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,11,26,"__amd_rocclr_fillBufferUnAligned",11,4187042391346935,4187042391350135,0,0,8,0,64,256,1,1,1024,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,12,26,"__amd_rocclr_fillBufferUnAligned",12,4187042391353535,4187042391354895,0,0,8,0,64,256,1,1,256,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,13,1,"phase_a_threshold(float const*, int, int, int, int, unsigned int*, float*)",13,4187042391371815,4187042391432575,1536,0,20,4,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,14,7,"phase_b_filter_wavestage(float const*, int, float const*, unsigned long*, int*, unsigned int*, int)",14,4187042391432575,4187042391937936,20992,0,24,0,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,15,5,"phase_c_select_waveseg(unsigned long const*, int const*, unsigned int const*, int, int, int, int*, int*, int*, int)",15,4187042391937936,4187042391986617,34304,0,24,0,80,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,16,10,"phase_d_fallback(float const*, int, int, int const*, int const*, int*)",16,4187042391986617,4187042399514601,1536,0,32,0,80,1024,1,1,1024,64,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,17,26,"__amd_rocclr_fillBufferUnAligned",17,4187042399514601,4187042399518881,0,0,8,0,64,256,1,1,1024,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,24,26,"__amd_rocclr_fillBufferUnAligned",24,4187042407658626,4187042407662467,0,0,8,0,64,256,1,1,256,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,19,1,"phase_a_threshold(float const*, int, int, int, int, unsigned int*, float*)",19,4187042399522761,4187042399581521,1536,0,20,4,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,20,7,"phase_b_filter_wavestage(float const*, int, float const*, unsigned long*, int*, unsigned int*, int)",20,4187042399581521,4187042400089922,20992,0,24,0,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,25,1,"phase_a_threshold(float const*, int, int, int, int, unsigned int*, float*)",25,4187042407662467,4187042407721467,1536,0,20,4,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,21,5,"phase_c_select_waveseg(unsigned long const*, int const*, unsigned int const*, int, int, int, int*, int*, int*, int)",21,4187042400089922,4187042400138563,34304,0,24,0,80,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,22,10,"phase_d_fallback(float const*, int, int, int const*, int const*, int*)",22,4187042400138563,4187042407654346,1536,0,32,0,80,1024,1,1,1024,64,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,18,26,"__amd_rocclr_fillBufferUnAligned",18,4187042399518881,4187042399522761,0,0,8,0,64,256,1,1,256,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,23,26,"__amd_rocclr_fillBufferUnAligned",23,4187042407654346,4187042407658626,0,0,8,0,64,256,1,1,1024,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,26,7,"phase_b_filter_wavestage(float const*, int, float const*, unsigned long*, int*, unsigned int*, int)",26,4187042407721467,4187042408231948,20992,0,24,0,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,27,5,"phase_c_select_waveseg(unsigned long const*, int const*, unsigned int const*, int, int, int, int*, int*, int*, int)",27,4187042408231948,4187042408280388,34304,0,24,0,80,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,28,10,"phase_d_fallback(float const*, int, int, int const*, int const*, int*)",28,4187042408280388,4187042415816173,1536,0,32,0,80,1024,1,1,1024,64,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,29,26,"__amd_rocclr_fillBufferUnAligned",29,4187042415846333,4187042415848213,0,0,8,0,64,256,1,1,1024,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,30,26,"__amd_rocclr_fillBufferUnAligned",30,4187042415855573,4187042415857333,0,0,8,0,64,256,1,1,256,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,31,1,"phase_a_threshold(float const*, int, int, int, int, unsigned int*, float*)",31,4187042415868253,4187042415925533,1536,0,20,4,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,32,7,"phase_b_filter_wavestage(float const*, int, float const*, unsigned long*, int*, unsigned int*, int)",32,4187042415925533,4187042416436774,20992,0,24,0,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,33,5,"phase_c_select_waveseg(unsigned long const*, int const*, unsigned int const*, int, int, int, int*, int*, int*, int)",33,4187042416436774,4187042416485175,34304,0,24,0,80,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,34,10,"phase_d_fallback(float const*, int, int, int const*, int const*, int*)",34,4187042416485441,4187042423997078,1536,0,32,0,80,1024,1,1,1024,64,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,35,26,"__amd_rocclr_fillBufferUnAligned",35,4187042424031118,4187042424032718,0,0,8,0,64,256,1,1,1024,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,36,26,"__amd_rocclr_fillBufferUnAligned",36,4187042424038598,4187042424039998,0,0,8,0,64,256,1,1,256,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,37,1,"phase_a_threshold(float const*, int, int, int, int, unsigned int*, float*)",37,4187042424047736,4187042424107056,1536,0,20,4,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,38,7,"phase_b_filter_wavestage(float const*, int, float const*, unsigned long*, int*, unsigned int*, int)",38,4187042424107078,4187042424617161,20992,0,24,0,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,39,5,"phase_c_select_waveseg(unsigned long const*, int const*, unsigned int const*, int, int, int, int*, int*, int*, int)",39,4187042424617161,4187042424665641,34304,0,24,0,80,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,40,10,"phase_d_fallback(float const*, int, int, int const*, int const*, int*)",40,4187042424665641,4187042432167198,1536,0,32,0,80,1024,1,1,1024,64,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,41,26,"__amd_rocclr_fillBufferUnAligned",41,4187042432188958,4187042432190318,0,0,8,0,64,256,1,1,1024,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,42,26,"__amd_rocclr_fillBufferUnAligned",42,4187042432196678,4187042432198038,0,0,8,0,64,256,1,1,256,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,43,1,"phase_a_threshold(float const*, int, int, int, int, unsigned int*, float*)",43,4187042432205678,4187042432264278,1536,0,20,4,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,44,7,"phase_b_filter_wavestage(float const*, int, float const*, unsigned long*, int*, unsigned int*, int)",44,4187042432264278,4187042432770041,20992,0,24,0,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,45,5,"phase_c_select_waveseg(unsigned long const*, int const*, unsigned int const*, int, int, int, int*, int*, int*, int)",45,4187042432770041,4187042432818481,34304,0,24,0,80,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,46,10,"phase_d_fallback(float const*, int, int, int const*, int const*, int*)",46,4187042432818481,4187042440345518,1536,0,32,0,80,1024,1,1,1024,64,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,47,26,"__amd_rocclr_fillBufferUnAligned",47,4187042440436959,4187042440438479,0,0,8,0,64,256,1,1,1024,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,48,26,"__amd_rocclr_fillBufferUnAligned",48,4187042440448079,4187042440449479,0,0,8,0,64,256,1,1,256,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,49,1,"phase_a_threshold(float const*, int, int, int, int, unsigned int*, float*)",49,4187042440471119,4187042440528199,1536,0,20,4,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,50,7,"phase_b_filter_wavestage(float const*, int, float const*, unsigned long*, int*, unsigned int*, int)",50,4187042440528199,4187042441038402,20992,0,24,0,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,51,5,"phase_c_select_waveseg(unsigned long const*, int const*, unsigned int const*, int, int, int, int*, int*, int*, int)",51,4187042441038402,4187042441086922,34304,0,24,0,80,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,52,10,"phase_d_fallback(float const*, int, int, int const*, int const*, int*)",52,4187042441086922,4187042448613639,1536,0,32,0,80,1024,1,1,1024,64,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,53,26,"__amd_rocclr_fillBufferUnAligned",53,4187042448635239,4187042448637079,0,0,8,0,64,256,1,1,1024,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,54,26,"__amd_rocclr_fillBufferUnAligned",54,4187042448643359,4187042448644919,0,0,8,0,64,256,1,1,256,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,55,1,"phase_a_threshold(float const*, int, int, int, int, unsigned int*, float*)",55,4187042448651039,4187042448711080,1536,0,20,4,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,56,7,"phase_b_filter_wavestage(float const*, int, float const*, unsigned long*, int*, unsigned int*, int)",56,4187042448711080,4187042449218242,20992,0,24,0,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,57,5,"phase_c_select_waveseg(unsigned long const*, int const*, unsigned int const*, int, int, int, int*, int*, int*, int)",57,4187042449218242,4187042449266762,34304,0,24,0,80,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,58,10,"phase_d_fallback(float const*, int, int, int const*, int const*, int*)",58,4187042449266762,4187042456799920,1536,0,32,0,80,1024,1,1,1024,64,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,59,26,"__amd_rocclr_fillBufferUnAligned",59,4187042456821400,4187042456822720,0,0,8,0,64,256,1,1,1024,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,60,26,"__amd_rocclr_fillBufferUnAligned",60,4187042456828960,4187042456830480,0,0,8,0,64,256,1,1,256,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,61,1,"phase_a_threshold(float const*, int, int, int, int, unsigned int*, float*)",61,4187042456835560,4187042456895440,1536,0,20,4,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,62,7,"phase_b_filter_wavestage(float const*, int, float const*, unsigned long*, int*, unsigned int*, int)",62,4187042456895440,4187042457402723,20992,0,24,0,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,63,5,"phase_c_select_waveseg(unsigned long const*, int const*, unsigned int const*, int, int, int, int*, int*, int*, int)",63,4187042457402723,4187042457451203,34304,0,24,0,80,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,64,10,"phase_d_fallback(float const*, int, int, int const*, int const*, int*)",64,4187042457451112,4187042464964825,1536,0,32,0,80,1024,1,1,1024,64,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,65,26,"__amd_rocclr_fillBufferUnAligned",65,4187042464989465,4187042464991105,0,0,8,0,64,256,1,1,1024,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,66,26,"__amd_rocclr_fillBufferUnAligned",66,4187042464997065,4187042464998545,0,0,8,0,64,256,1,1,256,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,67,1,"phase_a_threshold(float const*, int, int, int, int, unsigned int*, float*)",67,4187042465004665,4187042465063745,1536,0,20,4,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,68,7,"phase_b_filter_wavestage(float const*, int, float const*, unsigned long*, int*, unsigned int*, int)",68,4187042465063745,4187042465572667,20992,0,24,0,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,69,5,"phase_c_select_waveseg(unsigned long const*, int const*, unsigned int const*, int, int, int, int*, int*, int*, int)",69,4187042465572667,4187042465621067,34304,0,24,0,80,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,70,10,"phase_d_fallback(float const*, int, int, int const*, int const*, int*)",70,4187042465621067,4187042473134381,1536,0,32,0,80,1024,1,1,1024,64,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,71,26,"__amd_rocclr_fillBufferUnAligned",71,4187042473154661,4187042473156061,0,0,8,0,64,256,1,1,1024,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,72,26,"__amd_rocclr_fillBufferUnAligned",72,4187042473162301,4187042473163781,0,0,8,0,64,256,1,1,256,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,73,1,"phase_a_threshold(float const*, int, int, int, int, unsigned int*, float*)",73,4187042473170941,4187042473231061,1536,0,20,4,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,74,7,"phase_b_filter_wavestage(float const*, int, float const*, unsigned long*, int*, unsigned int*, int)",74,4187042473231061,4187042473747104,20992,0,24,0,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,75,5,"phase_c_select_waveseg(unsigned long const*, int const*, unsigned int const*, int, int, int, int*, int*, int*, int)",75,4187042473747104,4187042473795624,34304,0,24,0,80,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,76,10,"phase_d_fallback(float const*, int, int, int const*, int const*, int*)",76,4187042473795624,4187042481309138,1536,0,32,0,80,1024,1,1,1024,64,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,77,26,"__amd_rocclr_fillBufferUnAligned",77,4187042481330738,4187042481332058,0,0,8,0,64,256,1,1,1024,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,78,26,"__amd_rocclr_fillBufferUnAligned",78,4187042481338458,4187042481339858,0,0,8,0,64,256,1,1,256,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,79,1,"phase_a_threshold(float const*, int, int, int, int, unsigned int*, float*)",79,4187042481350618,4187042481410138,1536,0,20,4,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,80,7,"phase_b_filter_wavestage(float const*, int, float const*, unsigned long*, int*, unsigned int*, int)",80,4187042481410138,4187042481923420,20992,0,24,0,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,81,5,"phase_c_select_waveseg(unsigned long const*, int const*, unsigned int const*, int, int, int, int*, int*, int*, int)",81,4187042481923420,4187042481971740,34304,0,24,0,80,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,82,10,"phase_d_fallback(float const*, int, int, int const*, int const*, int*)",82,4187042481971740,4187042489497214,1536,0,32,0,80,1024,1,1,1024,64,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,83,26,"__amd_rocclr_fillBufferUnAligned",83,4187042489518134,4187042489519694,0,0,8,0,64,256,1,1,1024,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,84,26,"__amd_rocclr_fillBufferUnAligned",84,4187042489524811,4187042489526371,0,0,8,0,64,256,1,1,256,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,85,1,"phase_a_threshold(float const*, int, int, int, int, unsigned int*, float*)",85,4187042489531294,4187042489590295,1536,0,20,4,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,86,7,"phase_b_filter_wavestage(float const*, int, float const*, unsigned long*, int*, unsigned int*, int)",86,4187042489590295,4187042490099017,20992,0,24,0,64,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,87,5,"phase_c_select_waveseg(unsigned long const*, int const*, unsigned int const*, int, int, int, int*, int*, int*, int)",87,4187042490099017,4187042490147417,34304,0,24,0,80,512,1,1,2097152,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,68,88,10,"phase_d_fallback(float const*, int, int, int const*, int const*, int*)",88,4187042490147417,4187042497663691,1536,0,32,0,80,1024,1,1,1024,64,1

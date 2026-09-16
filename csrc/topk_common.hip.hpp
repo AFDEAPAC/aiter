@@ -24,6 +24,17 @@ constexpr int WAVE_SIZE = 64;
 constexpr int FP32_EPT = 4;          // floats per dwordx4 load
 constexpr int RADIX_PASSES = 4;      // 4 x 8-bit covers all 32 sortable bits
 
+// Replicas of each histogram bucket. A sortable fp32's top byte is sign+exponent,
+// so on uniform[-1,1] data roughly half of all positive values share ONE bucket
+// and the per-element LDS atomicAdd serialises hard. Lanes are spread across
+// HIST_REP adjacent counters (adjacent => different LDS banks), summed before
+// the scan. HIST_REP=1 restores the plain histogram.
+#ifndef HIST_REPLICAS
+#define HIST_REPLICAS 4
+#endif
+constexpr int HIST_REP = HIST_REPLICAS;
+constexpr int HIST_SLOTS = 256 * HIST_REP;
+
 // Phase A sampling geometry: NUM_CHUNKS contiguous runs of CHUNK floats each.
 // Contiguous runs (not stride-1-of-32) so the DRAM traffic equals the useful
 // bytes; a strided sample would fetch a whole 128 B line per useful float.
@@ -120,6 +131,48 @@ __device__ __forceinline__ vfloat4 load_f4(const vfloat4* p) {
   return *p;
 }
 
+// Tie-correct gather shared by Phase C and the fallback: emits the indices of
+// every key strictly above the pivot, then exactly eq_needed of the keys equal
+// to it. Uses one LDS atomic per wave via ballot/popcount rather than one per
+// element -- the per-element form serialized ~2048 atomics onto a single
+// address inside every Phase C block.
+//
+// KeyFn(i) -> sortable key, IdxFn(i) -> output index. All threads must call.
+template <typename KeyFn, typename IdxFn>
+__device__ __forceinline__ void block_gather_topk(int c, uint32_t pivot, int ngt, int eq_needed,
+                                                  int* __restrict__ out, unsigned* __restrict__ s_wgt,
+                                                  unsigned* __restrict__ s_weq, KeyFn key_at,
+                                                  IdxFn idx_at) {
+  const int lane = threadIdx.x & (WAVE_SIZE - 1);
+  const uint64_t lt = (1ull << lane) - 1ull;
+  for (int i0 = 0; i0 < c; i0 += blockDim.x) {
+    const int i = i0 + threadIdx.x;
+    const bool has = (i < c);
+    const uint32_t k = has ? key_at(i) : 0u;
+    const bool gt = has && (k > pivot);
+    const bool eq = has && (k == pivot);
+    const uint64_t bg = __ballot(gt);
+    const uint64_t be = __ballot(eq);
+    const int tg = __popcll(bg);
+    const int te = __popcll(be);
+    unsigned baseg = 0, basee = 0;
+    if (lane == 0) {
+      if (tg) baseg = atomicAdd(s_wgt, (unsigned)tg);
+      if (te) basee = atomicAdd(s_weq, (unsigned)te);
+    }
+    baseg = __shfl(baseg, 0);
+    basee = __shfl(basee, 0);
+    if (gt) {
+      unsigned p = baseg + (unsigned)__popcll(bg & lt);
+      if (p < (unsigned)ngt) out[p] = idx_at(i);
+    }
+    if (eq) {
+      unsigned p = basee + (unsigned)__popcll(be & lt);
+      if (p < (unsigned)eq_needed) out[ngt + p] = idx_at(i);
+    }
+  }
+}
+
 // Byte offset of radix pass p (MSB first).
 __device__ __host__ __forceinline__ int radix_shift(int pass) { return 24 - 8 * pass; }
 
@@ -145,13 +198,24 @@ constexpr int MAX_WAVES_PER_BLOCK = 16;
 // dependent LDS reads and measured as the dominant cost of the select kernels
 // (phase_a 118 us / phase_c 220 us for a few MB of traffic).
 // Every thread in the block must call this (it contains barriers).
-__device__ __forceinline__ void block_find_pivot_bucket(uint32_t* __restrict__ s_hist,
+// The suffix sums stay in REGISTERS: the 256 buckets are covered by exactly
+// 4 wave64s, so the intra-wave scan is 6 shuffles with no barrier, and the only
+// shared state is the 4 wave totals. The neighbour value S[t+1] that the search
+// needs also comes from a shuffle -- at a wave boundary S[64*(wv+1)] is exactly
+// the sum of all strictly higher wave totals -- so nothing is written back to
+// s_hist and no barrier is needed for it.
+//
+// 4 barriers per radix pass total (zero / histogram / wave totals / result),
+// down from ~8. Measured per-pass fixed cost was 7-12 us across 4096 blocks.
+//
+// s_scan must be pre-initialised by the caller. For every path that reaches
+// here on a row it will actually use, the search always finds a bucket (ek is
+// never larger than the number of elements matching the fixed prefix); rows
+// where that does not hold are routed to the fallback and their output is
+// discarded, and the pre-initialised {0,0} keeps them in bounds regardless.
+__device__ __forceinline__ void block_find_pivot_bucket(const uint32_t* __restrict__ s_hist,
                                                         uint32_t* __restrict__ s_scan, int ek) {
   const int t = threadIdx.x;
-  // Wave-level suffix scan: the 256 buckets are covered by exactly 4 wave64s,
-  // so the intra-wave part is 6 register shuffles with no barrier at all, and
-  // only the 4 wave totals need shared memory. A Hillis-Steele scan over 256
-  // entries costs 8 steps x 2 barriers = 16 barriers per radix pass instead.
   __shared__ uint32_t s_wavetot[256 / WAVE_SIZE];
   const int lane = t & (WAVE_SIZE - 1);
   const int wv = t / WAVE_SIZE;
@@ -165,27 +229,20 @@ __device__ __forceinline__ void block_find_pivot_bucket(uint32_t* __restrict__ s
     if (lane == 0) s_wavetot[wv] = x;
   }
   __syncthreads();
-  if (t < 256) {
-    uint32_t add = 0;
-    for (int w = wv + 1; w < 256 / WAVE_SIZE; w++) add += s_wavetot[w];
-    x += add;
-  }
-  __syncthreads();
-  if (t < 256) s_hist[t] = x;
-  __syncthreads();
-  // Default matches the serial walk when the total never reaches ek.
-  if (t == 0) {
-    s_scan[0] = 0;
-    s_scan[1] = s_hist[0];
-  }
-  __syncthreads();
-  if (ek > 0 && t < 256) {
-    const uint32_t here = s_hist[t];
-    const uint32_t above = (t == 255) ? 0u : s_hist[t + 1];
-    if (here >= (uint32_t)ek && above < (uint32_t)ek) {
-      s_scan[0] = (uint32_t)t;
-      s_scan[1] = above;
-    }
+
+  uint32_t above_waves = 0;
+  if (t < 256)
+    for (int w = wv + 1; w < 256 / WAVE_SIZE; w++) above_waves += s_wavetot[w];
+  const uint32_t s_t = x + above_waves;          // inclusive suffix sum at bucket t
+  uint32_t s_next = __shfl_down(s_t, 1);         // suffix sum at bucket t+1
+  if (lane == WAVE_SIZE - 1) s_next = above_waves;
+  if (t == 255) s_next = 0u;
+
+  // s_t is non-increasing in t, so {t : s_t >= ek} is a prefix; its last member
+  // is the pivot bucket and s_next there is the count strictly above it.
+  if (t < 256 && ek > 0 && s_t >= (uint32_t)ek && s_next < (uint32_t)ek) {
+    s_scan[0] = (uint32_t)t;
+    s_scan[1] = s_next;
   }
   __syncthreads();
 }
