@@ -27,9 +27,12 @@ constexpr int RADIX_PASSES = 4;      // 4 x 8-bit covers all 32 sortable bits
 // Phase A sampling geometry: NUM_CHUNKS contiguous runs of CHUNK floats each.
 // Contiguous runs (not stride-1-of-32) so the DRAM traffic equals the useful
 // bytes; a strided sample would fetch a whole 128 B line per useful float.
-constexpr int SAMPLE_CHUNKS = 64;
+// A chunk is 64 floats = 256 B, so the DRAM traffic equals the useful bytes.
+// S is a runtime knob: the spread of the resulting candidate count is the
+// statistical noise of a rank-R estimator (std ~ count/sqrt(R), R = margin*K*S/N),
+// and that spread is what decides whether any row needs the exact fallback.
 constexpr int SAMPLE_CHUNK_ELEMS = 64;
-constexpr int SAMPLE_S = SAMPLE_CHUNKS * SAMPLE_CHUNK_ELEMS;  // 4096
+constexpr int SAMPLE_S_MAX = 16384;
 
 // LDS capacity for the Phase C candidate set (keys + indices).
 constexpr int PHASE_C_CAP = 4096;    // 4096 * (4+4) B = 32 KB LDS
@@ -145,14 +148,31 @@ constexpr int MAX_WAVES_PER_BLOCK = 16;
 __device__ __forceinline__ void block_find_pivot_bucket(uint32_t* __restrict__ s_hist,
                                                         uint32_t* __restrict__ s_scan, int ek) {
   const int t = threadIdx.x;
-  // Hillis-Steele inclusive suffix scan over the 256 buckets.
-  for (int off = 1; off < 256; off <<= 1) {
-    uint32_t add = 0;
-    if (t < 256 && t + off < 256) add = s_hist[t + off];
-    __syncthreads();
-    if (t < 256) s_hist[t] += add;
-    __syncthreads();
+  // Wave-level suffix scan: the 256 buckets are covered by exactly 4 wave64s,
+  // so the intra-wave part is 6 register shuffles with no barrier at all, and
+  // only the 4 wave totals need shared memory. A Hillis-Steele scan over 256
+  // entries costs 8 steps x 2 barriers = 16 barriers per radix pass instead.
+  __shared__ uint32_t s_wavetot[256 / WAVE_SIZE];
+  const int lane = t & (WAVE_SIZE - 1);
+  const int wv = t / WAVE_SIZE;
+  uint32_t x = (t < 256) ? s_hist[t] : 0u;
+  if (t < 256) {
+#pragma unroll
+    for (int off = 1; off < WAVE_SIZE; off <<= 1) {
+      uint32_t up = __shfl_down(x, off);
+      if (lane + off < WAVE_SIZE) x += up;
+    }
+    if (lane == 0) s_wavetot[wv] = x;
   }
+  __syncthreads();
+  if (t < 256) {
+    uint32_t add = 0;
+    for (int w = wv + 1; w < 256 / WAVE_SIZE; w++) add += s_wavetot[w];
+    x += add;
+  }
+  __syncthreads();
+  if (t < 256) s_hist[t] = x;
+  __syncthreads();
   // Default matches the serial walk when the total never reaches ek.
   if (t == 0) {
     s_scan[0] = 0;

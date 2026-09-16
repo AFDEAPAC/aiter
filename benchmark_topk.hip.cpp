@@ -19,15 +19,16 @@
 
 // ---- AVO variation surface -------------------------------------------------
 static int g_sample_rank = 0;       // 0 => derive from margin
+static int g_sample_s = 8192;       // Phase A sample count (S=4096 leaves rows short of K)
 static float g_margin = 1.4f;       // Phase B over-collection factor
-static int g_cf_block = 256;        // Phase B block size
+static int g_cf_block = 512;        // Phase B block size
 static int g_cf_gx = 16;            // Phase B blocks per row (grid.x)
 static int g_use_nt_load = 0;       // non-temporal streaming loads in Phase B
 // Phase B implementation: 0 = per-wave global atomic, 1 = block-aggregated
 // global atomic, 2 = one block per row with an LDS counter and no global atomic.
-static int g_phase_b = 2;
+static int g_phase_b = 3;
 static int g_phase_c_block = 512;
-static int g_phase_a_block = 256;
+static int g_phase_a_block = 512;
 static int g_pipeline_direct = 0;
 static int g_inject_fault = 0;
 static int g_dump_stats = 0;
@@ -97,28 +98,41 @@ __device__ __forceinline__ void block_select_stream(const vfloat4* __restrict__ 
 // ---------------------------------------------------------------------------
 // Phase A: per-row sampled threshold, fully in LDS, one kernel, one block/row.
 // ---------------------------------------------------------------------------
-__global__ __launch_bounds__(256) void phase_a_threshold(const float* __restrict__ input, int N,
-                                                         int rank, uint32_t* __restrict__ threshold,
-                                                         float* __restrict__ threshold_f) {
+__global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restrict__ input, int N,
+                                                          int rank, int S,
+                                                          uint32_t* __restrict__ threshold,
+                                                          float* __restrict__ threshold_f) {
   const int row = blockIdx.x;
   const float* ri = input + (size_t)row * N;
 
-  __shared__ uint32_t s_keys[SAMPLE_S];
+  // Dynamic LDS so the footprint tracks the runtime S. A static [SAMPLE_S_MAX]
+  // array costs 64 KB unconditionally and measurably crushes occupancy
+  // (S=4096 regressed 0.774 -> 0.852 ms when it was sized statically).
+  extern __shared__ uint32_t s_keys[];
   __shared__ uint32_t s_hist[256];
   __shared__ uint32_t s_scan[2];
 
-  const int chunk_stride = N / SAMPLE_CHUNKS;
-  for (int i = threadIdx.x; i < SAMPLE_S; i += blockDim.x) {
-    int chunk = i / SAMPLE_CHUNK_ELEMS;
-    int off = i % SAMPLE_CHUNK_ELEMS;
-    int col = chunk * chunk_stride + off;
-    s_keys[i] = fp32_to_sortable(ri[col]);
+  // dwordx4 per lane. A scalar `ri[chunk*stride+off]` loop moves only 4 B per
+  // lane and left this kernel at 7x its own traffic floor.
+  const int chunks = S / SAMPLE_CHUNK_ELEMS;
+  const int chunk_stride = N / chunks;
+  const int v4_per_chunk = SAMPLE_CHUNK_ELEMS / FP32_EPT;
+  const int total_v4 = S / FP32_EPT;
+  for (int u = threadIdx.x; u < total_v4; u += blockDim.x) {
+    const int chunk = u / v4_per_chunk;
+    const int off4 = u % v4_per_chunk;
+    vfloat4 v = *(reinterpret_cast<const vfloat4*>(ri + (size_t)chunk * chunk_stride) + off4);
+    const int base = u * FP32_EPT;
+    s_keys[base + 0] = fp32_to_sortable(v[0]);
+    s_keys[base + 1] = fp32_to_sortable(v[1]);
+    s_keys[base + 2] = fp32_to_sortable(v[2]);
+    s_keys[base + 3] = fp32_to_sortable(v[3]);
   }
   __syncthreads();
 
   uint32_t pivot;
   int eq_needed;
-  block_select_lds(s_keys, SAMPLE_S, rank, s_hist, s_scan, pivot, eq_needed);
+  block_select_lds(s_keys, S, rank, s_hist, s_scan, pivot, eq_needed);
   if (threadIdx.x == 0) {
     threshold[row] = pivot;
     // Exact round-trip: pivot is the sortable image of a real sampled value.
@@ -684,9 +698,10 @@ static void free_bufs(Bufs& b) {
 
 static void topk_fused(const float* d_in, int M, int N, int K, int* d_idx, Bufs& b, int smc,
                        hipStream_t s) {
+  const int S = g_sample_s;
   const int rank = g_sample_rank > 0
                        ? g_sample_rank
-                       : std::max(1, (int)(g_margin * (double)K * SAMPLE_S / (double)N));
+                       : std::max(1, (int)(g_margin * (double)K * S / (double)N));
   const int n4 = N / FP32_EPT;
   const int gx = std::max(1, std::min(g_cf_gx, n4 / g_cf_block));
   (void)smc;
@@ -694,7 +709,8 @@ static void topk_fused(const float* d_in, int M, int N, int K, int* d_idx, Bufs&
   HIP_CHECK(hipMemsetAsync(b.cand_count, 0, (size_t)M * sizeof(unsigned int), s));
   HIP_CHECK(hipMemsetAsync(b.fb_count, 0, sizeof(int), s));
 
-  phase_a_threshold<<<M, g_phase_a_block, 0, s>>>(d_in, N, rank, b.threshold, b.threshold_f);
+  phase_a_threshold<<<M, g_phase_a_block, S * sizeof(uint32_t), s>>>(d_in, N, rank, S, b.threshold,
+                                                                     b.threshold_f);
 
   if (g_phase_b == 3) {
     const int nwaves_b = std::max(1, g_cf_block / WAVE_SIZE);
@@ -814,6 +830,7 @@ int main(int argc, char** argv) {
     else if (a == "--pipeline") g_pipeline_direct = (need() == "direct") ? 1 : 0;
     else if (a == "--margin") g_margin = std::stof(need());
     else if (a == "--sample-rank") g_sample_rank = std::stoi(need());
+    else if (a == "--sample-s") g_sample_s = std::stoi(need());
     else if (a == "--cf-block") g_cf_block = std::stoi(need());
     else if (a == "--cf-gx") g_cf_gx = std::stoi(need());
     else if (a == "--nt-load") g_use_nt_load = std::stoi(need());
@@ -834,9 +851,18 @@ int main(int argc, char** argv) {
     fprintf(stderr, "ERROR: topk=%d exceeds PHASE_C_CAP=%d\n", K, PHASE_C_CAP);
     return 2;
   }
-  if (N % (SAMPLE_CHUNKS * FP32_EPT) != 0 || N / SAMPLE_CHUNKS < SAMPLE_CHUNK_ELEMS) {
-    fprintf(stderr, "ERROR: N=%d incompatible with sampling geometry\n", N);
+  if (g_sample_s > SAMPLE_S_MAX || g_sample_s % SAMPLE_CHUNK_ELEMS != 0) {
+    fprintf(stderr, "ERROR: sample-s=%d must be a multiple of %d and <= %d\n", g_sample_s,
+            SAMPLE_CHUNK_ELEMS, SAMPLE_S_MAX);
     return 2;
+  }
+  {
+    const int chunks = g_sample_s / SAMPLE_CHUNK_ELEMS;
+    // chunk_stride must keep every chunk start 16 B aligned for the dwordx4 load.
+    if (N / chunks < SAMPLE_CHUNK_ELEMS || N % FP32_EPT != 0 || (N / chunks) % FP32_EPT != 0) {
+      fprintf(stderr, "ERROR: N=%d incompatible with sampling geometry (chunks=%d)\n", N, chunks);
+      return 2;
+    }
   }
 
   GPUInfo info = get_gpu_info();
