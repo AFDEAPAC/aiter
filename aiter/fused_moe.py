@@ -1063,7 +1063,10 @@ def _fused_moe_impl(
         and q_dtype_w == dtypes.fp4x2
         and hidden_states.dtype == dtypes.bf16
         and isShuffled
-        and expert_mask is None
+        and (
+            expert_mask is None
+            or os.environ.get("AITER_A16W4_ALLOW_EP", "0") == "1"
+        )
         and not doweight_stage1
         and num_local_tokens is None
         and bias1 is None
@@ -1088,6 +1091,7 @@ def _fused_moe_impl(
             # interleaved shuffle solely on its a8w4 path, so W1 is the separated
             # layout. Verified by layout A/B against a torch reference.
             w1_layout="standard",
+            expert_mask=expert_mask,
         )
     # If input is already FP8-quantized (e.g. from FP8 dispatch) with block scale,
     # use FP8 as activation dtype to skip redundant re-quantization
@@ -1197,7 +1201,11 @@ def _fused_moe_impl(
                 ),
             ),
             (bias1 is not None or bias2 is not None, "per-expert bias"),
-            (expert_mask is not None, "expert-parallel masking"),
+            (
+                expert_mask is not None
+                and os.environ.get("AITER_A16W4_ALLOW_EP", "0") != "1",
+                "expert-parallel masking",
+            ),
             (
                 not (isShuffled and isG1U1 and not doweight_stage1),
                 "non-preshuffled / non-g1u1 weights or doweight_stage1=True",
