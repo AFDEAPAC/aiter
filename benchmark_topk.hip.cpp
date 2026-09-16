@@ -24,8 +24,10 @@ static float g_margin = 1.4f;       // Phase B over-collection factor
 static int g_cf_block = 512;        // Phase B block size
 static int g_cf_gx = 16;            // Phase B blocks per row (grid.x)
 static int g_use_nt_load = 0;       // non-temporal streaming loads in Phase B
-// Phase B implementation: 0 = per-wave global atomic, 1 = block-aggregated
-// global atomic, 2 = one block per row with an LDS counter and no global atomic.
+// Phase B implementation: 3 = wave-private regions writing straight to global,
+// 4 = same but passers staged in LDS and flushed in full contiguous bursts.
+// Variants 0-2 (per-wave global atomic, block-aggregated atomic, LDS counter)
+// were measured and superseded; see knowledge/known_bad.md and git history.
 static int g_phase_b = 4;
 static int g_phase_c_block = 512;
 static int g_phase_a_block = 512;
@@ -53,23 +55,46 @@ static int g_phase_c_passes = RADIX_PASSES;
 __device__ __forceinline__ void block_select_lds(const uint32_t* __restrict__ s_keys, int c, int K,
                                                  uint32_t* __restrict__ s_hist,
                                                  uint32_t* __restrict__ s_red,
-                                                 uint32_t* __restrict__ s_scan, uint32_t& pivot,
-                                                 int& eq_needed, int npasses = RADIX_PASSES) {
-  pivot = 0;
-  int ek = K;
+                                                 uint32_t* __restrict__ s_scan,
+                                                 uint32_t* __restrict__ s_mm, uint32_t& pivot,
+                                                 int& eq_needed, int npasses = RADIX_PASSES,
+                                                 bool prefix_skip = false) {
   const int rep = threadIdx.x & (HIST_REP - 1);
   if (threadIdx.x == 0) {
     s_scan[0] = 0;
     s_scan[1] = 0;
   }
-  for (int p = 0; p < npasses; p++) {
+
+  // Phase C's candidates are all >= the Phase B threshold, so they share a high
+  // prefix and the passes where min and max already agree can be skipped
+  // outright. Phase A must NOT do this: its samples span the whole row, so no
+  // pass is ever skipped and the min/max reduction is pure loss (measured
+  // phase_c -6.0 us, phase_a +8.0 us).
+  int start = 0;
+  pivot = 0;
+  if (prefix_skip) {
+    uint32_t mn, mx;
+    block_minmax_lds(s_keys, c, s_mm, mn, mx);
+    start = common_prefix_passes(mn, mx);
+    if (start >= RADIX_PASSES) {
+      // Every key identical: the pivot is that value and all K come from ties.
+      pivot = mn;
+      eq_needed = K;
+      return;
+    }
+    pivot = mn & ((start == 0) ? 0u : (0xFFFFFFFFu << (32 - 8 * start)));
+  }
+
+  int ek = K;
+  for (int p = start; p < npasses; p++) {
     const int sh = radix_shift(p);
-    const int hshift = (p == 0) ? 0 : sh + 8;
+    const int hshift = sh + 8;
+    const bool filter = (p > 0);
     for (int i = threadIdx.x; i < HIST_SLOTS; i += blockDim.x) s_hist[i] = 0;
     __syncthreads();
     for (int i = threadIdx.x; i < c; i += blockDim.x) {
       uint32_t k = s_keys[i];
-      if (p == 0 || (k >> hshift) == (pivot >> hshift))
+      if (!filter || (k >> hshift) == (pivot >> hshift))
         atomicAdd(&s_hist[((k >> sh) & 0xFFu) * HIST_REP + rep], 1u);
     }
     __syncthreads();
@@ -152,6 +177,7 @@ __global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restric
   __shared__ uint32_t s_hist[HIST_SLOTS];
   __shared__ uint32_t s_red[256];
   __shared__ uint32_t s_scan[2];
+  __shared__ uint32_t s_mm[2 * MAX_WAVES_PER_BLOCK];
 
   // dwordx4 per lane. A scalar `ri[chunk*stride+off]` loop moves only 4 B per
   // lane and left this kernel at 7x its own traffic floor.
@@ -173,222 +199,12 @@ __global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restric
 
   uint32_t pivot;
   int eq_needed;
-  block_select_lds(s_keys, S, rank, s_hist, s_red, s_scan, pivot, eq_needed, npasses);
+  block_select_lds(s_keys, S, rank, s_hist, s_red, s_scan, s_mm, pivot, eq_needed, npasses);
   if (threadIdx.x == 0) {
     threshold[row] = pivot;
     // Exact round-trip: pivot is the sortable image of a real sampled value.
     threshold_f[row] = sortable_to_fp32(pivot);
   }
-}
-
-// ---------------------------------------------------------------------------
-// Phase B: the streaming filter. This is where the time budget lives.
-// ---------------------------------------------------------------------------
-__global__ void phase_b_filter(const float* __restrict__ input, int N,
-                               const uint32_t* __restrict__ threshold,
-                               uint32_t* __restrict__ cand_keys, int* __restrict__ cand_idx,
-                               unsigned int* __restrict__ cand_count, int C_alloc) {
-  const int row = blockIdx.y;
-  const vfloat4* ri = reinterpret_cast<const vfloat4*>(input + (size_t)row * N);
-  uint32_t* rk = cand_keys + (size_t)row * C_alloc;
-  int* rx = cand_idx + (size_t)row * C_alloc;
-  const uint32_t th = threshold[row];
-
-  const int lane = threadIdx.x & (WAVE_SIZE - 1);
-  const int n4 = N / FP32_EPT;
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  const int stride = gridDim.x * blockDim.x;
-
-  for (; i < n4; i += stride) {
-    vfloat4 v = load_f4(ri + i);
-    uint32_t k[FP32_EPT] = {fp32_to_sortable(v[0]), fp32_to_sortable(v[1]), fp32_to_sortable(v[2]),
-                            fp32_to_sortable(v[3])};
-    unsigned pmask = 0;
-#pragma unroll
-    for (int e = 0; e < FP32_EPT; e++) {
-      if (k[e] >= th) pmask |= (1u << e);
-    }
-
-    int cnt = __popc(pmask);
-    int incl = cnt;
-#pragma unroll
-    for (int d = 1; d < WAVE_SIZE; d <<= 1) {
-      int nb = __shfl_up(incl, d);
-      if (lane >= d) incl += nb;
-    }
-    const int my_off = incl - cnt;
-    const int wtotal = __shfl(incl, WAVE_SIZE - 1);
-
-    if (wtotal > 0) {
-      unsigned wbase = 0;
-      if (lane == 0) wbase = atomicAdd(&cand_count[row], (unsigned)wtotal);
-      wbase = __shfl(wbase, 0);
-      unsigned rem = pmask;
-      int j = 0;
-      while (rem) {
-        int e = __builtin_ctz(rem);
-        rem &= rem - 1;
-        unsigned pos = wbase + (unsigned)my_off + (unsigned)j;
-        if (pos < (unsigned)C_alloc) {
-          rk[pos] = k[e];
-          rx[pos] = i * FP32_EPT + e;
-        }
-        j++;
-      }
-    }
-  }
-}
-
-// Variant: one global atomic per block-iteration instead of per wave. Uniform
-// trip count per block so the in-loop barriers are safe.
-__global__ void phase_b_filter_blockagg(const float* __restrict__ input, int N,
-                                        const uint32_t* __restrict__ threshold,
-                                        uint32_t* __restrict__ cand_keys,
-                                        int* __restrict__ cand_idx,
-                                        unsigned int* __restrict__ cand_count, int C_alloc) {
-  const int row = blockIdx.y;
-  const vfloat4* ri = reinterpret_cast<const vfloat4*>(input + (size_t)row * N);
-  uint32_t* rk = cand_keys + (size_t)row * C_alloc;
-  int* rx = cand_idx + (size_t)row * C_alloc;
-  const uint32_t th = threshold[row];
-
-  __shared__ unsigned s_wave_tot[16];
-  __shared__ unsigned s_wave_base[16];
-  __shared__ unsigned s_block_base;
-
-  const int lane = threadIdx.x & (WAVE_SIZE - 1);
-  const int wid = threadIdx.x / WAVE_SIZE;
-  const int nwaves = blockDim.x / WAVE_SIZE;
-  const int n4 = N / FP32_EPT;
-  const int stride = gridDim.x * blockDim.x;
-  const int start = blockIdx.x * blockDim.x + threadIdx.x;
-  // Uniform iteration count across the whole block.
-  const int iters = (n4 - blockIdx.x * blockDim.x + stride - 1) / stride;
-
-  for (int it = 0; it < iters; it++) {
-    const int i = start + it * stride;
-    unsigned pmask = 0;
-    uint32_t k[FP32_EPT] = {0, 0, 0, 0};
-    if (i < n4) {
-      vfloat4 v = load_f4(ri + i);
-      k[0] = fp32_to_sortable(v[0]);
-      k[1] = fp32_to_sortable(v[1]);
-      k[2] = fp32_to_sortable(v[2]);
-      k[3] = fp32_to_sortable(v[3]);
-#pragma unroll
-      for (int e = 0; e < FP32_EPT; e++) {
-        if (k[e] >= th) pmask |= (1u << e);
-      }
-    }
-
-    int cnt = __popc(pmask);
-    int incl = cnt;
-#pragma unroll
-    for (int d = 1; d < WAVE_SIZE; d <<= 1) {
-      int nb = __shfl_up(incl, d);
-      if (lane >= d) incl += nb;
-    }
-    const int my_off = incl - cnt;
-    if (lane == WAVE_SIZE - 1) s_wave_tot[wid] = (unsigned)incl;
-    __syncthreads();
-    if (threadIdx.x == 0) {
-      unsigned tot = 0;
-      for (int w = 0; w < nwaves; w++) {
-        s_wave_base[w] = tot;
-        tot += s_wave_tot[w];
-      }
-      s_block_base = tot ? atomicAdd(&cand_count[row], tot) : 0u;
-    }
-    __syncthreads();
-    const unsigned base = s_block_base + s_wave_base[wid] + (unsigned)my_off;
-    unsigned rem = pmask;
-    int j = 0;
-    while (rem) {
-      int e = __builtin_ctz(rem);
-      rem &= rem - 1;
-      unsigned pos = base + (unsigned)j;
-      if (pos < (unsigned)C_alloc) {
-        rk[pos] = k[e];
-        rx[pos] = i * FP32_EPT + e;
-      }
-      j++;
-    }
-    __syncthreads();
-  }
-}
-
-// Variant 2: one block owns the whole row, so it also owns that row's candidate
-// area outright -- no global atomic is needed at all, just an LDS counter.
-// Measured: the per-wave global atomicAdd on cand_count[row] was the real Phase B
-// bottleneck (raising grid.x monotonically slowed the kernel: gx=2 -> 0.925 ms,
-// gx=64 -> 3.42 ms, while a pure read at gx=1 hits 6.08 TB/s).
-//
-// Also drops fp32_to_sortable from the hot loop: the filter compares floats
-// directly against the row threshold using !(v < thr), which admits v >= thr
-// AND NaN. That is a superset of the sortable-order test in every case, and
-// over-collection is harmless because Phase C still does the exact select.
-__global__ void phase_b_filter_rowblock(const float* __restrict__ input, int N,
-                                        const float* __restrict__ threshold_f,
-                                        uint32_t* __restrict__ cand_raw, int* __restrict__ cand_idx,
-                                        unsigned int* __restrict__ cand_count, int C_alloc) {
-  const int row = blockIdx.x;
-  const vfloat4* ri = reinterpret_cast<const vfloat4*>(input + (size_t)row * N);
-  uint32_t* rk = cand_raw + (size_t)row * C_alloc;
-  int* rx = cand_idx + (size_t)row * C_alloc;
-  const float th = threshold_f[row];
-
-  __shared__ unsigned s_n;
-  if (threadIdx.x == 0) s_n = 0;
-  __syncthreads();
-
-  const int lane = threadIdx.x & (WAVE_SIZE - 1);
-  const uint64_t lt = (1ull << lane) - 1ull;
-  const int n4 = N / FP32_EPT;
-  const int stride = blockDim.x;
-  const int iters = (n4 + stride - 1) / stride;
-
-  for (int it = 0; it < iters; it++) {
-    const int i = it * stride + threadIdx.x;
-    vfloat4 v = {0.f, 0.f, 0.f, 0.f};
-    bool live = (i < n4);
-    if (live) v = load_f4(ri + i);
-
-    // One v_cmp per element. __popcll of a wave-uniform mask is a scalar op.
-    const uint64_t b0 = __ballot(live && !(v[0] < th));
-    const uint64_t b1 = __ballot(live && !(v[1] < th));
-    const uint64_t b2 = __ballot(live && !(v[2] < th));
-    const uint64_t b3 = __ballot(live && !(v[3] < th));
-    const int t0 = __popcll(b0);
-    const int t1 = t0 + __popcll(b1);
-    const int t2 = t1 + __popcll(b2);
-    const int wtotal = t2 + __popcll(b3);
-
-    if (wtotal > 0) {
-      unsigned wbase = 0;
-      if (lane == 0) wbase = atomicAdd(&s_n, (unsigned)wtotal);
-      wbase = __shfl(wbase, 0);
-
-      const int base_idx = i * FP32_EPT;
-      if (b0 & (1ull << lane)) {
-        unsigned p = wbase + (unsigned)__popcll(b0 & lt);
-        if (p < (unsigned)C_alloc) { rk[p] = __float_as_uint(v[0]); rx[p] = base_idx + 0; }
-      }
-      if (b1 & (1ull << lane)) {
-        unsigned p = wbase + (unsigned)(t0 + __popcll(b1 & lt));
-        if (p < (unsigned)C_alloc) { rk[p] = __float_as_uint(v[1]); rx[p] = base_idx + 1; }
-      }
-      if (b2 & (1ull << lane)) {
-        unsigned p = wbase + (unsigned)(t1 + __popcll(b2 & lt));
-        if (p < (unsigned)C_alloc) { rk[p] = __float_as_uint(v[2]); rx[p] = base_idx + 2; }
-      }
-      if (b3 & (1ull << lane)) {
-        unsigned p = wbase + (unsigned)(t2 + __popcll(b3 & lt));
-        if (p < (unsigned)C_alloc) { rk[p] = __float_as_uint(v[3]); rx[p] = base_idx + 3; }
-      }
-    }
-  }
-  __syncthreads();
-  if (threadIdx.x == 0) cand_count[row] = s_n;
 }
 
 // Variant 3: wave-private output regions, so Phase B has NO atomic of any kind
@@ -618,6 +434,7 @@ __global__ void phase_c_select_waveseg(const uint64_t* __restrict__ cand_pack,
   __shared__ uint32_t s_hist[HIST_SLOTS];
   __shared__ uint32_t s_red[256];
   __shared__ uint32_t s_scan[2];
+  __shared__ uint32_t s_mm[2 * MAX_WAVES_PER_BLOCK];
   __shared__ int s_cnt[MAX_WAVES_PER_BLOCK];
   __shared__ int s_off[MAX_WAVES_PER_BLOCK];
   __shared__ unsigned s_wgt, s_weq;
@@ -649,76 +466,12 @@ __global__ void phase_c_select_waveseg(const uint64_t* __restrict__ cand_pack,
 
   uint32_t pivot;
   int eq_needed;
-  block_select_lds(s_keys, c, K, s_hist, s_red, s_scan, pivot, eq_needed, npasses);
+  block_select_lds(s_keys, c, K, s_hist, s_red, s_scan, s_mm, pivot, eq_needed, npasses,
+                   /*prefix_skip=*/true);
 
   int* out = out_idx + (size_t)row * K;
   block_gather_topk(c, pivot, K - eq_needed, eq_needed, out, &s_wgt, &s_weq,
                     [&](int i) { return s_keys[i]; }, [&](int i) { return s_idx[i]; });
-}
-
-// ---------------------------------------------------------------------------
-// Phase C: exact select on the candidate set, entirely in LDS, one block/row.
-// Also decides which rows need the full-row fallback and compacts them.
-//
-// A row is unusable if it has FEWER than K candidates (threshold too high) OR
-// MORE than C_alloc (threshold too low => Phase B dropped passers past the end
-// of the per-row area, so the set is silently incomplete).
-// ---------------------------------------------------------------------------
-__global__ void phase_c_select(const uint32_t* __restrict__ cand_keys,
-                               const int* __restrict__ cand_idx,
-                               const unsigned int* __restrict__ cand_count, int C_alloc, int K,
-                               int* __restrict__ out_idx, int* __restrict__ fb_rows,
-                               int* __restrict__ fb_count, int keys_are_raw_float) {
-  const int row = blockIdx.x;
-  const unsigned int c_raw = cand_count[row];
-
-  if (c_raw < (unsigned)K || c_raw > (unsigned)C_alloc) {
-    if (threadIdx.x == 0) {
-      int slot = atomicAdd(fb_count, 1);
-      fb_rows[slot] = row;
-    }
-    return;
-  }
-
-  const int c = (int)c_raw;
-  const uint32_t* rk = cand_keys + (size_t)row * C_alloc;
-  const int* rx = cand_idx + (size_t)row * C_alloc;
-  int* out = out_idx + (size_t)row * K;
-
-  __shared__ uint32_t s_keys[PHASE_C_CAP];
-  __shared__ int s_idx[PHASE_C_CAP];
-  __shared__ uint32_t s_hist[HIST_SLOTS];
-  __shared__ uint32_t s_red[256];
-  __shared__ uint32_t s_scan[2];
-  __shared__ unsigned s_wgt;
-  __shared__ unsigned s_weq;
-
-  for (int i = threadIdx.x; i < c; i += blockDim.x) {
-    uint32_t w = rk[i];
-    s_keys[i] = keys_are_raw_float ? fp32_to_sortable_bits(w) : w;
-    s_idx[i] = rx[i];
-  }
-  if (threadIdx.x == 0) {
-    s_wgt = 0;
-    s_weq = 0;
-  }
-  __syncthreads();
-
-  uint32_t pivot;
-  int eq_needed;
-  block_select_lds(s_keys, c, K, s_hist, s_red, s_scan, pivot, eq_needed);
-
-  const int ngt = K - eq_needed;
-  for (int i = threadIdx.x; i < c; i += blockDim.x) {
-    uint32_t k = s_keys[i];
-    if (k > pivot) {
-      unsigned p = atomicAdd(&s_wgt, 1u);
-      if (p < (unsigned)ngt) out[p] = s_idx[i];
-    } else if (k == pivot) {
-      unsigned p = atomicAdd(&s_weq, 1u);
-      if (p < (unsigned)eq_needed) out[ngt + p] = s_idx[i];
-    }
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -802,8 +555,6 @@ __global__ void fill_random_fp32(float* data, size_t count, unsigned int seed, i
 struct Bufs {
   uint32_t* threshold;
   float* threshold_f;
-  uint32_t* cand_keys;
-  int* cand_idx;
   uint64_t* cand_pack;
   int* cand_seg;
   unsigned int* cand_count;
@@ -816,8 +567,6 @@ static void alloc_bufs(Bufs& b, int M, int K) {
   b.C_alloc = PHASE_C_CAP;
   HIP_CHECK(hipMalloc(&b.threshold, (size_t)M * sizeof(uint32_t)));
   HIP_CHECK(hipMalloc(&b.threshold_f, (size_t)M * sizeof(float)));
-  HIP_CHECK(hipMalloc(&b.cand_keys, (size_t)M * b.C_alloc * sizeof(uint32_t)));
-  HIP_CHECK(hipMalloc(&b.cand_idx, (size_t)M * b.C_alloc * sizeof(int)));
   HIP_CHECK(hipMalloc(&b.cand_pack, (size_t)M * CAND_SLOTS_PER_ROW * sizeof(uint64_t)));
   HIP_CHECK(hipMalloc(&b.cand_seg, (size_t)M * MAX_WAVES_PER_BLOCK * sizeof(int)));
   HIP_CHECK(hipMalloc(&b.cand_count, (size_t)M * sizeof(unsigned int)));
@@ -829,8 +578,6 @@ static void alloc_bufs(Bufs& b, int M, int K) {
 static void free_bufs(Bufs& b) {
   (void)hipFree(b.threshold);
   (void)hipFree(b.threshold_f);
-  (void)hipFree(b.cand_keys);
-  (void)hipFree(b.cand_idx);
   (void)hipFree(b.cand_pack);
   (void)hipFree(b.cand_seg);
   (void)hipFree(b.cand_count);
@@ -854,43 +601,25 @@ static void topk_fused(const float* d_in, int M, int N, int K, int* d_idx, Bufs&
   phase_a_threshold<<<M, g_phase_a_block, S * sizeof(uint32_t), s>>>(
       d_in, N, rank, S, g_phase_a_passes, b.threshold, b.threshold_f);
 
-  if (g_phase_b == 3 || g_phase_b == 4) {
-    const int nwaves_b = std::max(1, g_cf_block / WAVE_SIZE);
-    const int seg_stride = CAND_SLOTS_PER_ROW / nwaves_b;
-    if (g_phase_b == 4)
-      phase_b_filter_wavestage<<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_pack,
-                                                        b.cand_seg, b.cand_count, seg_stride);
-    else if (g_ablate_store == 1)
-      phase_b_filter_waveseg<1><<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_pack,
-                                                         b.cand_seg, b.cand_count, seg_stride);
-    else if (g_ablate_store == 2)
-      phase_b_filter_waveseg<2><<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_pack,
-                                                         b.cand_seg, b.cand_count, seg_stride);
-    else
-      phase_b_filter_waveseg<0><<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_pack,
-                                                         b.cand_seg, b.cand_count, seg_stride);
-    phase_c_select_waveseg<<<M, g_phase_c_block, 0, s>>>(b.cand_pack, b.cand_seg, b.cand_count,
-                                                         seg_stride, nwaves_b, K, d_idx, b.fb_rows,
-                                                         b.fb_count, g_phase_c_passes);
-    phase_d_fallback<<<dim3(1, FB_GRID), 1024, 0, s>>>(d_in, N, K, b.fb_rows, b.fb_count, d_idx);
-    return;
-  }
+  const int nwaves_b = std::max(1, g_cf_block / WAVE_SIZE);
+  const int seg_stride = CAND_SLOTS_PER_ROW / nwaves_b;
 
-  int keys_are_raw = 0;
-  if (g_phase_b == 2) {
-    keys_are_raw = 1;
-    phase_b_filter_rowblock<<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_keys,
-                                                     b.cand_idx, b.cand_count, b.C_alloc);
-  } else if (g_phase_b == 1) {
-    phase_b_filter_blockagg<<<dim3(gx, M), g_cf_block, 0, s>>>(d_in, N, b.threshold, b.cand_keys,
-                                                               b.cand_idx, b.cand_count, b.C_alloc);
-  } else {
-    phase_b_filter<<<dim3(gx, M), g_cf_block, 0, s>>>(d_in, N, b.threshold, b.cand_keys, b.cand_idx,
-                                                      b.cand_count, b.C_alloc);
-  }
+  if (g_phase_b == 4)
+    phase_b_filter_wavestage<<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_pack,
+                                                      b.cand_seg, b.cand_count, seg_stride);
+  else if (g_ablate_store == 1)
+    phase_b_filter_waveseg<1><<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_pack,
+                                                       b.cand_seg, b.cand_count, seg_stride);
+  else if (g_ablate_store == 2)
+    phase_b_filter_waveseg<2><<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_pack,
+                                                       b.cand_seg, b.cand_count, seg_stride);
+  else
+    phase_b_filter_waveseg<0><<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_pack,
+                                                       b.cand_seg, b.cand_count, seg_stride);
 
-  phase_c_select<<<M, g_phase_c_block, 0, s>>>(b.cand_keys, b.cand_idx, b.cand_count, b.C_alloc, K,
-                                               d_idx, b.fb_rows, b.fb_count, keys_are_raw);
+  phase_c_select_waveseg<<<M, g_phase_c_block, 0, s>>>(b.cand_pack, b.cand_seg, b.cand_count,
+                                                       seg_stride, nwaves_b, K, d_idx, b.fb_rows,
+                                                       b.fb_count, g_phase_c_passes);
 
   phase_d_fallback<<<dim3(1, FB_GRID), 1024, 0, s>>>(d_in, N, K, b.fb_rows, b.fb_count, d_idx);
 }

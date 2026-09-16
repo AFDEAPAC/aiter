@@ -35,6 +35,8 @@ constexpr int RADIX_PASSES = 4;      // 4 x 8-bit covers all 32 sortable bits
 constexpr int HIST_REP = HIST_REPLICAS;
 constexpr int HIST_SLOTS = 256 * HIST_REP;
 
+constexpr int MAX_WAVES_PER_BLOCK = 16;
+
 // Phase A sampling geometry: NUM_CHUNKS contiguous runs of CHUNK floats each.
 // Contiguous runs (not stride-1-of-32) so the DRAM traffic equals the useful
 // bytes; a strided sample would fetch a whole 128 B line per useful float.
@@ -131,6 +133,55 @@ __device__ __forceinline__ vfloat4 load_f4(const vfloat4* p) {
   return *p;
 }
 
+// Block-wide min and max of keys already in LDS, using an xor butterfly so
+// EVERY lane ends up holding the result (a __shfl_down tree would leave it in
+// lane 0 only -- that exact trap cost 3% recall in the DeepSelect port).
+// All threads must call.
+__device__ __forceinline__ void block_minmax_lds(const uint32_t* __restrict__ s_keys, int c,
+                                                 uint32_t* __restrict__ s_mm, uint32_t& out_min,
+                                                 uint32_t& out_max) {
+  const int lane = threadIdx.x & (WAVE_SIZE - 1);
+  const int wv = threadIdx.x / WAVE_SIZE;
+  const int nwaves = blockDim.x / WAVE_SIZE;
+  uint32_t mn = 0xFFFFFFFFu, mx = 0u;
+  for (int i = threadIdx.x; i < c; i += blockDim.x) {
+    uint32_t k = s_keys[i];
+    mn = min(mn, k);
+    mx = max(mx, k);
+  }
+#pragma unroll
+  for (int off = WAVE_SIZE / 2; off > 0; off >>= 1) {
+    mn = min(mn, (uint32_t)__shfl_xor(mn, off));
+    mx = max(mx, (uint32_t)__shfl_xor(mx, off));
+  }
+  if (lane == 0) {
+    s_mm[wv] = mn;
+    s_mm[MAX_WAVES_PER_BLOCK + wv] = mx;
+  }
+  __syncthreads();
+  mn = 0xFFFFFFFFu;
+  mx = 0u;
+  for (int w = 0; w < nwaves; w++) {
+    mn = min(mn, s_mm[w]);
+    mx = max(mx, s_mm[MAX_WAVES_PER_BLOCK + w]);
+  }
+  out_min = mn;
+  out_max = mx;
+}
+
+// Highest radix pass at which min and max still agree can be skipped outright:
+// if every key shares that byte, the pass's histogram lands entirely in one
+// bucket and contributes nothing to the pivot but the byte itself.
+__device__ __host__ __forceinline__ int common_prefix_passes(uint32_t mn, uint32_t mx) {
+  int start = 0;
+  while (start < RADIX_PASSES) {
+    const int sh = 24 - 8 * start;
+    if (((mn >> sh) & 0xFFu) != ((mx >> sh) & 0xFFu)) break;
+    start++;
+  }
+  return start;
+}
+
 // Tie-correct gather shared by Phase C and the fallback: emits the indices of
 // every key strictly above the pivot, then exactly eq_needed of the keys equal
 // to it. Uses one LDS atomic per wave via ballot/popcount rather than one per
@@ -188,7 +239,6 @@ constexpr int FB_GRID = 64;
 // and nothing else, while making per-wave overflow ~25 sigma away instead of
 // ~0 sigma (expected passers/wave is ~178 +/- 13 at K=2048).
 constexpr int CAND_SLOTS_PER_ROW = 8192;
-constexpr int MAX_WAVES_PER_BLOCK = 16;
 
 // Turns s_hist[256] (per-bucket counts) into an INCLUSIVE SUFFIX sum in place,
 // then finds the bucket where the running count from the top first reaches ek.
