@@ -1,5 +1,26 @@
-attempt	kernel	result	wall_ms	notes
-1	x_0	accept_correctness	-	five gates PASS
-2	x_0+sample_rank70	reject_perf	4.967	Tier2 +69%
-3	x_0+one_block_per_row	reject_perf	3.812	Tier1 +30%
-4	x_0+g_cf_gmult16	accept_best	2.940	Tier1 default shipped
+attempt	target	outcome	wall_ms	evidence
+1	fuse Phase A/C into in-LDS selects	accept	1.1345	2.9587 -> 1.1345, five gates green
+2	Phase B grid.x = 4	reject_perf	1.2528	same-address atomic contention on cand_count[row]
+3	Phase B grid.x = 8	reject_perf	1.4974	monotonic with gx
+4	Phase B grid.x = 16	reject_perf	2.0250	monotonic with gx
+5	Phase B grid.x = 32	reject_perf	2.6405	monotonic with gx
+6	Phase B grid.x = 64	reject_perf	3.4223	monotonic with gx; pure read at gx=1 is 6.08 TB/s
+7	block-aggregated global atomic	reject_perf	0.8949	flattens gx sensitivity but loses to gx=1 per-wave (0.858)
+8	parallel pivot scan + bounded fallback grid	accept	0.7916	phase_a 118->61, phase_c 220->100, phase_d 130->99 us
+9	zero-global-atomic row-block filter	accept	0.7916	phase_b 662 -> 527 us
+10	wave-private regions + packed 64-bit store	accept	0.7740	phase_b 527 -> 501 us
+11	non-temporal loads in Phase B	reject_neutral	0.7930	vs 0.7916; pure streaming, L2 not the constraint
+12	static __shared__ sized to SAMPLE_S_MAX	reject_perf	0.8520	64 KB LDS regardless of runtime S; fixed with dynamic LDS
+13	sample count S=16384	reject_perf	1.0725	LDS cost exceeds the spread benefit
+14	sample count S=8192	accept	0.7612	min candidate count 1872 -> 2125 > K; fallback 4 -> 0 rows
+15	vectorized Phase A load + wave shfl scan	accept	0.6997	phase_a 154 -> 93 us; TARGET MET
+16	LDS-staged contiguous candidate flush	accept	0.6780	ablation: stores were 139 of the 151 us over floor
+17	HIST_REPLICAS=2	reject_perf	0.6400	worse than 4
+18	HIST_REPLICAS=8	reject_perf	0.6480	extra LDS costs more than the conflict it removes
+19	HIST_REPLICAS=4	accept	0.6251	0.667 -> 0.626; fp32 top byte is sign+exponent
+20	ballot gather in Phase C	reject_neutral	0.6280	102.1 -> 104.2 us; its radix passes are the cost, not atomics
+21	common-prefix skip in Phase A	reject_perf	0.6280	phase_a +8.0 us; samples span the row so no pass is skipped
+22	common-prefix skip in Phase C only	accept	0.6202	phase_c -6.0 us
+23	Phase A with 2 radix passes	reject_risk	0.6144	0.8% faster but overflow headroom 9.6% -> 4.3%
+24	sample count back to S=4096	reject_perf	0.7043	trade-off did not flip; fallback rows cost more
+25	auto margin from estimator noise	accept	0.6194	K=512 guard 0.7326 -> 0.5725 (-22%), under_K 82 -> 0

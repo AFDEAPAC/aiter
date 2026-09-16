@@ -1,2 +1,9 @@
-version	kernel	wall_ms_median	stddev_pct	notes
-x_0	topk_fp32_sampled	2.9397	0.087	seed S2 anchor g_cf_gmult=16 correctness PASS
+version	wall_ms	stddev_pct	fallback_rows	change
+x_0	2.9587	0.061	1	seed: three-stage pipeline, global multi-pass radix, ~20 launches
+x_1	1.1345	0.014	4	Phase A/C fused into single in-LDS select kernels; 4 launches
+x_2	0.7916	0.035	4	register pivot scan; bounded fallback dispatch; zero-global-atomic filter
+x_3	0.7740	0.041	4	wave-private candidate regions; packed 64-bit candidate store
+x_4	0.6997	0.016	0	wave shfl suffix scan; runtime S on dynamic LDS; vectorized Phase A load
+x_5	0.6251	0.080	0	LDS-staged contiguous flush; HIST_REPLICAS=4; 4 barriers/pass
+x_6	0.6202	0.095	0	skip radix passes on candidates' common prefix (Phase C only)
+x_7	0.6194	0.067	0	over-collection margin derived from estimator noise
