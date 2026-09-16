@@ -12,6 +12,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, range_constexpr, rocdl
 from aiter.ops.flydsl.kernels import buffer_ops
+from aiter.ops.flydsl.kernels.tensor_shim import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 
@@ -43,12 +44,6 @@ def a16wmix_use_k16(arch=None):
 # = 63, expcnt [6:4] = 7, lgkmcnt [11:8] = 0. Named counters are a flydsl 0.3.1 API; 0.2.4
 # takes only this raw immediate, and llvm-mc assembles both to [0x7f,0xc0,0x8c,0xbf].
 LGKMCNT_0 = 0xC07F
-
-
-def _raw(v):
-    if not isinstance(v, ir.Value) and hasattr(v, "ir_value"):
-        return v.ir_value()
-    return v
 
 
 def _udiv(a, c):

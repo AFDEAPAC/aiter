@@ -10,7 +10,7 @@ from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-from ..layout_utils import crd2idx
+from aiter.ops.flydsl.kernels.layout_utils import crd2idx
 
 from .utils import (
     A16WI4_GROUP_SIZE,
