@@ -133,10 +133,21 @@ int main() {
   });
   report("READ_STREAM", r_read, (double)bytes);
 
-  auto r_row = time_it([&] {
-    read_rowmajor<<<dim3(16, M), threads>>>(reinterpret_cast<const float4*>(d_a), n4_per_row, d_sink);
-  });
-  report("READ_ROWMAJOR", r_row, (double)bytes);
+  // One-block-per-row is the configuration the filter kernel wants (it lets the
+  // block own the row's candidate area outright, so no global atomic is needed).
+  // Measure whether that grid shape can still reach streaming bandwidth.
+  std::pair<double, double> r_row{1e9, 0.0};
+  for (int gx : {1, 2, 4, 16}) {
+    for (int bs : {256, 512, 1024}) {
+      auto r = time_it([&] {
+        read_rowmajor<<<dim3(gx, M), bs>>>(reinterpret_cast<const float4*>(d_a), n4_per_row, d_sink);
+      });
+      char tag[64];
+      snprintf(tag, sizeof(tag), "READ_ROWMAJOR_gx%d_wg%d", gx, bs);
+      report(tag, r, (double)bytes);
+      if (r.first < r_row.first) r_row = r;
+    }
+  }
 
   auto r_copy = time_it([&] {
     copy_kernel<<<blocks, threads>>>(reinterpret_cast<const float4*>(d_a),

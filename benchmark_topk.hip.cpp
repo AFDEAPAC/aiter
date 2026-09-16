@@ -21,9 +21,11 @@
 static int g_sample_rank = 0;       // 0 => derive from margin
 static float g_margin = 1.4f;       // Phase B over-collection factor
 static int g_cf_block = 256;        // Phase B block size
-static int g_cf_gmult = 16;         // Phase B blocks per CU multiplier
+static int g_cf_gx = 16;            // Phase B blocks per row (grid.x)
 static int g_use_nt_load = 0;       // non-temporal streaming loads in Phase B
-static int g_block_agg = 0;         // Phase B: aggregate atomics per block instead of per wave
+// Phase B implementation: 0 = per-wave global atomic, 1 = block-aggregated
+// global atomic, 2 = one block per row with an LDS counter and no global atomic.
+static int g_phase_b = 2;
 static int g_phase_c_block = 512;
 static int g_phase_a_block = 256;
 static int g_pipeline_direct = 0;
@@ -51,20 +53,7 @@ __device__ __forceinline__ void block_select_lds(const uint32_t* __restrict__ s_
         atomicAdd(&s_hist[(k >> sh) & 0xFFu], 1u);
     }
     __syncthreads();
-    if (threadIdx.x == 0) {
-      uint32_t cum = 0, tgt = 0;
-      for (int b = 255; b >= 0; b--) {
-        uint32_t cnt = s_hist[b];
-        if (cum + cnt >= (uint32_t)ek) {
-          tgt = (uint32_t)b;
-          break;
-        }
-        cum += cnt;
-      }
-      s_scan[0] = tgt;
-      s_scan[1] = cum;
-    }
-    __syncthreads();
+    block_find_pivot_bucket(s_hist, s_scan, ek);
     pivot |= (s_scan[0] << sh);
     ek -= (int)s_scan[1];
     __syncthreads();
@@ -96,20 +85,7 @@ __device__ __forceinline__ void block_select_stream(const vfloat4* __restrict__ 
       }
     }
     __syncthreads();
-    if (threadIdx.x == 0) {
-      uint32_t cum = 0, tgt = 0;
-      for (int b = 255; b >= 0; b--) {
-        uint32_t cnt = s_hist[b];
-        if (cum + cnt >= (uint32_t)ek) {
-          tgt = (uint32_t)b;
-          break;
-        }
-        cum += cnt;
-      }
-      s_scan[0] = tgt;
-      s_scan[1] = cum;
-    }
-    __syncthreads();
+    block_find_pivot_bucket(s_hist, s_scan, ek);
     pivot |= (s_scan[0] << sh);
     ek -= (int)s_scan[1];
     __syncthreads();
@@ -121,7 +97,8 @@ __device__ __forceinline__ void block_select_stream(const vfloat4* __restrict__ 
 // Phase A: per-row sampled threshold, fully in LDS, one kernel, one block/row.
 // ---------------------------------------------------------------------------
 __global__ __launch_bounds__(256) void phase_a_threshold(const float* __restrict__ input, int N,
-                                                         int rank, uint32_t* __restrict__ threshold) {
+                                                         int rank, uint32_t* __restrict__ threshold,
+                                                         float* __restrict__ threshold_f) {
   const int row = blockIdx.x;
   const float* ri = input + (size_t)row * N;
 
@@ -141,7 +118,11 @@ __global__ __launch_bounds__(256) void phase_a_threshold(const float* __restrict
   uint32_t pivot;
   int eq_needed;
   block_select_lds(s_keys, SAMPLE_S, rank, s_hist, s_scan, pivot, eq_needed);
-  if (threadIdx.x == 0) threshold[row] = pivot;
+  if (threadIdx.x == 0) {
+    threshold[row] = pivot;
+    // Exact round-trip: pivot is the sortable image of a real sampled value.
+    threshold_f[row] = sortable_to_fp32(pivot);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +261,80 @@ __global__ void phase_b_filter_blockagg(const float* __restrict__ input, int N,
   }
 }
 
+// Variant 2: one block owns the whole row, so it also owns that row's candidate
+// area outright -- no global atomic is needed at all, just an LDS counter.
+// Measured: the per-wave global atomicAdd on cand_count[row] was the real Phase B
+// bottleneck (raising grid.x monotonically slowed the kernel: gx=2 -> 0.925 ms,
+// gx=64 -> 3.42 ms, while a pure read at gx=1 hits 6.08 TB/s).
+//
+// Also drops fp32_to_sortable from the hot loop: the filter compares floats
+// directly against the row threshold using !(v < thr), which admits v >= thr
+// AND NaN. That is a superset of the sortable-order test in every case, and
+// over-collection is harmless because Phase C still does the exact select.
+__global__ void phase_b_filter_rowblock(const float* __restrict__ input, int N,
+                                        const float* __restrict__ threshold_f,
+                                        uint32_t* __restrict__ cand_raw, int* __restrict__ cand_idx,
+                                        unsigned int* __restrict__ cand_count, int C_alloc) {
+  const int row = blockIdx.x;
+  const vfloat4* ri = reinterpret_cast<const vfloat4*>(input + (size_t)row * N);
+  uint32_t* rk = cand_raw + (size_t)row * C_alloc;
+  int* rx = cand_idx + (size_t)row * C_alloc;
+  const float th = threshold_f[row];
+
+  __shared__ unsigned s_n;
+  if (threadIdx.x == 0) s_n = 0;
+  __syncthreads();
+
+  const int lane = threadIdx.x & (WAVE_SIZE - 1);
+  const uint64_t lt = (1ull << lane) - 1ull;
+  const int n4 = N / FP32_EPT;
+  const int stride = blockDim.x;
+  const int iters = (n4 + stride - 1) / stride;
+
+  for (int it = 0; it < iters; it++) {
+    const int i = it * stride + threadIdx.x;
+    vfloat4 v = {0.f, 0.f, 0.f, 0.f};
+    bool live = (i < n4);
+    if (live) v = load_f4(ri + i);
+
+    // One v_cmp per element. __popcll of a wave-uniform mask is a scalar op.
+    const uint64_t b0 = __ballot(live && !(v[0] < th));
+    const uint64_t b1 = __ballot(live && !(v[1] < th));
+    const uint64_t b2 = __ballot(live && !(v[2] < th));
+    const uint64_t b3 = __ballot(live && !(v[3] < th));
+    const int t0 = __popcll(b0);
+    const int t1 = t0 + __popcll(b1);
+    const int t2 = t1 + __popcll(b2);
+    const int wtotal = t2 + __popcll(b3);
+
+    if (wtotal > 0) {
+      unsigned wbase = 0;
+      if (lane == 0) wbase = atomicAdd(&s_n, (unsigned)wtotal);
+      wbase = __shfl(wbase, 0);
+
+      const int base_idx = i * FP32_EPT;
+      if (b0 & (1ull << lane)) {
+        unsigned p = wbase + (unsigned)__popcll(b0 & lt);
+        if (p < (unsigned)C_alloc) { rk[p] = __float_as_uint(v[0]); rx[p] = base_idx + 0; }
+      }
+      if (b1 & (1ull << lane)) {
+        unsigned p = wbase + (unsigned)(t0 + __popcll(b1 & lt));
+        if (p < (unsigned)C_alloc) { rk[p] = __float_as_uint(v[1]); rx[p] = base_idx + 1; }
+      }
+      if (b2 & (1ull << lane)) {
+        unsigned p = wbase + (unsigned)(t1 + __popcll(b2 & lt));
+        if (p < (unsigned)C_alloc) { rk[p] = __float_as_uint(v[2]); rx[p] = base_idx + 2; }
+      }
+      if (b3 & (1ull << lane)) {
+        unsigned p = wbase + (unsigned)(t2 + __popcll(b3 & lt));
+        if (p < (unsigned)C_alloc) { rk[p] = __float_as_uint(v[3]); rx[p] = base_idx + 3; }
+      }
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) cand_count[row] = s_n;
+}
+
 // ---------------------------------------------------------------------------
 // Phase C: exact select on the candidate set, entirely in LDS, one block/row.
 // Also decides which rows need the full-row fallback and compacts them.
@@ -292,7 +347,7 @@ __global__ void phase_c_select(const uint32_t* __restrict__ cand_keys,
                                const int* __restrict__ cand_idx,
                                const unsigned int* __restrict__ cand_count, int C_alloc, int K,
                                int* __restrict__ out_idx, int* __restrict__ fb_rows,
-                               int* __restrict__ fb_count) {
+                               int* __restrict__ fb_count, int keys_are_raw_float) {
   const int row = blockIdx.x;
   const unsigned int c_raw = cand_count[row];
 
@@ -317,7 +372,8 @@ __global__ void phase_c_select(const uint32_t* __restrict__ cand_keys,
   __shared__ unsigned s_weq;
 
   for (int i = threadIdx.x; i < c; i += blockDim.x) {
-    s_keys[i] = rk[i];
+    uint32_t w = rk[i];
+    s_keys[i] = keys_are_raw_float ? fp32_to_sortable_bits(w) : w;
     s_idx[i] = rx[i];
   }
   if (threadIdx.x == 0) {
@@ -351,45 +407,48 @@ __global__ __launch_bounds__(1024) void phase_d_fallback(const float* __restrict
                                                          int K, const int* __restrict__ fb_rows,
                                                          const int* __restrict__ fb_count,
                                                          int* __restrict__ out_idx) {
-  const int slot = blockIdx.y;
-  if (slot >= *fb_count) return;
-  const int row = fb_rows[slot];
-
-  const float* ri = input + (size_t)row * N;
-  const vfloat4* ri4 = reinterpret_cast<const vfloat4*>(ri);
+  const int count = *fb_count;
   const int n4 = N / FP32_EPT;
-  int* out = out_idx + (size_t)row * K;
 
   __shared__ uint32_t s_hist[256];
   __shared__ uint32_t s_scan[2];
   __shared__ unsigned s_wgt;
   __shared__ unsigned s_weq;
 
-  uint32_t pivot;
-  int eq_needed;
-  block_select_stream(ri4, n4, K, s_hist, s_scan, pivot, eq_needed);
+  // Grid-stride over the compacted row list: correct for any count, while the
+  // dispatch stays at FB_GRID blocks instead of one per matrix row.
+  for (int slot = blockIdx.y; slot < count; slot += gridDim.y) {
+    const int row = fb_rows[slot];
+    const vfloat4* ri4 = reinterpret_cast<const vfloat4*>(input + (size_t)row * N);
+    int* out = out_idx + (size_t)row * K;
 
-  if (threadIdx.x == 0) {
-    s_wgt = 0;
-    s_weq = 0;
-  }
-  __syncthreads();
+    uint32_t pivot;
+    int eq_needed;
+    block_select_stream(ri4, n4, K, s_hist, s_scan, pivot, eq_needed);
 
-  const int ngt = K - eq_needed;
-  for (int i = threadIdx.x; i < n4; i += blockDim.x) {
-    vfloat4 v = ri4[i];
-    uint32_t k[FP32_EPT] = {fp32_to_sortable(v[0]), fp32_to_sortable(v[1]), fp32_to_sortable(v[2]),
-                            fp32_to_sortable(v[3])};
+    if (threadIdx.x == 0) {
+      s_wgt = 0;
+      s_weq = 0;
+    }
+    __syncthreads();
+
+    const int ngt = K - eq_needed;
+    for (int i = threadIdx.x; i < n4; i += blockDim.x) {
+      vfloat4 v = ri4[i];
+      uint32_t k[FP32_EPT] = {fp32_to_sortable(v[0]), fp32_to_sortable(v[1]),
+                              fp32_to_sortable(v[2]), fp32_to_sortable(v[3])};
 #pragma unroll
-    for (int e = 0; e < FP32_EPT; e++) {
-      if (k[e] > pivot) {
-        unsigned p = atomicAdd(&s_wgt, 1u);
-        if (p < (unsigned)ngt) out[p] = i * FP32_EPT + e;
-      } else if (k[e] == pivot) {
-        unsigned p = atomicAdd(&s_weq, 1u);
-        if (p < (unsigned)eq_needed) out[ngt + p] = i * FP32_EPT + e;
+      for (int e = 0; e < FP32_EPT; e++) {
+        if (k[e] > pivot) {
+          unsigned p = atomicAdd(&s_wgt, 1u);
+          if (p < (unsigned)ngt) out[p] = i * FP32_EPT + e;
+        } else if (k[e] == pivot) {
+          unsigned p = atomicAdd(&s_weq, 1u);
+          if (p < (unsigned)eq_needed) out[ngt + p] = i * FP32_EPT + e;
+        }
       }
     }
+    __syncthreads();
   }
 }
 
@@ -432,6 +491,7 @@ __global__ void fill_random_fp32(float* data, size_t count, unsigned int seed, i
 // ---------------------------------------------------------------------------
 struct Bufs {
   uint32_t* threshold;
+  float* threshold_f;
   uint32_t* cand_keys;
   int* cand_idx;
   unsigned int* cand_count;
@@ -443,6 +503,7 @@ struct Bufs {
 static void alloc_bufs(Bufs& b, int M, int K) {
   b.C_alloc = PHASE_C_CAP;
   HIP_CHECK(hipMalloc(&b.threshold, (size_t)M * sizeof(uint32_t)));
+  HIP_CHECK(hipMalloc(&b.threshold_f, (size_t)M * sizeof(float)));
   HIP_CHECK(hipMalloc(&b.cand_keys, (size_t)M * b.C_alloc * sizeof(uint32_t)));
   HIP_CHECK(hipMalloc(&b.cand_idx, (size_t)M * b.C_alloc * sizeof(int)));
   HIP_CHECK(hipMalloc(&b.cand_count, (size_t)M * sizeof(unsigned int)));
@@ -453,6 +514,7 @@ static void alloc_bufs(Bufs& b, int M, int K) {
 
 static void free_bufs(Bufs& b) {
   (void)hipFree(b.threshold);
+  (void)hipFree(b.threshold_f);
   (void)hipFree(b.cand_keys);
   (void)hipFree(b.cand_idx);
   (void)hipFree(b.cand_count);
@@ -466,15 +528,20 @@ static void topk_fused(const float* d_in, int M, int N, int K, int* d_idx, Bufs&
                        ? g_sample_rank
                        : std::max(1, (int)(g_margin * (double)K * SAMPLE_S / (double)N));
   const int n4 = N / FP32_EPT;
-  int gx = std::max(1, std::min(smc * g_cf_gmult / M + 1, n4 / g_cf_block));
-  gx = std::max(1, std::min(gx, 64));
+  const int gx = std::max(1, std::min(g_cf_gx, n4 / g_cf_block));
+  (void)smc;
 
   HIP_CHECK(hipMemsetAsync(b.cand_count, 0, (size_t)M * sizeof(unsigned int), s));
   HIP_CHECK(hipMemsetAsync(b.fb_count, 0, sizeof(int), s));
 
-  phase_a_threshold<<<M, g_phase_a_block, 0, s>>>(d_in, N, rank, b.threshold);
+  phase_a_threshold<<<M, g_phase_a_block, 0, s>>>(d_in, N, rank, b.threshold, b.threshold_f);
 
-  if (g_block_agg) {
+  int keys_are_raw = 0;
+  if (g_phase_b == 2) {
+    keys_are_raw = 1;
+    phase_b_filter_rowblock<<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_keys,
+                                                     b.cand_idx, b.cand_count, b.C_alloc);
+  } else if (g_phase_b == 1) {
     phase_b_filter_blockagg<<<dim3(gx, M), g_cf_block, 0, s>>>(d_in, N, b.threshold, b.cand_keys,
                                                                b.cand_idx, b.cand_count, b.C_alloc);
   } else {
@@ -483,15 +550,15 @@ static void topk_fused(const float* d_in, int M, int N, int K, int* d_idx, Bufs&
   }
 
   phase_c_select<<<M, g_phase_c_block, 0, s>>>(b.cand_keys, b.cand_idx, b.cand_count, b.C_alloc, K,
-                                               d_idx, b.fb_rows, b.fb_count);
+                                               d_idx, b.fb_rows, b.fb_count, keys_are_raw);
 
-  phase_d_fallback<<<dim3(1, M), 1024, 0, s>>>(d_in, N, K, b.fb_rows, b.fb_count, d_idx);
+  phase_d_fallback<<<dim3(1, FB_GRID), 1024, 0, s>>>(d_in, N, K, b.fb_rows, b.fb_count, d_idx);
 }
 
 static void topk_direct(const float* d_in, int M, int N, int K, int* d_idx, Bufs& b,
                         hipStream_t s) {
   fill_identity_rows<<<(M + 255) / 256, 256, 0, s>>>(b.fb_rows, b.fb_count, M);
-  phase_d_fallback<<<dim3(1, M), 1024, 0, s>>>(d_in, N, K, b.fb_rows, b.fb_count, d_idx);
+  phase_d_fallback<<<dim3(1, FB_GRID), 1024, 0, s>>>(d_in, N, K, b.fb_rows, b.fb_count, d_idx);
 }
 
 static void run_topk(const float* d_in, int M, int N, int K, int* d_idx, Bufs& b, int smc,
@@ -540,8 +607,8 @@ static void usage(const char* prog) {
           "  --m M --n N --topk K --iters N --warmup N --repeats N\n"
           "  --dist uniform|gaussian|equal|inf|adversarial --seed S\n"
           "  --pipeline fused|direct\n"
-          "  --margin F --sample-rank R --cf-block B --cf-gmult G\n"
-          "  --nt-load 0|1 --block-agg 0|1 --phase-c-block B --phase-a-block B\n"
+          "  --margin F --sample-rank R --cf-block B --cf-gx G\n"
+          "  --nt-load 0|1 --phase-b 0|1|2 --phase-c-block B --phase-a-block B\n"
           "  --input-bin PATH --dump-indices PATH --inject-fault 0|1\n",
           prog);
 }
@@ -576,9 +643,9 @@ int main(int argc, char** argv) {
     else if (a == "--margin") g_margin = std::stof(need());
     else if (a == "--sample-rank") g_sample_rank = std::stoi(need());
     else if (a == "--cf-block") g_cf_block = std::stoi(need());
-    else if (a == "--cf-gmult") g_cf_gmult = std::stoi(need());
+    else if (a == "--cf-gx") g_cf_gx = std::stoi(need());
     else if (a == "--nt-load") g_use_nt_load = std::stoi(need());
-    else if (a == "--block-agg") g_block_agg = std::stoi(need());
+    else if (a == "--phase-b") g_phase_b = std::stoi(need());
     else if (a == "--phase-c-block") g_phase_c_block = std::stoi(need());
     else if (a == "--phase-a-block") g_phase_a_block = std::stoi(need());
     else if (a == "--input-bin") input_path = need();

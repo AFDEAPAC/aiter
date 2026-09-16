@@ -119,3 +119,44 @@ __device__ __forceinline__ vfloat4 load_f4(const vfloat4* p) {
 
 // Byte offset of radix pass p (MSB first).
 __device__ __host__ __forceinline__ int radix_shift(int pass) { return 24 - 8 * pass; }
+
+// Grid.y for the fallback kernel. Blocks loop over the compacted row list, so
+// any number of fallback rows is handled; this only bounds the dispatch cost.
+// grid.y = M would dispatch 4096 blocks to do work for a handful of rows.
+constexpr int FB_GRID = 64;
+
+// Turns s_hist[256] (per-bucket counts) into an INCLUSIVE SUFFIX sum in place,
+// then finds the bucket where the running count from the top first reaches ek.
+// Writes s_scan[0] = bucket, s_scan[1] = count strictly above that bucket.
+//
+// Replaces a serial 256-step walk by thread 0: that walk is a chain of
+// dependent LDS reads and measured as the dominant cost of the select kernels
+// (phase_a 118 us / phase_c 220 us for a few MB of traffic).
+// Every thread in the block must call this (it contains barriers).
+__device__ __forceinline__ void block_find_pivot_bucket(uint32_t* __restrict__ s_hist,
+                                                        uint32_t* __restrict__ s_scan, int ek) {
+  const int t = threadIdx.x;
+  // Hillis-Steele inclusive suffix scan over the 256 buckets.
+  for (int off = 1; off < 256; off <<= 1) {
+    uint32_t add = 0;
+    if (t < 256 && t + off < 256) add = s_hist[t + off];
+    __syncthreads();
+    if (t < 256) s_hist[t] += add;
+    __syncthreads();
+  }
+  // Default matches the serial walk when the total never reaches ek.
+  if (t == 0) {
+    s_scan[0] = 0;
+    s_scan[1] = s_hist[0];
+  }
+  __syncthreads();
+  if (ek > 0 && t < 256) {
+    const uint32_t here = s_hist[t];
+    const uint32_t above = (t == 255) ? 0u : s_hist[t + 1];
+    if (here >= (uint32_t)ek && above < (uint32_t)ek) {
+      s_scan[0] = (uint32_t)t;
+      s_scan[1] = above;
+    }
+  }
+  __syncthreads();
+}
