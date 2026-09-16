@@ -1071,7 +1071,6 @@ def _fused_moe_impl(
         and num_local_tokens is None
         and bias1 is None
         and bias2 is None
-        and is_flydsl_available()
     ):
         from aiter.ops.flydsl.a16wmix_fused_moe import fused_moe_a16wmix
 
