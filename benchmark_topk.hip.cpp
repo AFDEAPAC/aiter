@@ -20,7 +20,26 @@
 // ---- AVO variation surface -------------------------------------------------
 static int g_sample_rank = 0;       // 0 => derive from margin
 static int g_sample_s = 8192;       // Phase A sample count (S=4096 leaves rows short of K)
-static float g_margin = 1.4f;       // Phase B over-collection factor
+static float g_margin = 0.0f;       // 0 => derive from the estimator's own noise
+
+// The candidate count is the number of row elements above the rank-R value of S
+// samples, so its spread is that estimator's noise: std ~ count/sqrt(R). A row
+// undershoots K (and pays the exact fallback) when count < K, so the required
+// over-collection factor is set by how noisy R is, NOT by a constant.
+//
+// Measured at S=8192, margin 1.4, N=131072 (min/mean, rows under K out of 4096):
+//   K=2048 R=179  0.74  0 rows
+//   K=1024 R= 89  0.67  4 rows
+//   K= 512 R= 44  0.52 82 rows
+// i.e. a fixed 1.4 is overfitted to K=2048. Requiring mean*(1 - 3/sqrt(R0)) > K
+// with R0 = K*S/N (the margin-free rank) reproduces 1.36 at K=2048 and demands
+// 2.13 at K=512, which is what the data shows.
+static float auto_margin(int K, int S, int N) {
+  const double r0 = (double)K * S / (double)N;
+  if (r0 < 9.0) return 4.0f;   // too few samples for the 3-sigma rule to mean anything
+  const double m = 1.0 / (1.0 - 3.0 / std::sqrt(r0));
+  return (float)std::min(std::max(m, 1.4), 3.0);
+}
 static int g_cf_block = 512;        // Phase B block size
 static int g_cf_gx = 16;            // Phase B blocks per row (grid.x)
 static int g_use_nt_load = 0;       // non-temporal streaming loads in Phase B
@@ -588,9 +607,12 @@ static void free_bufs(Bufs& b) {
 static void topk_fused(const float* d_in, int M, int N, int K, int* d_idx, Bufs& b, int smc,
                        hipStream_t s) {
   const int S = g_sample_s;
-  const int rank = g_sample_rank > 0
-                       ? g_sample_rank
-                       : std::max(1, (int)(g_margin * (double)K * S / (double)N));
+  const float margin = (g_margin > 0.f) ? g_margin : auto_margin(K, S, N);
+  // Never ask Phase B for more candidates than Phase C's LDS can hold.
+  const double cap_margin = 0.85 * (double)PHASE_C_CAP / (double)K;
+  const double eff_margin = std::min((double)margin, cap_margin);
+  const int rank =
+      g_sample_rank > 0 ? g_sample_rank : std::max(1, (int)(eff_margin * (double)K * S / (double)N));
   const int n4 = N / FP32_EPT;
   const int gx = std::max(1, std::min(g_cf_gx, n4 / g_cf_block));
   (void)smc;
