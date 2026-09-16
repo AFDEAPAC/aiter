@@ -125,6 +125,15 @@ __device__ __host__ __forceinline__ int radix_shift(int pass) { return 24 - 8 * 
 // grid.y = M would dispatch 4096 blocks to do work for a handful of rows.
 constexpr int FB_GRID = 64;
 
+// Wave-private candidate regions (Phase B variant 3). Each wave in the row's
+// block owns a fixed slice, so it needs no atomic at all -- just a wave-uniform
+// register counter. The PHYSICAL stride is deliberately generous: only the
+// occupied slots are ever written or read, so a wide stride costs address space
+// and nothing else, while making per-wave overflow ~25 sigma away instead of
+// ~0 sigma (expected passers/wave is ~178 +/- 13 at K=2048).
+constexpr int CAND_SLOTS_PER_ROW = 8192;
+constexpr int MAX_WAVES_PER_BLOCK = 16;
+
 // Turns s_hist[256] (per-bucket counts) into an INCLUSIVE SUFFIX sum in place,
 // then finds the bucket where the running count from the top first reaches ek.
 // Writes s_scan[0] = bucket, s_scan[1] = count strictly above that bucket.

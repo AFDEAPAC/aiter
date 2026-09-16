@@ -30,6 +30,7 @@ static int g_phase_c_block = 512;
 static int g_phase_a_block = 256;
 static int g_pipeline_direct = 0;
 static int g_inject_fault = 0;
+static int g_dump_stats = 0;
 
 // ---------------------------------------------------------------------------
 // Block-wide exact radix select over keys already resident in LDS.
@@ -335,6 +336,159 @@ __global__ void phase_b_filter_rowblock(const float* __restrict__ input, int N,
   if (threadIdx.x == 0) cand_count[row] = s_n;
 }
 
+// Variant 3: wave-private output regions, so Phase B has NO atomic of any kind
+// (variant 2 still paid ~512 LDS atomics per row on one address). Each wave
+// keeps a wave-uniform register counter and writes into its own slice. Key and
+// index go out as one packed 64-bit store instead of two 32-bit streams.
+// Overflow of a slice is detected and sends the row to the exact fallback.
+__global__ void phase_b_filter_waveseg(const float* __restrict__ input, int N,
+                                       const float* __restrict__ threshold_f,
+                                       uint64_t* __restrict__ cand_pack,
+                                       int* __restrict__ cand_seg,
+                                       unsigned int* __restrict__ cand_count, int seg_stride) {
+  const int row = blockIdx.x;
+  const vfloat4* ri = reinterpret_cast<const vfloat4*>(input + (size_t)row * N);
+  const float th = threshold_f[row];
+
+  const int lane = threadIdx.x & (WAVE_SIZE - 1);
+  const int wid = threadIdx.x / WAVE_SIZE;
+  const int nwaves = blockDim.x / WAVE_SIZE;
+  const uint64_t lt = (1ull << lane) - 1ull;
+
+  uint64_t* seg = cand_pack + (size_t)row * CAND_SLOTS_PER_ROW + (size_t)wid * seg_stride;
+
+  const int n4 = N / FP32_EPT;
+  const int stride = blockDim.x;
+  const int iters = (n4 + stride - 1) / stride;
+
+  int wcnt = 0;       // wave-uniform: every lane holds the same running count
+  bool overflow = false;
+
+  for (int it = 0; it < iters; it++) {
+    const int i = it * stride + threadIdx.x;
+    vfloat4 v = {0.f, 0.f, 0.f, 0.f};
+    const bool live = (i < n4);
+    if (live) v = load_f4(ri + i);
+
+    const uint64_t b0 = __ballot(live && !(v[0] < th));
+    const uint64_t b1 = __ballot(live && !(v[1] < th));
+    const uint64_t b2 = __ballot(live && !(v[2] < th));
+    const uint64_t b3 = __ballot(live && !(v[3] < th));
+    const int t0 = __popcll(b0);
+    const int t1 = t0 + __popcll(b1);
+    const int t2 = t1 + __popcll(b2);
+    const int wtotal = t2 + __popcll(b3);
+
+    if (wtotal > 0) {
+      const int base_idx = i * FP32_EPT;
+      if (b0 & (1ull << lane)) {
+        int p = wcnt + __popcll(b0 & lt);
+        if (p < seg_stride)
+          seg[p] = ((uint64_t)__float_as_uint(v[0]) << 32) | (uint32_t)(base_idx + 0);
+      }
+      if (b1 & (1ull << lane)) {
+        int p = wcnt + t0 + __popcll(b1 & lt);
+        if (p < seg_stride)
+          seg[p] = ((uint64_t)__float_as_uint(v[1]) << 32) | (uint32_t)(base_idx + 1);
+      }
+      if (b2 & (1ull << lane)) {
+        int p = wcnt + t1 + __popcll(b2 & lt);
+        if (p < seg_stride)
+          seg[p] = ((uint64_t)__float_as_uint(v[2]) << 32) | (uint32_t)(base_idx + 2);
+      }
+      if (b3 & (1ull << lane)) {
+        int p = wcnt + t2 + __popcll(b3 & lt);
+        if (p < seg_stride)
+          seg[p] = ((uint64_t)__float_as_uint(v[3]) << 32) | (uint32_t)(base_idx + 3);
+      }
+      wcnt += wtotal;
+      if (wcnt > seg_stride) overflow = true;
+    }
+  }
+
+  __shared__ int s_seg[MAX_WAVES_PER_BLOCK];
+  if (lane == 0) s_seg[wid] = overflow ? -1 : wcnt;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    unsigned total = 0;
+    bool bad = false;
+    for (int w = 0; w < nwaves; w++) {
+      cand_seg[(size_t)row * MAX_WAVES_PER_BLOCK + w] = s_seg[w];
+      if (s_seg[w] < 0) bad = true;
+      else total += (unsigned)s_seg[w];
+    }
+    // 0xFFFFFFFF is unconditionally > PHASE_C_CAP, so Phase C routes it to the
+    // exact fallback without needing a separate flag.
+    cand_count[row] = bad ? 0xFFFFFFFFu : total;
+  }
+}
+
+// Phase C fed by the wave-segmented layout: gathers the variable-length
+// per-wave segments into one contiguous LDS array, then selects exactly.
+__global__ void phase_c_select_waveseg(const uint64_t* __restrict__ cand_pack,
+                                       const int* __restrict__ cand_seg,
+                                       const unsigned int* __restrict__ cand_count, int seg_stride,
+                                       int nwaves_b, int K, int* __restrict__ out_idx,
+                                       int* __restrict__ fb_rows, int* __restrict__ fb_count) {
+  const int row = blockIdx.x;
+  const unsigned int c_raw = cand_count[row];
+  if (c_raw < (unsigned)K || c_raw > (unsigned)PHASE_C_CAP) {
+    if (threadIdx.x == 0) fb_rows[atomicAdd(fb_count, 1)] = row;
+    return;
+  }
+  const int c = (int)c_raw;
+
+  __shared__ uint32_t s_keys[PHASE_C_CAP];
+  __shared__ int s_idx[PHASE_C_CAP];
+  __shared__ uint32_t s_hist[256];
+  __shared__ uint32_t s_scan[2];
+  __shared__ int s_cnt[MAX_WAVES_PER_BLOCK];
+  __shared__ int s_off[MAX_WAVES_PER_BLOCK];
+  __shared__ unsigned s_wgt, s_weq;
+
+  if (threadIdx.x < nwaves_b) s_cnt[threadIdx.x] = cand_seg[(size_t)row * MAX_WAVES_PER_BLOCK + threadIdx.x];
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    int t = 0;
+    for (int w = 0; w < nwaves_b; w++) {
+      s_off[w] = t;
+      t += s_cnt[w];
+    }
+    s_wgt = 0;
+    s_weq = 0;
+  }
+  __syncthreads();
+
+  const uint64_t* base = cand_pack + (size_t)row * CAND_SLOTS_PER_ROW;
+  for (int w = 0; w < nwaves_b; w++) {
+    const int cnt = s_cnt[w];
+    const int off = s_off[w];
+    for (int i = threadIdx.x; i < cnt; i += blockDim.x) {
+      uint64_t p = base[(size_t)w * seg_stride + i];
+      s_keys[off + i] = fp32_to_sortable_bits((uint32_t)(p >> 32));
+      s_idx[off + i] = (int)(uint32_t)p;
+    }
+  }
+  __syncthreads();
+
+  uint32_t pivot;
+  int eq_needed;
+  block_select_lds(s_keys, c, K, s_hist, s_scan, pivot, eq_needed);
+
+  int* out = out_idx + (size_t)row * K;
+  const int ngt = K - eq_needed;
+  for (int i = threadIdx.x; i < c; i += blockDim.x) {
+    uint32_t k = s_keys[i];
+    if (k > pivot) {
+      unsigned p = atomicAdd(&s_wgt, 1u);
+      if (p < (unsigned)ngt) out[p] = s_idx[i];
+    } else if (k == pivot) {
+      unsigned p = atomicAdd(&s_weq, 1u);
+      if (p < (unsigned)eq_needed) out[ngt + p] = s_idx[i];
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Phase C: exact select on the candidate set, entirely in LDS, one block/row.
 // Also decides which rows need the full-row fallback and compacts them.
@@ -494,6 +648,8 @@ struct Bufs {
   float* threshold_f;
   uint32_t* cand_keys;
   int* cand_idx;
+  uint64_t* cand_pack;
+  int* cand_seg;
   unsigned int* cand_count;
   int* fb_rows;
   int* fb_count;
@@ -506,6 +662,8 @@ static void alloc_bufs(Bufs& b, int M, int K) {
   HIP_CHECK(hipMalloc(&b.threshold_f, (size_t)M * sizeof(float)));
   HIP_CHECK(hipMalloc(&b.cand_keys, (size_t)M * b.C_alloc * sizeof(uint32_t)));
   HIP_CHECK(hipMalloc(&b.cand_idx, (size_t)M * b.C_alloc * sizeof(int)));
+  HIP_CHECK(hipMalloc(&b.cand_pack, (size_t)M * CAND_SLOTS_PER_ROW * sizeof(uint64_t)));
+  HIP_CHECK(hipMalloc(&b.cand_seg, (size_t)M * MAX_WAVES_PER_BLOCK * sizeof(int)));
   HIP_CHECK(hipMalloc(&b.cand_count, (size_t)M * sizeof(unsigned int)));
   HIP_CHECK(hipMalloc(&b.fb_rows, (size_t)M * sizeof(int)));
   HIP_CHECK(hipMalloc(&b.fb_count, sizeof(int)));
@@ -517,6 +675,8 @@ static void free_bufs(Bufs& b) {
   (void)hipFree(b.threshold_f);
   (void)hipFree(b.cand_keys);
   (void)hipFree(b.cand_idx);
+  (void)hipFree(b.cand_pack);
+  (void)hipFree(b.cand_seg);
   (void)hipFree(b.cand_count);
   (void)hipFree(b.fb_rows);
   (void)hipFree(b.fb_count);
@@ -535,6 +695,18 @@ static void topk_fused(const float* d_in, int M, int N, int K, int* d_idx, Bufs&
   HIP_CHECK(hipMemsetAsync(b.fb_count, 0, sizeof(int), s));
 
   phase_a_threshold<<<M, g_phase_a_block, 0, s>>>(d_in, N, rank, b.threshold, b.threshold_f);
+
+  if (g_phase_b == 3) {
+    const int nwaves_b = std::max(1, g_cf_block / WAVE_SIZE);
+    const int seg_stride = CAND_SLOTS_PER_ROW / nwaves_b;
+    phase_b_filter_waveseg<<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_pack, b.cand_seg,
+                                                    b.cand_count, seg_stride);
+    phase_c_select_waveseg<<<M, g_phase_c_block, 0, s>>>(b.cand_pack, b.cand_seg, b.cand_count,
+                                                         seg_stride, nwaves_b, K, d_idx, b.fb_rows,
+                                                         b.fb_count);
+    phase_d_fallback<<<dim3(1, FB_GRID), 1024, 0, s>>>(d_in, N, K, b.fb_rows, b.fb_count, d_idx);
+    return;
+  }
 
   int keys_are_raw = 0;
   if (g_phase_b == 2) {
@@ -651,6 +823,7 @@ int main(int argc, char** argv) {
     else if (a == "--input-bin") input_path = need();
     else if (a == "--dump-indices") dump_path = need();
     else if (a == "--inject-fault") g_inject_fault = std::stoi(need());
+    else if (a == "--dump-stats") g_dump_stats = std::stoi(need());
     else {
       usage(argv[0]);
       exit(1);
@@ -712,6 +885,23 @@ int main(int argc, char** argv) {
 
   int fb = 0;
   HIP_CHECK(hipMemcpy(&fb, bufs.fb_count, sizeof(int), hipMemcpyDeviceToHost));
+
+  if (g_dump_stats) {
+    std::vector<unsigned> cc(M);
+    HIP_CHECK(hipMemcpy(cc.data(), bufs.cand_count, (size_t)M * sizeof(unsigned),
+                        hipMemcpyDeviceToHost));
+    std::vector<unsigned> sorted(cc);
+    std::sort(sorted.begin(), sorted.end());
+    double mean = std::accumulate(cc.begin(), cc.end(), 0.0) / M;
+    int under = 0, over = 0;
+    for (unsigned v : cc) {
+      if (v < (unsigned)K) under++;
+      if (v > (unsigned)bufs.C_alloc) over++;
+    }
+    printf("CANDSTATS K=%d C_alloc=%d min=%u p1=%u mean=%.1f p99=%u max=%u under_K=%d over_Calloc=%d\n",
+           K, bufs.C_alloc, sorted.front(), sorted[M / 100], mean, sorted[M - 1 - M / 100],
+           sorted.back(), under, over);
+  }
 
   std::vector<int> h_idx(out_elems);
   HIP_CHECK(hipMemcpy(h_idx.data(), d_idx, out_elems * sizeof(int), hipMemcpyDeviceToHost));
