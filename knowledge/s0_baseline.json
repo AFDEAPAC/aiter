@@ -1,0 +1,18 @@
+{
+  "hbm_stream_bw": {
+    "bandwidth_gib_s": 8897.63,
+    "median_ms": 0.4496,
+    "stddev_pct": 0.432,
+    "raw": "BW_KERNEL bytes=4 GiB median_ms=0.4496 stddev_pct=0.432 bandwidth_GiB_s=8897.63"
+  },
+  "torch_topk": {
+    "wall_ms_median": 4.8409,
+    "stddev_pct": 0.032,
+    "raw": "TORCH wall_ms_median=4.8409 stddev_pct=0.032"
+  },
+  "seed_kernel_x0": {
+    "wall_ms_median": 2.9587,
+    "stddev_pct": 0.061,
+    "raw": "GPU: AMD Instinct MI355X CUs=256\nVERIFY rows_fail=0 fallback_rows=1 inject_fault=0\nVERDICT PASS\nTIMING wall_ms_median=2.9587 stddev_pct=0.061 repeats=5 iters=100 warmup=20\nRESULT kernel=topk_fp32_sampled wall_ms=2.9587"
+  }
+}

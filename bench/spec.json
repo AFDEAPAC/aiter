@@ -1,0 +1,46 @@
+{
+  "shapes": [
+    {
+      "name": "prefill_main",
+      "candidate_argv": [
+        "./benchmark_topk",
+        "--mode",
+        "time",
+        "--m",
+        "4096",
+        "--n",
+        "131072",
+        "--topk",
+        "2048",
+        "--warmup",
+        "20",
+        "--iters",
+        "100",
+        "--repeats",
+        "5"
+      ],
+      "best_argv": [
+        "./benchmark_topk",
+        "--mode",
+        "time",
+        "--m",
+        "4096",
+        "--n",
+        "131072",
+        "--topk",
+        "2048",
+        "--warmup",
+        "20",
+        "--iters",
+        "100",
+        "--repeats",
+        "5"
+      ]
+    }
+  ],
+  "kernel_name_regex": "coarse_filter_fp32|sample_fp32|radix_histogram_fp32_pass|gather_topk_fp32",
+  "warmup": 20,
+  "repeat": 100,
+  "rule": "min_latency",
+  "unit": "ms"
+}

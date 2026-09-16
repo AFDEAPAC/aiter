@@ -1,0 +1,2 @@
+version	kernel	wall_ms_median	stddev_pct	notes
+x_0	topk_fp32_sampled	2.9397	0.087	seed S2 anchor g_cf_gmult=16 correctness PASS

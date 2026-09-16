@@ -1,0 +1,5 @@
+attempt	kernel	result	wall_ms	notes
+1	x_0	accept_correctness	-	five gates PASS
+2	x_0+sample_rank70	reject_perf	4.967	Tier2 +69%
+3	x_0+one_block_per_row	reject_perf	3.812	Tier1 +30%
+4	x_0+g_cf_gmult16	accept_best	2.940	Tier1 default shipped

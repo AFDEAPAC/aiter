@@ -1,0 +1,5 @@
+benchmark_topk
+bw_kernel
+score.json
+log/rocprof_*/
+*.bin

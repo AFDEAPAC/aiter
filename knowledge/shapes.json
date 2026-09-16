@@ -1,0 +1,13 @@
+{
+  "primary": {
+    "name": "prefill_main",
+    "m": 4096,
+    "n": 131072,
+    "topk": 2048,
+    "dtype": "fp32"
+  },
+  "correctness_guards": [
+    {"name": "guard_n32k", "m": 64, "n": 32768, "topk": 512, "dtype": "fp32"},
+    {"name": "guard_k512", "m": 4096, "n": 131072, "topk": 512, "dtype": "fp32"}
+  ]
+}

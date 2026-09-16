@@ -1,0 +1,5 @@
+GPU: AMD Instinct MI355X CUs=256
+VERIFY rows_fail=0 fallback_rows=1 inject_fault=0
+VERDICT PASS
+TIMING wall_ms_median=2.9397 stddev_pct=0.087 repeats=5 iters=100 warmup=20
+RESULT kernel=topk_fp32_sampled wall_ms=2.9397
