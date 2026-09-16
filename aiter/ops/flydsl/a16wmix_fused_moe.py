@@ -60,6 +60,13 @@ def _pick_tile(dim, candidates=(256, 128, 64)):
     raise ValueError(f"no tile in {candidates} divides {dim}")
 
 
+def _contiguous_bf16(x: torch.Tensor) -> torch.Tensor:
+    """Skip a dispatch when the activation is already contiguous bf16."""
+    if x.dtype == torch.bfloat16 and x.is_contiguous():
+        return x
+    return x.to(torch.bfloat16).contiguous()
+
+
 def fused_moe_a16wmix(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -235,7 +242,7 @@ def fused_moe_a16wmix(
                 )
         else:
             _a_fp8, _a_scale = per_token_quant_hip(
-                hidden_states.to(torch.bfloat16).contiguous(), quant_dtype=dtypes.fp8
+                _contiguous_bf16(hidden_states), quant_dtype=dtypes.fp8
             )
             _a_dtype = "fp8"
 
@@ -243,7 +250,7 @@ def fused_moe_a16wmix(
         a_bf16=(
             _a_fp8.view(torch.uint8)
             if _a_dtype == "fp8"
-            else hidden_states.to(torch.bfloat16).contiguous()
+            else _contiguous_bf16(hidden_states)
         ),
         a_dtype=_a_dtype,
         a_scale=_a_scale,
@@ -275,7 +282,8 @@ def fused_moe_a16wmix(
         if out is None
         else out.view(-1)
     )
-    flat_out.zero_()
+    # gemm2 atomic-fadd scatter requires zeroed rows; only clear live tokens.
+    moe_buf[:tokens].zero_()
 
     # fp8 stage2 (AITER_A16WMIX_FP8_S2=1): quantize the intermediate per SORTED ROW.
     # A row of inter_sorted is one route and stage2 contracts over inter_dim, so the
