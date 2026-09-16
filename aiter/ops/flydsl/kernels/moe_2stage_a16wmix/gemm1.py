@@ -5,7 +5,8 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
+from aiter.ops.flydsl.kernels import buffer_ops
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from ..layout_utils import crd2idx
