@@ -717,17 +717,80 @@ ragged rows, causing HIP 700 on rowStarts M=256 N=131072 at coop_g=8 (aiter alwa
 uses ragged rowStarts). Fixed in `topk_generalize.hip.hpp`. verify_grid 2140/2140;
 inner per-cell ACCEPT (-1.1% geomean); anchor 609.4 -> 581.0 us.
 
-### SHIPPED g_17 (v4 Stage 2): per-region scan form (`kScanWave0`)
-Rep scan (`block_find_pivot_bucket_rep`) only at **M=4096 N>=131072**; wave0
-elsewhere. Wider rep band (M>=512) regressed M=1024 N=1M (+10.6%) and M=2048
-N=262144 (+6.3%) on the g_16 baseline. Runtime selection via `g_scan_wave0_dev`;
-`hipMemcpyToSymbol` is cached on the host so timed loops are not charged per iter.
-Inner per-cell ACCEPT vs g_16: 1 cell improved (anchor), 0 regressed.
+### FALSIFIED (v4 Stage 2): a per-region scan form buys nothing once coop_g lands
+The rep-vs-wave0 scan trade that justified g_14 and g_15 **does not survive g_16.**
+Priced on ONE fresh binary via a temporary `--scan-wave0` override, warmup 20 /
+iters 100 / repeats 9, wall ms:
 
-### v4 Stage 3 deferred: per-region S rule
-Re-measure `g_s_rule=1` at M<=8 only before enabling. A quick combined attempt
-(regional table + scan + coop) was not gated separately; the global rule remains
-`g_s_rule=0` (R_TARGET law).
+| shape | wave0 everywhere | per-region table | rep everywhere |
+|---|---|---|---|
+| M=4096 N=131072 (anchor) | 0.5840 | 0.5846 | 0.5843 |
+| M=4096 N=262144 | 1.0440 | 1.0456 | 1.0456 |
+| M=1024 N=1048576 | 0.8546 | 0.8552 | 0.8559 |
+| M=2048 N=262144 | 0.5317 | 0.5315 | 0.5329 |
+| M=256 N=1048576 | 0.2161 | 0.2163 | 0.2169 |
+| M=4096 N=8192 (small_n) | 0.0946 | 0.0944 | 0.0942 |
+
+Three independent rounds on the anchor, the one cell the table existed for:
+wave0 0.5838 / 0.5838 / 0.5842 against rep 0.5843 / 0.5851 / 0.5853 (stddev
+0.07-0.12%). Rep is consistently the SLOWER of the two now -- the opposite sign
+to g_14's -0.35%.
+
+**Why the old evidence expired:** g_14/g_15 measured the anchor at `coop_g == 1`,
+where Phase B/C are `phase_b_filter_wavestage` + `phase_c_select_waveseg`. g_16
+gives that shape `coop_g = 8`, so it runs `phase_b_filter_coop` +
+`phase_c_select_contig` with a different block/LDS shape, and the barrier
+structure the scan form trades against is no longer on the critical path. The
+plan's own rule ("coop_g first, it changes WHICH PATH a shape takes") applies to
+the *evidence* as well as to the sweep order: a pre-coop measurement cannot be
+reused to justify a post-coop knob.
+
+Reverted in full rather than shipped with an all-wave0 table: the runtime form
+put a branch inside `block_select_lds` (the innermost select, where the `#if`
+lets the compiler drop one side entirely) and a `hipMemcpyToSymbol` in the
+dispatch path. The A/B is reproducible from `-DSELECT_WAVE0_SCAN=0`, which is
+how g_15 documented it, so the knob earned nothing it did not already have.
+
+**Process trap that nearly shipped this:** the first `ACCEPT` for the scan table
+was measured on a STALE binary. `make` reported "Nothing to be done for 'all'"
+right after an edit to `csrc/topk_shape.hip.hpp`, so `score_grid` timed the
+previous build and the saved inner baseline recorded that config. Caught by
+comparing mtimes (`benchmark_topk` 23:24:29 vs the header at 23:24:46) plus
+`make -n`. Check both before trusting any number, per config `build_integrity`.
+
+### v4 Stage 3 NOT DONE: per-region S rule
+`g_s_rule` stays the global `0` (R_TARGET law). A regional form was drafted
+(`effective_s_rule`, rule 1 at M<=8) and reverted UNMEASURED, because the same
+expiry that killed Stage 2 applies: the "wins 5-7.5% at M<=8" claim predates
+g_16, and M<=8 shapes now take coop_g 8-64 from the extended table. It needs its
+own sweep on a post-g_16 binary before it can be judged, so nothing here is
+evidence either way.
+
+### A baseline cell can drift 8-13% with no code change; prove it before believing a REJECT
+Nine outer-tier cells (M in {1024, 2048, 4096} x N in {16384, 32768, 65536})
+scored +5.9% to +13.0% against the g_15 outer baseline and tripped
+`POINT_REGRESS_PCT`. None of it was the change. Interleaved, same-session A/B of
+a pre-v4 binary (`git archive 726a9e60 | tar -x -C /tmp/pre_v4 && make`) against
+the shipped one, two rounds each:
+
+| shape | pre-v4 | shipped | g_15 baseline |
+|---|---|---|---|
+| M=1024 N=16384 | 0.0465 / 0.0465 | 0.0466 / 0.0467 | 0.0428 |
+| M=4096 N=16384 | 0.1630 / 0.1630 | 0.1632 / 0.1630 | 0.1443 |
+| M=4096 N=32768 | 0.2432 / 0.2432 | 0.2433 / 0.2432 | 0.2217 |
+| M=2048 N=65536 | 0.1898 / 0.1895 | 0.1895 / 0.1896 | 0.1837 |
+
+Both binaries agree to 0.1-0.3% on all nine, and all nine derive `coop_g == 1`,
+where `coop` is false and `phase_b_filter_coop` is never launched -- so the only
+two shipped kernel diffs cannot reach them even in principle. The baseline is the
+thing that moved.
+
+Method worth reusing: when a per-point REJECT lands on cells whose code path you
+can show is untouched, do NOT tune against it. Build the OLD commit into a
+separate directory, interleave the two binaries in one session, and check the GPU
+is idle (`rocm-smi --showpids`, junction temp) before re-saving. A baseline is a
+measurement, so it decays like one; this repo has already recorded one contention
+event writing a bogus 78.30 us into a baseline.
 
 ### v4 Stage 4: block-size tables for phase_a/phase_c
 The +12.1% hole at M=2048 N=4096 is on **phase_small_n_topk** and is already

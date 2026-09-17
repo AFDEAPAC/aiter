@@ -113,20 +113,26 @@ acceptance:
     and their geomean verdicts remain valid historical records.
 
 baseline:
-  measured_on: "2026-09-17, MI355X, ROCm 10.0"
+  measured_on: "2026-09-18, MI355X, ROCm 10.0, g_18, machine verified idle"
   inner:
     points: 24
-    geomean_us: 61.96
-    geomean_ratio: 2.62
-    per_path_geomean_us: {small_n: 26.96, decode: 34.12, prefill: 206.50}
-    worst_ratio: "4.43x at M=32 N=262144 (decode)"
+    geomean_us: 61.24
+    geomean_ratio: 2.59
+    per_path_geomean_us: {small_n: 27.00, decode: 34.03, prefill: 200.27}
+    worst_ratio: "4.41x at M=32 N=262144 (decode)"
   outer:
-    points: 130
-    geomean_us: 45.21
-    geomean_ratio: 2.60
-    per_path_geomean_us: {small_n: 16.97, decode: 34.55, prefill: 207.07}
-    worst_ratio: "5.25x at M=64 N=131072 (decode)"
-  anchor_us: 609.4
+    points: 402
+    geomean_us: 40.04
+    geomean_ratio: 2.31
+    per_path_geomean_us: {small_n: 15.47, decode: 28.75, prefill: 174.70}
+    worst_ratio: "4.76x at M=8 N=1048576 (decode)"
+  anchor_us: 580.4
+  drift_warning: >
+    Nine outer cells (M >= 1024 x N in 16384/32768/65536) read 8-13% slower than
+    the g_15 baseline recorded for them, on BOTH a pre-v4 and the shipped binary
+    interleaved in one session. That is baseline decay, not a regression; see
+    knowledge/known_bad.md. Re-verify with an old-commit binary before tuning
+    against any per-point REJECT.
   history:
     v1_single_shape_ms: 0.6194
     v2_twelve_shape_geomean_us: 62.13
@@ -158,7 +164,9 @@ shipped_config:
   sample_s: auto            # R_TARGET=179 law
   margin: auto
   cap: auto                 # next pow2 of margin*K*(1+3/sqrt(R)), 4096..8192
-  coop_g: auto              # per-(M,N) table; extended to M=4096 in v4
+  coop_g: auto              # per-(M,N) table; extended to M=4096 in v4 (g_16)
+  scan_form: wave0          # compile-time SELECT_WAVE0_SCAN; a per-region table
+                            # was tried in v4 Stage 2 and FALSIFIED (g_17/g_18)
   phase_a_passes: 3         # 2 overflows the cap at M=1024 N=1M (949 -> 1917 us)
   hist_replicas: 4
   hipgraph: 0               # measured 13-18% slower on launch-bound shapes

@@ -24,10 +24,6 @@ constexpr int WAVE_SIZE = 64;
 constexpr int FP32_EPT = 4;          // floats per dwordx4 load
 constexpr int RADIX_PASSES = 4;      // 4 x 8-bit covers all 32 sortable bits
 
-// Per-launch radix scan form, set by host before each topk call (see benchmark_topk).
-extern __constant__ int g_scan_wave0_dev;
-__device__ __forceinline__ bool scan_wave0_enabled() { return g_scan_wave0_dev != 0; }
-
 // Replicas of each histogram bucket. A sortable fp32's top byte is sign+exponent,
 // so on uniform[-1,1] data roughly half of all positive values share ONE bucket
 // and the per-element LDS atomicAdd serialises hard. Lanes are spread across

@@ -193,7 +193,6 @@ struct ShapeParams {
   int cap;
   int coop_g;
   bool keys_only_c;
-  bool scan_wave0;  // true: block_find_pivot_bucket_wave0; false: _rep
   bool geom_ok;
 };
 
@@ -352,46 +351,13 @@ static inline int choose_coop_g(int M, int N, int n4_per_row, int block, int ove
   return snap_coop_g(std::min(by_target, by_work), max_g);
 }
 
-// Per-region radix scan form. Measured trade (g_14 rep vs g_15 wave0):
-// rep wins the anchor band (M>=512 N>=131072, -0.35% at M=4096 N=131072);
-// wave0 wins small_n (-2.2%) and decode (-1.3%). Unmeasured cells default wave0.
-constexpr int SCAN_TAB_M = 13;
-constexpr int SCAN_TAB_N = 7;
-
-static const signed char kScanWave0[SCAN_TAB_M][SCAN_TAB_N] = {
-    /* M=1    */ {1, 1, 1, 1, 1, 1, 1},
-    /* M=2    */ {1, 1, 1, 1, 1, 1, 1},
-    /* M=4    */ {1, 1, 1, 1, 1, 1, 1},
-    /* M=8    */ {1, 1, 1, 1, 1, 1, 1},
-    /* M=16   */ {1, 1, 1, 1, 1, 1, 1},
-    /* M=32   */ {1, 1, 1, 1, 1, 1, 1},
-    /* M=64   */ {1, 1, 1, 1, 1, 1, 1},
-    /* M=128  */ {1, 1, 1, 1, 1, 1, 1},
-    /* M=256  */ {1, 1, 1, 1, 1, 1, 1},
-    /* M=512  */ {1, 1, 1, 1, 1, 1, 1},
-    /* M=1024 */ {1, 1, 1, 1, 1, 1, 1},
-    /* M=2048 */ {1, 1, 1, 1, 1, 1, 1},
-    /* M=4096 */ {1, 1, 1, 0, 0, 0, 0},
-};
-
-static inline bool scan_wave0_from_table(int M, int N) {
-  if (M < 1 || M > 4096 || N < (1 << COOP_N_LOG2_BASE)) return true;
-  const int mi = ilog2_floor(M);
-  int ni = ilog2_floor(N) - COOP_N_LOG2_BASE;
-  if (mi >= SCAN_TAB_M || ni < 0) return true;
-  if (ni >= SCAN_TAB_N) ni = SCAN_TAB_N - 1;
-  return kScanWave0[mi][ni] != 0;
-}
-
-static inline bool choose_scan_wave0(int M, int N, int override_v) {
-  if (override_v >= 0) return override_v != 0;
-  return scan_wave0_from_table(M, N);
-}
+// A per-region radix scan form (rep vs wave0) was tried in v4 Stage 2 and is
+// FALSIFIED: once coop_g > 1 reaches the anchor band, the two forms are
+// indistinguishable. See knowledge/known_bad.md.
 
 static inline ShapeParams derive_shape_params(int M, int N, int K, float margin_override,
                                               int sample_s_override, int coop_g_override,
-                                              TopkPath path_override,
-                                              int scan_wave0_override = -1) {
+                                              TopkPath path_override) {
   ShapeParams p{};
   p.path = path_override;
   const bool small_n_fits =
@@ -407,7 +373,6 @@ static inline ShapeParams derive_shape_params(int M, int N, int K, float margin_
     p.cap = N;
     p.coop_g = 1;
     p.keys_only_c = false;
-    p.scan_wave0 = true;
     p.geom_ok = (N % FP32_EPT == 0 && K <= N);
     return p;
   }
@@ -460,6 +425,5 @@ static inline ShapeParams derive_shape_params(int M, int N, int K, float margin_
     if (p.path == PATH_DECODE && p.coop_g <= 1) p.coop_g = choose_coop_g(M, N, n4, 512, 64);
     if (p.path == PATH_PREFILL) p.coop_g = 1;
   }
-  p.scan_wave0 = choose_scan_wave0(M, N, scan_wave0_override);
   return p;
 }

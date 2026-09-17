@@ -145,9 +145,6 @@ static int g_phase_a_compact = 0;
 #if SELECT_CLEAR_ON_READ && !SELECT_FUSED_REDUCE
 #error "SELECT_CLEAR_ON_READ needs SELECT_FUSED_REDUCE: only the fused scan clears"
 #endif
-
-__constant__ int g_scan_wave0_dev = 1;
-
 static int g_pipeline_direct = 0;
 static int g_inject_fault = 0;
 static int g_dump_stats = 0;
@@ -156,7 +153,6 @@ static int g_ablate_store = 0;   // diagnostic only: produces WRONG results
 static int g_phase_c_passes = RADIX_PASSES;
 static int g_path_override = PATH_AUTO;
 static int g_coop_g = 0;
-static int g_scan_wave0 = -1;       // -1 => table, 0/1 => override
 static int g_fuse_ab = 0;
 static int g_use_hipgraph = 0;
 static int g_small_n_block = 0;     // 0 => derive from the vec4 load count
@@ -265,22 +261,22 @@ __device__ __forceinline__ void block_select_lds(const uint32_t* __restrict__ s_
     }
 #endif
     __syncthreads();
-    if (scan_wave0_enabled()) {
-      block_find_pivot_bucket_wave0<SELECT_CLEAR_ON_READ != 0>(s_hist, s_scan, ek);
-    } else if (SELECT_FUSED_REDUCE) {
-      block_find_pivot_bucket_rep<SELECT_CLEAR_ON_READ != 0>(s_hist, s_scan, ek);
-    } else {
-      if (HIST_REP > 1) {
-        for (int b = threadIdx.x; b < 256; b += blockDim.x) {
-          uint32_t sum = 0;
+#if SELECT_WAVE0_SCAN
+    block_find_pivot_bucket_wave0<SELECT_CLEAR_ON_READ != 0>(s_hist, s_scan, ek);
+#elif SELECT_FUSED_REDUCE
+    block_find_pivot_bucket_rep<SELECT_CLEAR_ON_READ != 0>(s_hist, s_scan, ek);
+#else
+    if (HIST_REP > 1) {
+      for (int b = threadIdx.x; b < 256; b += blockDim.x) {
+        uint32_t sum = 0;
 #pragma unroll
-          for (int r = 0; r < HIST_REP; r++) sum += s_hist[b * HIST_REP + r];
-          s_red[b] = sum;
-        }
-        __syncthreads();
+        for (int r = 0; r < HIST_REP; r++) sum += s_hist[b * HIST_REP + r];
+        s_red[b] = sum;
       }
-      block_find_pivot_bucket(HIST_REP > 1 ? s_red : s_hist, s_scan, ek);
+      __syncthreads();
     }
+    block_find_pivot_bucket(HIST_REP > 1 ? s_red : s_hist, s_scan, ek);
+#endif
     pivot |= (s_scan[0] << sh);
     ek -= (int)s_scan[1];
   }
@@ -1140,13 +1136,7 @@ static void topk_indices(const float* d_in, int M, int pitch, const int* d_row_s
                          int* d_idx, float* d_val, Bufs& b, int smc, hipStream_t s) {
   const int k_geom = g_ragged ? geometry_k_ragged(K, pitch) : K;
   ShapeParams sp = derive_shape_params(M, pitch, k_geom, g_margin, g_sample_s, g_coop_g,
-                                       (TopkPath)g_path_override, g_scan_wave0);
-  const int sw = sp.scan_wave0 ? 1 : 0;
-  static int last_scan_wave0_dev = -1;
-  if (sw != last_scan_wave0_dev) {
-    HIP_CHECK(hipMemcpyToSymbol(g_scan_wave0_dev, &sw, sizeof(int)));
-    last_scan_wave0_dev = sw;
-  }
+                                       (TopkPath)g_path_override);
   g_sample_s = sp.S > 0 ? sp.S : g_sample_s;
   if (g_ragged) {
     if (d_val) topk_indices_inst<true, true>(d_in, M, pitch, d_row_starts, d_row_ends, K, d_idx, d_val, b, sp, s);
@@ -1396,7 +1386,7 @@ static void usage(const char* prog) {
           "  --nt-load 0|1 --phase-b 0|1|2 --phase-c-block B --phase-a-block B\n"
           "  --phase-a-compact 0|1 (compact Phase A's active set between passes)\n"
           "  --input-bin PATH --dump-indices PATH --inject-fault 0|1|2 (1=index, 2=value)\n"
-          "  --path auto|small_n|prefill|decode --coop-g G --scan-wave0 0|1 --fuse-ab 0|1 --hipgraph 0|1\n"
+          "  --path auto|small_n|prefill|decode --coop-g G --fuse-ab 0|1 --hipgraph 0|1\n"
           "  --small-n-block B (256..1024, 0=auto)  --s-rule 0|1 (0=legacy R_TARGET)\n"
           "  --verify-sample-rows N --verify-oracle gpu|cpu\n"
           "  --ragged 0|1 --ragged-prefix P (row r extent = P+r+1, clamped to N)\n"
@@ -1456,7 +1446,6 @@ int main(int argc, char** argv) {
       else if (p == "decode") g_path_override = PATH_DECODE;
       else g_path_override = PATH_AUTO;
     } else if (a == "--coop-g") g_coop_g = std::stoi(need());
-    else if (a == "--scan-wave0") g_scan_wave0 = std::stoi(need());
     else if (a == "--fuse-ab") g_fuse_ab = std::stoi(need());
     else if (a == "--hipgraph") g_use_hipgraph = std::stoi(need());
     else if (a == "--small-n-block") g_small_n_block = std::stoi(need());
@@ -1485,7 +1474,7 @@ int main(int argc, char** argv) {
 
   ShapeParams shape =
       derive_shape_params(M, N, g_ragged ? geometry_k_ragged(K, N) : K, g_margin, g_sample_s,
-                          g_coop_g, (TopkPath)g_path_override, g_scan_wave0);
+                          g_coop_g, (TopkPath)g_path_override);
   if (g_sample_s <= 0 || g_path_override != PATH_SMALL_N) g_sample_s = shape.S > 0 ? shape.S : g_sample_s;
   if (!shape.geom_ok) {
     fprintf(stderr, "ERROR: shape M=%d N=%d K=%d incompatible (path=%d S=%d cap=%d)\n", M, N, K,
@@ -1500,9 +1489,8 @@ int main(int argc, char** argv) {
   GPUInfo info = get_gpu_info();
   const char* path_name =
       shape.path == PATH_SMALL_N ? "small_n" : (shape.path == PATH_DECODE ? "decode" : "prefill");
-  printf("GPU: %s CUs=%d path=%s S=%d margin=%.3f cap=%d coop_g=%d scan_w0=%d fuse_ab=%d\n",
-         info.name, info.sm_count, path_name, shape.S, shape.margin, shape.cap, shape.coop_g,
-         shape.scan_wave0 ? 1 : 0, g_fuse_ab);
+  printf("GPU: %s CUs=%d path=%s S=%d margin=%.3f cap=%d coop_g=%d fuse_ab=%d\n", info.name,
+         info.sm_count, path_name, shape.S, shape.margin, shape.cap, shape.coop_g, g_fuse_ab);
   HIP_CHECK(hipMemcpyToSymbol(d_use_nt_load, &g_use_nt_load, sizeof(int)));
 
   int dist_mode = 0;
