@@ -1,15 +1,33 @@
 # topk-prefill-avo — per-row fp32 top-k on MI355X (gfx950)
 
 Standalone HIP kernel + benchmark for `topk` over fp32 `[M, N]`, emitting int32
-indices only. Tuned for **M=4096, N=131072, K=2048**.
+indices only.
 
-**0.6194 ms** on MI355X (5 runs x 100 iters, stddev 0.067%), against a 0.760 ms
-external target and a 0.4821 ms measured pipeline floor. `torch.topk` on the same
-shape is 4.8541 ms.
+> **This history is parked inside the `AFDEAPAC/aiter` repository, on a branch
+> whose history is unrelated to aiter's.** It is a separate project that has no
+> aiter files in it and builds on its own; the fork is only being used as a place
+> to keep it. The part of this work that *is* aiter code lives in aiter's own
+> history on `feat/topk-per-row-gfx950-avo`, as the `top_k_per_row_prefill_avo`
+> op, generated from here by
+> [`scripts/export_aiter_op.py`](scripts/export_aiter_op.py).
 
-See [`reports/s4_final_report.md`](reports/s4_final_report.md) for the full run,
-[`knowledge/known_bad.md`](knowledge/known_bad.md) for everything that did not
-work, and [`.evo/config.yaml`](.evo/config.yaml) for the frozen contract.
+Originally tuned for the single shape M=4096, N=131072, K=2048, where it measures
+**0.6194 ms** on MI355X (5 runs x 100 iters, stddev 0.067%) against a 0.760 ms
+external target and a 0.4821 ms measured pipeline floor — `torch.topk` on the
+same shape is 4.8541 ms. It now covers M=1..4096 x N=2048..1M with the shape
+choices derived per shape in [`csrc/topk_shape.hip.hpp`](csrc/topk_shape.hip.hpp),
+gated on 130 points x 5 distributions.
+
+Start with [`reports/grid_report.html`](reports/grid_report.html) for the current
+130-point picture and [`log/grid_evolution.tsv`](log/grid_evolution.tsv) for the
+perf lineage. [`reports/s4_final_report.md`](reports/s4_final_report.md) is the
+earlier single-shape run, and [`knowledge/known_bad.md`](knowledge/known_bad.md)
+is everything that did not work, with the number that killed each one.
+
+Note that the phase table and the "no atomic of any kind" claim further down
+describe the original single-shape pipeline. The cooperative decode path added
+since does use atomics, with a reservation valve and an exact fallback for rows
+that overflow.
 
 ## Build and run
 
