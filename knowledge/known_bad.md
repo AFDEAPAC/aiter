@@ -445,3 +445,14 @@ with HIP error 700 (illegal memory access). `phase_ab_fused` does not initialize
 by running the same command on a pre-change binary, which faults identically;
 coop_g=1 shapes pass on both. The knob is a diagnostic, defaults off, and is
 left broken rather than half-fixed, but it must not be trusted for ablations.
+
+### Ragged rows need per-row extent, not just pitch
+aiter passes `stride0` as row pitch and `rowEnds[row]` as the exclusive end.
+Selecting over the full pitch on a triangular matrix (`row_len = row + 1`) pulls
+tail garbage into the candidate set and emits indices outside `[0, row_len)`.
+Rows shorter than K must emit `min(K, row_len)` indices then `-1` padding.
+Fix: `template <bool RAGGED>` plus `row_ends` kernarg; uniform launches pass
+`nullptr` and compile the old path unchanged. Short rows (`row_len < max(S,K)`)
+route through `phase_a_threshold` to the exact path via `threshold_f = +inf`.
+2010/2010 expanded-grid verifies green (402 shapes x 5 distributions); inner
+geomean 64.53 us vs 64.81 us baseline (-0.43%).

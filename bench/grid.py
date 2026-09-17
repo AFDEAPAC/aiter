@@ -18,12 +18,16 @@ BENCH = ROOT / "benchmark_topk"
 MODEL_JSON = ROOT / "knowledge" / "g0_floor_model.json"
 
 # ---------------------------------------------------------------------------
-# Grid: the customer matrix, restricted to powers of two. K is fixed at 2048,
-# which by itself excludes N < 2048 (the contract requires K <= N).
+# Grid: the customer matrix, restricted to powers of two for the main tier.
+# K=2048 is the scoring default; TOPK_VALUES adds multi-K coverage and
+# AITER_WIDTHS adds num_prefix + num_rows (e.g. 131072 + 256 = 131328).
 # ---------------------------------------------------------------------------
 TOPK = 2048
+TOPK_VALUES = [512, 1024, 2048]
 MS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
 NS = [2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
+AITER_PREFIX = 131072
+AITER_M = [64, 256, 1024, 4096]
 
 # Largest shape is M=4096 N=1048576 = 16 GB of input against 309 GB of VRAM
 # (measured with rocm-smi). An earlier 14 GB guard was arbitrary and wrongly
@@ -58,11 +62,33 @@ def fits_in_vram(m, n, k=TOPK):
 
 def all_shapes():
     """Every (m, n, topk) in the grid that fits on the device."""
+    seen = set()
     out = []
+
+    def add(m, n, k):
+        if k > n:
+            return
+        if not fits_in_vram(m, n, k):
+            return
+        key = (m, n, k)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(key)
+
     for n in NS:
         for m in MS:
-            if fits_in_vram(m, n):
-                out.append((m, n, TOPK))
+            add(m, n, TOPK)
+    for k in TOPK_VALUES:
+        if k == TOPK:
+            continue
+        for n in NS:
+            for m in MS:
+                add(m, n, k)
+    for m in AITER_M:
+        n = AITER_PREFIX + m
+        for k in TOPK_VALUES:
+            add(m, n, k)
     return out
 
 

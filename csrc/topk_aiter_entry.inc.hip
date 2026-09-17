@@ -113,12 +113,8 @@ bool topk_avo_supports(int64_t numRows, int64_t stride0, int64_t k)
         .geom_ok;
 }
 
-// STEP-A LIMITATION: rowStarts / rowEnds are validated for shape but their
-// contents are not honoured -- every row is selected over its full `stride0`
-// extent. Ragged rows need the per-row extent inside each phase kernel, which
-// is a kernel change, not an entry change. Until that lands, callers with
-// ragged rows must not use this op; the accompanying op test checks results
-// against torch.topk, so a violation surfaces there rather than silently.
+// rowStarts must be zero (aiter prefill passes zeros). rowEnds[row] is the
+// exclusive end column; indices are relative to the row base in the buffer.
 void top_k_per_row_prefill_avo(const aiter_tensor_t& logits,
                                const aiter_tensor_t& rowStarts,
                                const aiter_tensor_t& rowEnds,
@@ -165,12 +161,12 @@ void top_k_per_row_prefill_avo(const aiter_tensor_t& logits,
 
     const ShapeParams sp = avo::params_for(M, N, K);
     const float* in      = static_cast<const float*>(logits.data_ptr());
+    const int* row_ends  = static_cast<const int*>(rowEnds.data_ptr());
     int* idx             = static_cast<int*>(indices.data_ptr());
 
     if(sp.path == PATH_SMALL_N)
     {
-        // No workspace: the whole row lives in LDS for the one block that owns it.
-        topk_small_n(in, M, N, K, idx, stream);
+        topk_small_n<true>(in, M, N, row_ends, K, idx, stream);
         return;
     }
 
@@ -180,5 +176,5 @@ void top_k_per_row_prefill_avo(const aiter_tensor_t& logits,
                 workspace.value().numel() * workspace.value().element_size(),
                 L.total);
     Bufs b = avo::bind_bufs(workspace.value().data_ptr(), L, sp.cap);
-    topk_fused_impl(in, M, N, K, idx, b, sp, stream);
+    topk_fused_impl<true>(in, M, N, row_ends, K, idx, b, sp, stream);
 }
