@@ -1,0 +1,25 @@
+=== anchor M=4096 N=131072 ===
+GPU: AMD Instinct MI355X CUs=256 path=prefill S=8192 margin=1.400 cap=4096 coop_g=1 fuse_ab=0
+TIMING wall_ms_median=0.6131 stddev_pct=0.000 repeats=1 iters=20 warmup=5
+RESULT pipeline=fused wall_ms=0.6131 fallback_rows=0 hipgraph=0
+kernel_us_median:
+  void phase_a_threshold<false>                65.7 us  (n=26)
+  void phase_b_filter_wavestage<false>        478.0 us  (n=26)
+  void phase_c_select_waveseg<true, false, false>     64.2 us  (n=26)
+=== prefill_ref M=4096 N=1048576 ===
+GPU: AMD Instinct MI355X CUs=256 path=prefill S=16384 margin=2.129 cap=8192 coop_g=1 fuse_ab=0
+TIMING wall_ms_median=3.1706 stddev_pct=0.000 repeats=1 iters=20 warmup=5
+RESULT pipeline=fused wall_ms=3.1706 fallback_rows=0 hipgraph=0
+kernel_us_median:
+  void phase_a_threshold<false>               116.9 us  (n=26)
+  void phase_b_filter_wavestage<false>       2932.2 us  (n=26)
+  void phase_c_select_waveseg<false, false, false>    118.9 us  (n=26)
+=== decode M=128 N=65536 ===
+GPU: AMD Instinct MI355X CUs=256 path=decode S=4096 margin=1.400 cap=4096 coop_g=8 fuse_ab=0
+TIMING wall_ms_median=0.0325 stddev_pct=0.000 repeats=1 iters=20 warmup=5
+RESULT pipeline=fused wall_ms=0.0325 fallback_rows=0 hipgraph=0
+kernel_us_median:
+  void phase_a_threshold<false>                 7.7 us  (n=26)
+  void phase_b_filter_coop<false>              11.2 us  (n=26)
+  void phase_c_select_contig<false, false>      8.7 us  (n=26)
+profiles under /home/mh/topk-prefill-avo/log/large_n_profile

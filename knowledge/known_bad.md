@@ -639,3 +639,23 @@ Fix: add three explicit shapes to `bench/grid.py` `VALUES` -- (256, 524288),
 (256, 1048576, prefix=131072), (8, 524288, prefix=131072) -- and re-run
 verify_grid; 2130/2130 green. Same lesson as the unused-kernarg trap: a template
 makes the body free, not the obligation to test every instantiation that ships.
+
+### Phase C ships 3 radix passes, not 4, on fp32 candidates
+The 4th 8-bit pass is bit-identical to stopping at 3 for fp32 sortable keys
+(known_bad "Phase A with 2 radix passes" note). Default `g_phase_c_passes` is
+now 3: anchor M=4096 N=131072 615 -> 609 us (-1%), rocprof phase_c 69.7 ->
+64.2 us, full-op 3.69 -> 3.74 TB/s. Inner geomean -1.66% vs g_10. Block-size
+sweep (256..1024 for phase_a/c), fuse-ab on prefill, and phase-a 2-pass did not
+beat the occupancy default; S=8192 remains optimal vs 4096/16384 on anchor.
+
+### decode large-N full-op BW is launch-bound, not filter-bound
+rocprof at M=128 N=65536: phase_a+b+c sum ~27.6 us vs 32.5 us wall; 3x launch
+floor dominates. coop_g table re-sweep (G=4/8/16/32) confirms G=8 at N=65536;
+do not chase 5 TB/s full-op on decode via AVO -- route small-M decode through
+topk_select FlyDSL instead.
+
+### top_k_per_row_prefill dispatches stride0 >= 32768 to AVO when supported
+`aiter/ops/topk.py` routes non-stable calls with stride0 >= 32768 through
+`top_k_per_row_prefill_avo` when `topk_avo_supports()`; `stable=True` and
+`AITER_DISABLE_TOPK_AVO=1` force the original mb/ob path. Verified by
+`op_tests/test_topk_prefill_dispatch.py`.
