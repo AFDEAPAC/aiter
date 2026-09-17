@@ -1,0 +1,1859 @@
+{
+  "sweep_ms": [
+    256,
+    512,
+    1024,
+    2048,
+    4096
+  ],
+  "sweep_ns": [
+    40960,
+    49152,
+    57344,
+    65536,
+    81920,
+    98304
+  ],
+  "sweep_gs": [
+    1,
+    2,
+    4,
+    8,
+    16,
+    32
+  ],
+  "rows": [
+    {
+      "m": 256,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 35.1,
+      "stddev_pct": 0.079,
+      "path": "prefill"
+    },
+    {
+      "m": 256,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 37.1,
+      "stddev_pct": 0.076,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 43.4,
+      "stddev_pct": 0.075,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 34.6,
+      "stddev_pct": 0.134,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 43.3,
+      "stddev_pct": 0.053,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 46.2,
+      "stddev_pct": 0.079,
+      "path": "decode"
+    },
+    {
+      "m": 512,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 42.9,
+      "stddev_pct": 0.038,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 46.7,
+      "stddev_pct": 0.104,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 61.0,
+      "stddev_pct": 0.038,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 50.3,
+      "stddev_pct": 0.065,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 64.4,
+      "stddev_pct": 0.05,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 69.3,
+      "stddev_pct": 0.047,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 61.5,
+      "stddev_pct": 0.059,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 72.6,
+      "stddev_pct": 0.06,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 90.0,
+      "stddev_pct": 0.036,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 78.1,
+      "stddev_pct": 0.041,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 104.8,
+      "stddev_pct": 0.068,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 113.3,
+      "stddev_pct": 0.07,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 136.0,
+      "stddev_pct": 0.04,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 138.8,
+      "stddev_pct": 0.07,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 165.1,
+      "stddev_pct": 0.127,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 157.2,
+      "stddev_pct": 0.139,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 212.7,
+      "stddev_pct": 0.095,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 223.0,
+      "stddev_pct": 0.1,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 273.2,
+      "stddev_pct": 0.097,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 260.1,
+      "stddev_pct": 0.12,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 290.6,
+      "stddev_pct": 0.083,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 295.7,
+      "stddev_pct": 0.068,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 402.6,
+      "stddev_pct": 0.04,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 40960,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 421.7,
+      "stddev_pct": 0.075,
+      "path": "prefill"
+    },
+    {
+      "m": 256,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 37.6,
+      "stddev_pct": 0.073,
+      "path": "prefill"
+    },
+    {
+      "m": 256,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 38.2,
+      "stddev_pct": 0.061,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 43.0,
+      "stddev_pct": 0.038,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 34.6,
+      "stddev_pct": 0.082,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 43.6,
+      "stddev_pct": 0.037,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 51.6,
+      "stddev_pct": 0.054,
+      "path": "decode"
+    },
+    {
+      "m": 512,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 45.5,
+      "stddev_pct": 0.051,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 48.2,
+      "stddev_pct": 0.059,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 61.6,
+      "stddev_pct": 0.084,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 50.0,
+      "stddev_pct": 0.046,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 65.0,
+      "stddev_pct": 0.042,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 78.3,
+      "stddev_pct": 0.036,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 67.2,
+      "stddev_pct": 0.054,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 75.7,
+      "stddev_pct": 0.037,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 92.2,
+      "stddev_pct": 0.035,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 79.0,
+      "stddev_pct": 0.021,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 105.9,
+      "stddev_pct": 0.031,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 129.7,
+      "stddev_pct": 0.041,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 155.7,
+      "stddev_pct": 0.064,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 149.9,
+      "stddev_pct": 0.131,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 172.8,
+      "stddev_pct": 0.08,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 162.0,
+      "stddev_pct": 0.128,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 216.2,
+      "stddev_pct": 0.092,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 257.0,
+      "stddev_pct": 0.047,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 306.1,
+      "stddev_pct": 0.087,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 287.0,
+      "stddev_pct": 0.083,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 312.6,
+      "stddev_pct": 0.121,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 308.0,
+      "stddev_pct": 0.072,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 411.2,
+      "stddev_pct": 0.023,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 49152,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 489.8,
+      "stddev_pct": 0.095,
+      "path": "prefill"
+    },
+    {
+      "m": 256,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 40.3,
+      "stddev_pct": 0.098,
+      "path": "prefill"
+    },
+    {
+      "m": 256,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 39.2,
+      "stddev_pct": 0.059,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 44.1,
+      "stddev_pct": 0.089,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 36.4,
+      "stddev_pct": 0.089,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 44.2,
+      "stddev_pct": 0.074,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 57.1,
+      "stddev_pct": 0.081,
+      "path": "decode"
+    },
+    {
+      "m": 512,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 48.2,
+      "stddev_pct": 0.033,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 50.2,
+      "stddev_pct": 0.056,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 63.5,
+      "stddev_pct": 0.062,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 53.4,
+      "stddev_pct": 0.031,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 66.4,
+      "stddev_pct": 0.06,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 87.0,
+      "stddev_pct": 0.062,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 72.4,
+      "stddev_pct": 0.101,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 80.7,
+      "stddev_pct": 0.04,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 96.6,
+      "stddev_pct": 0.041,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 87.2,
+      "stddev_pct": 0.037,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 111.8,
+      "stddev_pct": 0.025,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 148.1,
+      "stddev_pct": 0.073,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 172.0,
+      "stddev_pct": 0.072,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 164.4,
+      "stddev_pct": 0.167,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 183.7,
+      "stddev_pct": 0.096,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 177.3,
+      "stddev_pct": 0.179,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 223.9,
+      "stddev_pct": 0.096,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 290.6,
+      "stddev_pct": 0.092,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 332.2,
+      "stddev_pct": 0.065,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 312.4,
+      "stddev_pct": 0.058,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 332.1,
+      "stddev_pct": 0.051,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 335.1,
+      "stddev_pct": 0.069,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 425.2,
+      "stddev_pct": 0.055,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 57344,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 551.8,
+      "stddev_pct": 0.089,
+      "path": "prefill"
+    },
+    {
+      "m": 256,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 43.0,
+      "stddev_pct": 0.114,
+      "path": "prefill"
+    },
+    {
+      "m": 256,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 40.3,
+      "stddev_pct": 0.07,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 44.9,
+      "stddev_pct": 0.051,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 36.8,
+      "stddev_pct": 0.077,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 44.6,
+      "stddev_pct": 0.073,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 62.9,
+      "stddev_pct": 0.093,
+      "path": "decode"
+    },
+    {
+      "m": 512,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 51.2,
+      "stddev_pct": 0.063,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 52.0,
+      "stddev_pct": 0.077,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 65.2,
+      "stddev_pct": 0.075,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 54.3,
+      "stddev_pct": 0.06,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 67.0,
+      "stddev_pct": 0.042,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 96.8,
+      "stddev_pct": 0.047,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 77.8,
+      "stddev_pct": 0.056,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 86.7,
+      "stddev_pct": 0.086,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 102.7,
+      "stddev_pct": 0.035,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 94.0,
+      "stddev_pct": 0.03,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 117.6,
+      "stddev_pct": 0.019,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 170.3,
+      "stddev_pct": 0.074,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 189.3,
+      "stddev_pct": 0.121,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 184.1,
+      "stddev_pct": 0.064,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 195.4,
+      "stddev_pct": 0.059,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 188.7,
+      "stddev_pct": 0.155,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 229.4,
+      "stddev_pct": 0.096,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 326.5,
+      "stddev_pct": 0.043,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 329.0,
+      "stddev_pct": 0.073,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 319.4,
+      "stddev_pct": 0.142,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 342.1,
+      "stddev_pct": 0.093,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 342.0,
+      "stddev_pct": 0.094,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 425.7,
+      "stddev_pct": 0.066,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 65536,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 613.5,
+      "stddev_pct": 0.052,
+      "path": "prefill"
+    },
+    {
+      "m": 256,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 48.2,
+      "stddev_pct": 0.059,
+      "path": "prefill"
+    },
+    {
+      "m": 256,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 43.1,
+      "stddev_pct": 0.065,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 46.8,
+      "stddev_pct": 0.058,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 39.5,
+      "stddev_pct": 0.041,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 47.2,
+      "stddev_pct": 0.035,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 67.5,
+      "stddev_pct": 0.08,
+      "path": "decode"
+    },
+    {
+      "m": 512,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 57.3,
+      "stddev_pct": 0.049,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 57.3,
+      "stddev_pct": 0.075,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 68.8,
+      "stddev_pct": 0.033,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 59.0,
+      "stddev_pct": 0.047,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 71.7,
+      "stddev_pct": 0.046,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 104.3,
+      "stddev_pct": 0.06,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 108.2,
+      "stddev_pct": 0.154,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 106.6,
+      "stddev_pct": 0.085,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 117.2,
+      "stddev_pct": 0.046,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 110.4,
+      "stddev_pct": 0.059,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 134.3,
+      "stddev_pct": 0.036,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 193.8,
+      "stddev_pct": 0.059,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 224.6,
+      "stddev_pct": 0.077,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 216.1,
+      "stddev_pct": 0.098,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 226.3,
+      "stddev_pct": 0.068,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 221.8,
+      "stddev_pct": 0.09,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 264.1,
+      "stddev_pct": 0.079,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 375.2,
+      "stddev_pct": 0.067,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 391.0,
+      "stddev_pct": 0.063,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 377.7,
+      "stddev_pct": 0.052,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 393.0,
+      "stddev_pct": 0.049,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 397.0,
+      "stddev_pct": 0.053,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 484.0,
+      "stddev_pct": 0.068,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 81920,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 707.5,
+      "stddev_pct": 0.058,
+      "path": "prefill"
+    },
+    {
+      "m": 256,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 53.5,
+      "stddev_pct": 0.042,
+      "path": "prefill"
+    },
+    {
+      "m": 256,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 45.2,
+      "stddev_pct": 0.051,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 48.6,
+      "stddev_pct": 0.082,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 41.8,
+      "stddev_pct": 0.094,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 49.1,
+      "stddev_pct": 0.11,
+      "path": "decode"
+    },
+    {
+      "m": 256,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 68.4,
+      "stddev_pct": 0.058,
+      "path": "decode"
+    },
+    {
+      "m": 512,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 63.2,
+      "stddev_pct": 0.037,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 61.8,
+      "stddev_pct": 0.037,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 72.7,
+      "stddev_pct": 0.031,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 63.9,
+      "stddev_pct": 0.057,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 74.5,
+      "stddev_pct": 0.057,
+      "path": "prefill"
+    },
+    {
+      "m": 512,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 105.6,
+      "stddev_pct": 0.038,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 126.3,
+      "stddev_pct": 0.059,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 121.3,
+      "stddev_pct": 0.051,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 130.1,
+      "stddev_pct": 0.039,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 124.2,
+      "stddev_pct": 0.039,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 143.6,
+      "stddev_pct": 0.061,
+      "path": "prefill"
+    },
+    {
+      "m": 1024,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 197.7,
+      "stddev_pct": 0.065,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 260.4,
+      "stddev_pct": 0.068,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 248.2,
+      "stddev_pct": 0.067,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 256.0,
+      "stddev_pct": 0.038,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 251.9,
+      "stddev_pct": 0.069,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 286.7,
+      "stddev_pct": 0.095,
+      "path": "prefill"
+    },
+    {
+      "m": 2048,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 384.5,
+      "stddev_pct": 0.074,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 1,
+      "us": 464.8,
+      "stddev_pct": 0.071,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 2,
+      "us": 445.8,
+      "stddev_pct": 0.06,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 4,
+      "us": 455.0,
+      "stddev_pct": 0.056,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 8,
+      "us": 456.6,
+      "stddev_pct": 0.044,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 16,
+      "us": 530.7,
+      "stddev_pct": 0.141,
+      "path": "prefill"
+    },
+    {
+      "m": 4096,
+      "n": 98304,
+      "topk": 2048,
+      "coop_g": 32,
+      "us": 731.5,
+      "stddev_pct": 0.088,
+      "path": "prefill"
+    }
+  ],
+  "optima": {
+    "256,40960": {
+      "best_g": 8,
+      "best_us": 34.6,
+      "default_us": 35.1,
+      "speedup": 1.014,
+      "log2_g": 3
+    },
+    "512,40960": {
+      "best_g": 1,
+      "best_us": 42.9,
+      "default_us": 42.9,
+      "speedup": 1.0,
+      "log2_g": 0
+    },
+    "1024,40960": {
+      "best_g": 1,
+      "best_us": 61.5,
+      "default_us": 61.5,
+      "speedup": 1.0,
+      "log2_g": 0
+    },
+    "2048,40960": {
+      "best_g": 1,
+      "best_us": 136.0,
+      "default_us": 136.0,
+      "speedup": 1.0,
+      "log2_g": 0
+    },
+    "4096,40960": {
+      "best_g": 2,
+      "best_us": 260.1,
+      "default_us": 273.2,
+      "speedup": 1.05,
+      "log2_g": 1
+    },
+    "256,49152": {
+      "best_g": 8,
+      "best_us": 34.6,
+      "default_us": 37.6,
+      "speedup": 1.087,
+      "log2_g": 3
+    },
+    "512,49152": {
+      "best_g": 1,
+      "best_us": 45.5,
+      "default_us": 45.5,
+      "speedup": 1.0,
+      "log2_g": 0
+    },
+    "1024,49152": {
+      "best_g": 1,
+      "best_us": 67.2,
+      "default_us": 67.2,
+      "speedup": 1.0,
+      "log2_g": 0
+    },
+    "2048,49152": {
+      "best_g": 2,
+      "best_us": 149.9,
+      "default_us": 155.7,
+      "speedup": 1.039,
+      "log2_g": 1
+    },
+    "4096,49152": {
+      "best_g": 2,
+      "best_us": 287.0,
+      "default_us": 306.1,
+      "speedup": 1.067,
+      "log2_g": 1
+    },
+    "256,57344": {
+      "best_g": 8,
+      "best_us": 36.4,
+      "default_us": 40.3,
+      "speedup": 1.107,
+      "log2_g": 3
+    },
+    "512,57344": {
+      "best_g": 1,
+      "best_us": 48.2,
+      "default_us": 48.2,
+      "speedup": 1.0,
+      "log2_g": 0
+    },
+    "1024,57344": {
+      "best_g": 1,
+      "best_us": 72.4,
+      "default_us": 72.4,
+      "speedup": 1.0,
+      "log2_g": 0
+    },
+    "2048,57344": {
+      "best_g": 2,
+      "best_us": 164.4,
+      "default_us": 172.0,
+      "speedup": 1.046,
+      "log2_g": 1
+    },
+    "4096,57344": {
+      "best_g": 2,
+      "best_us": 312.4,
+      "default_us": 332.2,
+      "speedup": 1.063,
+      "log2_g": 1
+    },
+    "256,65536": {
+      "best_g": 8,
+      "best_us": 36.8,
+      "default_us": 43.0,
+      "speedup": 1.168,
+      "log2_g": 3
+    },
+    "512,65536": {
+      "best_g": 1,
+      "best_us": 51.2,
+      "default_us": 51.2,
+      "speedup": 1.0,
+      "log2_g": 0
+    },
+    "1024,65536": {
+      "best_g": 1,
+      "best_us": 77.8,
+      "default_us": 77.8,
+      "speedup": 1.0,
+      "log2_g": 0
+    },
+    "2048,65536": {
+      "best_g": 2,
+      "best_us": 184.1,
+      "default_us": 189.3,
+      "speedup": 1.028,
+      "log2_g": 1
+    },
+    "4096,65536": {
+      "best_g": 2,
+      "best_us": 319.4,
+      "default_us": 329.0,
+      "speedup": 1.03,
+      "log2_g": 1
+    },
+    "256,81920": {
+      "best_g": 8,
+      "best_us": 39.5,
+      "default_us": 48.2,
+      "speedup": 1.22,
+      "log2_g": 3
+    },
+    "512,81920": {
+      "best_g": 1,
+      "best_us": 57.3,
+      "default_us": 57.3,
+      "speedup": 1.0,
+      "log2_g": 0
+    },
+    "1024,81920": {
+      "best_g": 2,
+      "best_us": 106.6,
+      "default_us": 108.2,
+      "speedup": 1.015,
+      "log2_g": 1
+    },
+    "2048,81920": {
+      "best_g": 2,
+      "best_us": 216.1,
+      "default_us": 224.6,
+      "speedup": 1.039,
+      "log2_g": 1
+    },
+    "4096,81920": {
+      "best_g": 2,
+      "best_us": 377.7,
+      "default_us": 391.0,
+      "speedup": 1.035,
+      "log2_g": 1
+    },
+    "256,98304": {
+      "best_g": 8,
+      "best_us": 41.8,
+      "default_us": 53.5,
+      "speedup": 1.28,
+      "log2_g": 3
+    },
+    "512,98304": {
+      "best_g": 2,
+      "best_us": 61.8,
+      "default_us": 63.2,
+      "speedup": 1.023,
+      "log2_g": 1
+    },
+    "1024,98304": {
+      "best_g": 2,
+      "best_us": 121.3,
+      "default_us": 126.3,
+      "speedup": 1.041,
+      "log2_g": 1
+    },
+    "2048,98304": {
+      "best_g": 2,
+      "best_us": 248.2,
+      "default_us": 260.4,
+      "speedup": 1.049,
+      "log2_g": 1
+    },
+    "4096,98304": {
+      "best_g": 2,
+      "best_us": 445.8,
+      "default_us": 464.8,
+      "speedup": 1.043,
+      "log2_g": 1
+    }
+  }
+}

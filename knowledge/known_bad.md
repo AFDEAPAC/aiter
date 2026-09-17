@@ -823,6 +823,39 @@ measurement and can decay -- this repo has recorded one contention event writing
 a bogus 78.30 us into a baseline -- but a broken comparison looks exactly the
 same and is far cheaper to rule out.
 
+### SHIPPED (v5 Stage 4): kCoopLog2G at half-octave N, fitted minimax not argmin
+Two separate things, and the second one is the transferable part.
+
+**The table needed finer N resolution.** Indexing N by `ilog2_floor(N) - 14`
+gives one column per octave. Refitting the same 2093-point sweep with octave
+columns instead of half-octaves costs up to **+5.42%** (M=64 over
+[16384, 32768)) and more than 1% on 12 of the (M, octave) pairs, worst in
+[524288, 1048576) at large M. Splitting each octave at 1.5x fixes it.
+Filling the v4 hole at the same time (M >= 256, N in [32768, 131072), where I
+had set the columns to 0 because the v4 sweep never measured them) is worth
+1.01x to 1.28x at M=256, growing with N, and 1.00x to 1.07x above that.
+
+**A table cell must be fitted on the WORST case over the range it serves.**
+The first fit took the argmin at the single N each bucket had been measured at,
+and that is how M=1024 column 11 came out as G=1: at N=786432 G=1 led G=16 by
+0.2%, and at N=1048572 -- same bucket -- G=1 costs **+12.6%**. It shipped into an
+outer-tier run as a real +8.2% regression on that cell, the only one in 547.
+Refitting as minimax over every measured N in the bucket picks G=16, which costs
+0.2% and 0.1% at the other two N in the bucket.
+
+The same flaw hid in the tie-breaking pass, which nudges ties toward
+monotone-in-N: checked at one N it moved M=64 column 1 to G=16, free at N=24576
+and **+9.4%** at N=28672. Both passes now evaluate across the bucket, which
+needed a second and third N measured per bucket (`coop_sweep_{mid,base16k}`).
+After that no fitted cell is worse than +3.4% against any N measured inside it,
+down from +9.4%.
+
+**Watch the units on a G probe.** The v4 note that justified this work said
+"M=256 N=32768 has no win: default 32.5 us, G=2 36.0, G=4 43.0", and I carried
+that forward as "G=8 costs +32% there". It does not -- that was G=4. G=8 is
+32.5 us against G=1's 32.2, a 0.9% tie, because the v4 probe never tried G=8 at
+that shape. A sparse G probe is not a statement about the G values it skipped.
+
 ### SHIPPED (v5 Stage 3): search for the nearest exact sampling stride
 `derive_shape_params`'s exact-stride repair offered exactly ONE candidate: `N/64`
 chunks, which `align_sample_s` then clamps to `SAMPLE_S_MAX`. So at

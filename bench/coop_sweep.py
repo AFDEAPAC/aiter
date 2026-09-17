@@ -25,10 +25,30 @@ SWEEP_GS = [1, 2, 4, 8, 16, 32]
 TOPK = grid.TOPK
 
 
+def _ints(s):
+    return [int(x) for x in s.replace(",", " ").split()]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="fewer warmup/iters/repeats")
+    ap.add_argument("--ms", type=_ints, default=None, help="override the M list")
+    ap.add_argument("--ns", type=_ints, default=None, help="override the N list")
+    ap.add_argument("--gs", type=_ints, default=None, help="override the G list")
+    ap.add_argument("--tag", default="", help="suffix for the output files")
     args = ap.parse_args()
+
+    global SWEEP_MS, SWEEP_NS, SWEEP_GS, OUT_TSV, OUT_JSON, OUT_OPT
+    if args.ms:
+        SWEEP_MS = args.ms
+    if args.ns:
+        SWEEP_NS = args.ns
+    if args.gs:
+        SWEEP_GS = args.gs
+    if args.tag:
+        OUT_TSV = ROOT / "log" / ("coop_sweep_%s.tsv" % args.tag)
+        OUT_JSON = ROOT / "log" / ("coop_sweep_%s.json" % args.tag)
+        OUT_OPT = ROOT / "log" / ("coop_sweep_optima_%s.json" % args.tag)
 
     if not grid.BENCH.exists():
         import subprocess
