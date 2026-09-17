@@ -1,0 +1,139 @@
+# AMD AVO — topk-prefill fp32 MI355X, GENERALIZED SCOPE (v2 fork)
+#
+# Fork of .evo/config.yaml, which is frozen and stays frozen: it scores ONE shape
+# (M=4096 N=131072 K=2048) and its own header requires a v2 fork to change the
+# shape or acceptance policy. This file is that fork. The v1 baseline of
+# 0.6194 ms remains the auditable record for the single-shape run.
+#
+# What changed vs v1:
+#   - scope is the full customer matrix (M 1..4096, N 512..1M), not one shape
+#   - the metric is a geomean over 12 scored shapes, not one wall_ms
+#   - prefill_main is retained as a hard REGRESSION ANCHOR, not just a score term
+#   - measurement settings are per-shape, because the sub-100 us shapes cannot
+#     hold stddev < 2% at the v1 argv (measured 2.7-3.1% at warmup 20/iters 100)
+workflow: amd-avo-kernel-evolution
+kernel: topk_indices_kernel
+kernel_type: generic
+forked_from: .evo/config.yaml
+forked_at_baseline_ms: 0.6194
+
+arch:
+  target: gfx950
+  isa_skill_policy: on_demand
+
+toolchain:
+  rocm_version: "10.0"
+  build_image: "host hipcc, ROCm 7.2.1"
+  correctness_image: "rocm/ali-private:ubuntu22.04_rocm10.0.0_cp313_torch2.12.0_vllm_dsv4_20260916"
+  compiler: "hipcc, --offload-arch=gfx950"
+  note: "The host binary runs unchanged inside the correctness image, so the torch
+         gates and the timed binary are the same artifact."
+
+target_metric: geomean_us
+goal: "reduce the geomean over the 12 scored shapes below 62.13 us, with
+       prefill_main not regressing beyond its noise band"
+
+frozen:
+  bench_binary: ./benchmark_topk
+  metric: "per-shape wall_ms median of run-medians from the TIMING line, converted
+           to us; score = geometric mean over the 12 scored shapes"
+  regression_anchor: "prefill_main must stay <= 620.0 us (v1 best 616.1 us measured
+                      here + a 0.6% noise band). A candidate that improves the
+                      geomean while regressing prefill_main past this is REJECTED."
+  gpu: "HIP_VISIBLE_DEVICES=0"
+  dtype: fp32
+  contract: "fp32 [M,N] -> int32 indices [M,K], K <= N enforced, K > N is an error"
+  reject_stddev_pct: 2.0
+  per_shape_argv: "shapes under ~150 us use --warmup 100 --iters 500 --repeats 7;
+                   the rest use --warmup 20 --iters 100 --repeats 5. At the v1
+                   argv the small shapes measured 2.7-3.1% stddev, i.e. above the
+                   reject threshold, so a 2% change was indistinguishable from noise."
+  correctness_gate: "python bench/correctness.py inside the correctness image, plus
+                     python bench/gate_selftest.py which PROVES the torch gates can
+                     go red. correctness.py silently degrades to the in-binary GPU
+                     oracle when torch is absent, so the selftest is mandatory."
+
+# Regime-aware floor model: scripts/floor_bench.hip + bench/sweep_matrix.py.
+# floor_us = max(traffic/peak_bw * achievable_scale, latency_us, n_launch*per_launch)
+# where traffic and n_launch depend on the path (small_n moves no candidates and
+# launches one kernel; the sampled paths move margin*K*8 B per row).
+measured_floors:
+  peak_read_tb_s: 5.71
+  achievable_scale: 1.294        # real access pattern vs peak stream, from the anchor
+  small_payload_latency_us: 5.8
+  per_launch_us: 2.63            # 4 sequential empty launches measure 10.52 us
+  phaseb_read_write_anchor_ms: 0.4436
+  note: "An earlier version of this model charged every shape 4 launches plus
+         candidate-write traffic, which produced ratios BELOW 1.0 for N=512 --
+         proof the model was wrong, not that the kernel beat its floor."
+
+baseline:
+  geomean_us: 62.13
+  measured_on: "2026-09-16, MI355X, all 12 shapes stddev < 0.9%"
+  v1_single_shape_best_ms: 0.6194
+
+acceptance:
+  rule: geomean_with_regression_anchor
+  detail: "commit iff (a) bench/gate_selftest.py passes, (b) bench/correctness.py
+           passes in the correctness image, (c) geomean_us improves, (d)
+           prefill_main <= 620.0 us, (e) every scored shape stddev < 2%"
+
+# Chosen from the CORRECTED floor-ratio ranking, covering all three dispatch paths
+# and both ends of M. The three worst-ratio shapes in the matrix are small_n at
+# large M, which the broken floor model had hidden.
+shapes:
+  - {name: prefill_main,        m: 4096, n: 131072,  topk: 2048, regime: prefill, path: prefill, baseline_us: 616.10, warmup: 20,  iters: 100, repeats: 5, scored: true, anchor: true}
+  - {name: small_n_m4096_n512,  m: 4096, n: 512,     topk: 256,  regime: small_n, path: small_n, baseline_us: 23.80,  warmup: 100, iters: 500, repeats: 7, scored: true}
+  - {name: small_n_m4096_n1024, m: 4096, n: 1024,    topk: 512,  regime: small_n, path: small_n, baseline_us: 28.40,  warmup: 100, iters: 500, repeats: 7, scored: true}
+  - {name: small_n_m4096_n2048, m: 4096, n: 2048,    topk: 1024, regime: small_n, path: small_n, baseline_us: 38.10,  warmup: 100, iters: 500, repeats: 7, scored: true}
+  - {name: small_n_m1024_n8192, m: 1024, n: 8192,    topk: 2048, regime: small_n, path: small_n, baseline_us: 31.40,  warmup: 100, iters: 500, repeats: 7, scored: true}
+  - {name: small_n_m4096_n8192, m: 4096, n: 8192,    topk: 2048, regime: small_n, path: small_n, baseline_us: 99.70,  warmup: 100, iters: 500, repeats: 7, scored: true}
+  - {name: decode_m1_n1m,       m: 1,    n: 1048576, topk: 2048, regime: decode,  path: decode,  baseline_us: 31.80,  warmup: 100, iters: 500, repeats: 7, scored: true}
+  - {name: decode_m8_n1m,       m: 8,    n: 1048576, topk: 2048, regime: decode,  path: decode,  baseline_us: 38.20,  warmup: 100, iters: 500, repeats: 7, scored: true}
+  - {name: decode_m16_n512k,    m: 16,   n: 524288,  topk: 2048, regime: decode,  path: decode,  baseline_us: 37.90,  warmup: 100, iters: 500, repeats: 7, scored: true}
+  - {name: decode_m64_n256k,    m: 64,   n: 262144,  topk: 2048, regime: decode,  path: decode,  baseline_us: 44.60,  warmup: 100, iters: 500, repeats: 7, scored: true}
+  - {name: prefill_m256_n32k,   m: 256,  n: 32768,   topk: 2048, regime: prefill, path: prefill, baseline_us: 34.20,  warmup: 100, iters: 500, repeats: 7, scored: true}
+  - {name: prefill_m1024_n1m,   m: 1024, n: 1048576, topk: 2048, regime: prefill, path: prefill, baseline_us: 947.60, warmup: 20,  iters: 100, repeats: 5, scored: true}
+  # correctness-only, not scored
+  - {name: guard_k512,     m: 4096, n: 131072, topk: 512,  scored: false}
+  - {name: guard_n32k,     m: 4096, n: 32768,  topk: 2048, scored: false}
+  - {name: guard_k_eq_n,   m: 64,   n: 8192,   topk: 8192, scored: false}
+  - {name: guard_odd_mk,   m: 17,   n: 1024,   topk: 1000, scored: false}
+
+correctness:
+  command_argv: ["python", "bench/correctness.py"]
+  selftest_argv: ["python", "bench/gate_selftest.py"]
+  run_in: correctness_image
+  frozen: true
+  gates:
+    - "value multiset bitwise-equal to torch.topk"
+    - "index uniqueness"
+    - "exactly K outputs, all in range"
+    - "distributions: uniform, gaussian, all-equal, +inf, adversarial"
+    - "all three dispatch paths verified separately, both sides of every regime boundary"
+  dual_path: "--pipeline direct runs the exact full-row select over every row as an
+              independent oracle. The fallback branch folded into Phase C calls the
+              same exact_row_select() device function the oracle uses, so the two
+              cannot drift; the all-equal and +inf distributions drive 100% of rows
+              down that branch."
+
+shipped_config:
+  phase_b: 4                # wave-private regions + LDS-staged contiguous flush
+  cf_block: 512             # phase_b_filter_wavestage is __launch_bounds__(512)
+  phase_a_block: auto       # occupancy_block_threads(M, PHASE_A_STATIC_LDS + S*4)
+  phase_c_block: auto       # occupancy_block_threads(M, PHASE_C_STATIC_LDS + cap*8)
+  small_n_block: auto       # same rule, plus a load-count cap
+  sample_s: auto            # R_TARGET=179 law
+  margin: auto              # derived from the rank estimator's noise
+  cap: auto                 # next pow2 of margin*K*(1+3/sqrt(R)), 4096..8192
+  coop_g: auto              # snapped to {1,4,16,64,256,1024}; g=2 is broken
+  phase_a_passes: 3         # 2 overflows the cap at M=1024 N=1M (949 -> 1917 us)
+  hist_replicas: 4
+  hipgraph: 0               # measured 13-18% SLOWER on launch-bound shapes
+  dispatches_per_call: 3    # phase_a, phase_b, phase_c; was 6 (prefill) / 9 (decode)
+
+notes:
+  - "Correctness is a hard gate and was never traded for throughput."
+  - "Falsified directions live in knowledge/known_bad.md with their numbers."
+  - "M=4096 N=1M needs 16 GB of input and is marked oom_skip, not FAIL."
+  - "External references 0.760 ms (gluon) / 0.950 ms (aiter) still not reproduced locally."
