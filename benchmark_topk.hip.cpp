@@ -376,7 +376,7 @@ __device__ __forceinline__ void block_select_lds_compact(uint32_t* __restrict__ 
 // Same select but streaming the row from global memory (used by the fallback /
 // direct oracle, where the row is far too large for LDS).
 template <bool RAGGED>
-__device__ __forceinline__ void block_select_stream(const vfloat4* __restrict__ row4, int n4,
+__device__ __forceinline__ void block_select_stream(const float* __restrict__ row, int n4,
                                                     int len, int K, uint32_t* __restrict__ s_hist,
                                                     uint32_t* __restrict__ s_red,
                                                     uint32_t* __restrict__ s_scan, uint32_t& pivot,
@@ -394,7 +394,7 @@ __device__ __forceinline__ void block_select_stream(const vfloat4* __restrict__ 
     for (int i = threadIdx.x; i < HIST_SLOTS; i += blockDim.x) s_hist[i] = 0;
     __syncthreads();
     for (int i = threadIdx.x; i < n4; i += blockDim.x) {
-      vfloat4 v = row4[i];
+      vfloat4 v = load_row_f4<RAGGED>(row, i, len);
       uint32_t k[FP32_EPT] = {fp32_to_sortable(v[0]), fp32_to_sortable(v[1]),
                               fp32_to_sortable(v[2]), fp32_to_sortable(v[3])};
 #pragma unroll
@@ -443,16 +443,15 @@ __device__ __forceinline__ void exact_row_select(const float* __restrict__ input
   }
   const int k_out = RAGGED ? k_take_dev(K, len) : K;
   const int n4 = RAGGED ? n4_cover(len) : (pitch / FP32_EPT);
-  const vfloat4* ri4 = reinterpret_cast<const vfloat4*>(rif0);
   uint32_t pivot;
   int eq_needed;
-  block_select_stream<RAGGED>(ri4, n4, len, k_out, s_hist, s_red, s_scan, pivot, eq_needed);
+  block_select_stream<RAGGED>(rif0, n4, len, k_out, s_hist, s_red, s_scan, pivot, eq_needed);
   if (threadIdx.x == 0) {
     *s_wgt = 0;
     *s_weq = 0;
   }
   __syncthreads();
-  const float* rif = reinterpret_cast<const float*>(ri4);
+  const float* rif = rif0;
   if constexpr (RAGGED) {
     block_gather_topk<WRITE_VALUES>(len, pivot, k_out - eq_needed, eq_needed, out, out_val, s_wgt,
                                     s_weq, [&](int i) { return fp32_to_sortable(rif[i]); },
@@ -576,7 +575,7 @@ __global__ void phase_b_filter_waveseg(const float* __restrict__ input, int pitc
                                        unsigned int* __restrict__ cand_count, int seg_stride) {
   const int row = blockIdx.x;
   const int len = row_len_of<RAGGED>(row, pitch, extents);
-  const vfloat4* ri = reinterpret_cast<const vfloat4*>(input + (size_t)row * pitch + (RAGGED ? extents.row_start(row) : 0));
+  const float* ri = input + (size_t)row * pitch + (RAGGED ? extents.row_start(row) : 0);
   const float th = threshold_f[row];
 
   const int lane = threadIdx.x & (WAVE_SIZE - 1);
@@ -597,7 +596,7 @@ __global__ void phase_b_filter_waveseg(const float* __restrict__ input, int pitc
     const int i = it * stride + threadIdx.x;
     vfloat4 v = {0.f, 0.f, 0.f, 0.f};
     const bool live = (i < n4);
-    if (live) v = load_f4(ri + i);
+    if (live) v = load_row_f4<RAGGED>(ri, i, len);
     const int base_idx = i * FP32_EPT;
 
     const uint64_t b0 = __ballot(live && !(v[0] < th) && (!RAGGED || base_idx + 0 < len));
@@ -677,7 +676,7 @@ __global__ __launch_bounds__(512) void phase_b_filter_wavestage(
     unsigned int* __restrict__ cand_count, int seg_stride) {
   const int row = blockIdx.x;
   const int len = row_len_of<RAGGED>(row, pitch, extents);
-  const vfloat4* ri = reinterpret_cast<const vfloat4*>(input + (size_t)row * pitch + (RAGGED ? extents.row_start(row) : 0));
+  const float* ri = input + (size_t)row * pitch + (RAGGED ? extents.row_start(row) : 0);
   const float th = threshold_f[row];
 
   const int lane = threadIdx.x & (WAVE_SIZE - 1);
@@ -701,7 +700,7 @@ __global__ __launch_bounds__(512) void phase_b_filter_wavestage(
     const int i = it * stride + threadIdx.x;
     vfloat4 v = {0.f, 0.f, 0.f, 0.f};
     const bool live = (i < n4);
-    if (live) v = load_f4(ri + i);
+    if (live) v = load_row_f4<RAGGED>(ri, i, len);
 
     const int base_idx = i * FP32_EPT;
     const uint64_t b0 = __ballot(live && !(v[0] < th) && (!RAGGED || base_idx + 0 < len));

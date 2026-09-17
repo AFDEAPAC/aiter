@@ -45,40 +45,73 @@ Two design points that the results depend on:
 Three terms fail on AVO and are served by aiter. Everything else either matches
 aiter exactly or is out of contract for both.
 
-### FAIL: unaligned row base, `rowStarts[r] % 4 != 0`
+### FAIL: unaligned row base, `rowStarts[r] % 4 != 0` -- FIXED in v5 Stage 2
 
 `rowStarts = r * 1` and `r * 65` both crash AVO with a memory fault while aiter
 serves them and matches `torch.topk`. From our own harness, at M=256 N=131072
 prefix=131072 with the CPU oracle: stride 64 passes on uniform, gaussian and inf;
 strides 65, 1, 3 and 7 all give `HIP error 700`.
 
-**One cause, not two.** With bases aligned (strides 4, 8, 64) and `len`
-deliberately not a multiple of 4 (prefix 130000), every distribution passes, so
-the `n4_cover` over-read past the row end is *not* the fault. The fault is the
-`reinterpret_cast<const vfloat4*>(input + row * pitch + row_start)` in the load
-loops assuming 16-byte alignment.
+**The root cause is the over-read, not the misalignment.** An earlier version of
+this document said the opposite, on the strength of an isolation experiment that
+did not isolate anything: aligned strides with `len % 4 != 0` at prefix 130000
+passed, but in that configuration the slice also ended ~1000 floats short of the
+pitch, so the over-read stayed in bounds and the case could not have failed
+either way.
 
-Blast radius: the parameter is documented and accepted (g_10), and
+The experiment that does separate them holds the stride fixed and moves only the
+slice end:
+
+- misaligned bases (strides 65, 1, 3 giving `base % 4` in {1, 3}) with the slice
+  ending far from the pitch (prefix 100000): **all pass**, every distribution,
+  on both the sampled and the small_n path;
+- the same strides with the slice running to the pitch (prefix 131072):
+  **HIP 700**;
+- stride 64 with the slice running to the pitch: passes, because `len` is then a
+  multiple of 4 and there is no over-read at all.
+
+So gfx950 serves a 4-byte-aligned `global_load_dwordx4` natively, and declaring
+the `vfloat4` typedef `aligned(4)` changed nothing -- tried, still faulted. What
+faults is `n4_cover(len)` rounding the vector count UP: the last vector of a
+slice whose length is not a multiple of 4 reaches up to 3 floats past it, which
+lands in the next row for an interior row but past the **end of the allocation**
+for the last one. Nonzero rowStarts are what make `row_start + len` land within 3
+floats of the pitch, which is why only they expose it.
+
+Fixed by `load_row_f4<RAGGED>` (`csrc/topk_common.hip.hpp`), which loads the
+final partial vector element by element under `< len`. `RAGGED=false` keeps the
+plain load: 20 of 34 kernels have byte-identical instruction streams after the
+fix and every kernel that changed is a `RAGGED=true` instantiation, so the scored
+uniform grid is untouched (inner tier +0.04%, 0 cells regressed). The ragged path
+pays +0.63% to +0.83%, measured interleaved against the pre-fix binary.
+
+Blast radius before the fix: the parameter is documented and accepted (g_10), and
 `topk_avo_supports(numRows, stride0, k)` **cannot see `rowStarts`**, so the
-dispatcher has no way to route around it -- the fix has to be in the kernel.
-Production is not hit today only because aiter's `create_row_boundaries` returns
-`row_starts = zeros`. Note that this also means upstream aiter has never
-exercised its own arbitrary-start path, so "aiter tests this" is not available as
-an argument; our gate has to.
+dispatcher had no way to route around it -- the fix had to be in the kernel.
+Production was not hit only because aiter's `create_row_boundaries` returns
+`row_starts = zeros`. That also means upstream aiter has never exercised its own
+arbitrary-start path, so "aiter tests this" was never available as an argument;
+our gate now carries it (`grid.ROWSTARTS` strides 1, 3, 7, 65).
 
-`stride0 % 4 != 0` is the **same root cause** (an odd pitch misaligns every row
-after row 0) but a different symptom: `supports()` returns false, the dispatch
-routes to aiter, and the caller silently gets the slower path instead of a fault.
-One fix closes both.
+`stride0 % 4 != 0` is a **separate** question, now that alignment is known not to
+be the problem: `supports()` still declines it, the dispatch routes to aiter, and
+the caller silently gets the slower path. Enabling it needs the uniform path to
+use `n4_cover(pitch)` and predicate, which is Stage 2's remaining half.
 
-### FAIL (low severity): `stride1 != 1`
+### FAIL (low severity): `stride1 != 1` -- FIXED by routing, not by semantics
 
 aiter's prefill ignores the parameter entirely (`int64_t /*stride1*/`,
 `topk_per_row_kernels.cu:2850`); AVO asserts it and aborts. A caller passing
 `stride1 != 1` on contiguous data is passing a wrong value, so aiter "working"
-here only means it ignored the argument -- but an abort is still worse than a
-decline, and `topk_avo_supports` does not take `stride1`, so Python cannot route
-around it. Fix shape: either widen `supports()` or turn the abort into a decline.
+here only means it ignored the argument -- but turning a working call into an
+abort purely because AVO became available is a regression we introduced.
+
+Fixed by adding `stride1 == 1` to the dispatch condition in
+`aiter/ops/topk.py`, so such calls keep going to mb/ob exactly as before. The
+assert stays for direct callers of `top_k_per_row_prefill_avo`. Deliberately
+NOT fixed by ignoring `stride1` the way aiter does: silently computing against
+the wrong layout is worse than declining, and `topk_avo_supports` cannot express
+the condition because it only takes `(numRows, stride0, k)`.
 
 ### Matches aiter, diverges from `torch.topk`: NaN
 
@@ -133,9 +166,28 @@ M=64 pitch=512, M=4096 pitch=512).
 
 ## Bug list, ordered by blast radius
 
-1. **Unaligned row base faults.** Documented parameter, no way for the caller to
-   detect it in advance, hard GPU fault. Fix by porting aiter's `skip_cnt`
-   head / aligned-middle / tail structure (`topk_per_row_kernels.cu:171-272`),
-   which also makes `stride0 % 4 != 0` servable. Stage 2 of the v5 plan.
-2. **`stride1 != 1` aborts instead of declining.** Needs an API decision, not a
-   kernel change.
+1. **Unaligned row base faults.** FIXED in v5 Stage 2 by clamping the final
+   partial vector, not by porting aiter's `skip_cnt` head/tail -- the head half
+   of aiter's design turned out to be unnecessary here, because the hardware
+   tolerates the misaligned wide load and only the over-read was fatal. The gate
+   now carries the repro as a negative control: all four new `ROWSTARTS` entries
+   fault on the pre-fix binary and pass on the post-fix one.
+2. **`stride0 % 4 != 0` still declined.** Not a fault, just the slower aiter path.
+   Needs the uniform instantiation to use `n4_cover(pitch)` with predication.
+3. **`stride1 != 1` aborts instead of declining.** FIXED by adding
+   `stride1 == 1` to the dispatch condition in `aiter/ops/topk.py`.
+
+After both fixes the audit reports **no AVO-only failure**: 17 terms identical to
+aiter, 1 (`rowEnds > stride0`) out of contract for both, and the NaN pair matching
+aiter while both differ from `torch.topk`.
+
+## What generalises
+
+The alignment hypothesis was wrong, and it was wrong in the way that is easy to
+miss: a real fault, a plausible mechanism, and a confirming experiment that had
+no power to falsify it. The load *was* misaligned; that simply was not why it
+faulted. What caught it was re-deriving the isolation so that exactly one
+variable moved -- same stride, different slice end -- rather than trusting the
+first experiment that agreed with the theory. Also worth keeping: the fix that
+followed from the correct cause is a third of the size of the one that followed
+from the wrong cause.

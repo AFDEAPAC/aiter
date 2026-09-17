@@ -186,9 +186,20 @@ RAGGED = [
 # Nonzero rowStarts: each row's window starts at r*stride and keeps the same
 # triangular extent clamped to the pitch. Exercises absolute-index emit on every
 # path; prefix 0 keeps rows short enough for identity/exact on early rows.
+# The stride is the axis that matters, not the shape. Every entry here used to be
+# a multiple of 4, which is why the gate never saw that a row base off a 4-float
+# boundary made the final vec4 of the LAST row read past the allocation: HIP 700
+# on the sampled path, while aiter served the same call
+# (knowledge/aiter_contract_audit.md). The odd strides below are that repro, kept
+# so the fix cannot silently regress. They must FAIL on any build before the
+# load_row_f4 clamp and pass after.
 ROWSTARTS = [
     (64, 8192, 2048, 0, 64),
     (256, 131072, 2048, 131072, 64),
+    (64, 8192, 2048, 8192, 1),          # small_n, base % 4 in {1,2,3}
+    (256, 131072, 2048, 131072, 65),    # the exact repro that faulted
+    (256, 131072, 2048, 131072, 3),     # a different residue, same path
+    (1024, 196608, 2048, 196608, 7),    # non-pow2 N + coop + unaligned base
 ]
 
 
