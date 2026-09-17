@@ -1,25 +1,25 @@
 === anchor M=4096 N=131072 ===
 GPU: AMD Instinct MI355X CUs=256 path=prefill S=8192 margin=1.400 cap=4096 coop_g=1 fuse_ab=0
-TIMING wall_ms_median=0.6150 stddev_pct=0.000 repeats=1 iters=20 warmup=5
-RESULT pipeline=fused wall_ms=0.6150 fallback_rows=0 hipgraph=0
+TIMING wall_ms_median=0.6142 stddev_pct=0.000 repeats=1 iters=20 warmup=5
+RESULT pipeline=fused wall_ms=0.6142 fallback_rows=0 hipgraph=0
 kernel_us_median:
-  void phase_a_threshold<false, false>         62.2 us  (n=26)
-  void phase_b_filter_wavestage<false>        476.6 us  (n=26)
-  void phase_c_select_waveseg<true, false, false>     68.1 us  (n=26)
+  void phase_a_threshold<false, false>         61.6 us  (n=26)
+  void phase_b_filter_wavestage<false>        476.8 us  (n=26)
+  void phase_c_select_waveseg<true, false, false>     66.8 us  (n=26)
 === prefill_ref M=4096 N=1048576 ===
 GPU: AMD Instinct MI355X CUs=256 path=prefill S=16384 margin=2.129 cap=8192 coop_g=1 fuse_ab=0
-TIMING wall_ms_median=3.1704 stddev_pct=0.000 repeats=1 iters=20 warmup=5
-RESULT pipeline=fused wall_ms=3.1704 fallback_rows=0 hipgraph=0
+TIMING wall_ms_median=3.3635 stddev_pct=0.000 repeats=1 iters=20 warmup=5
+RESULT pipeline=fused wall_ms=3.3635 fallback_rows=0 hipgraph=0
 kernel_us_median:
-  void phase_a_threshold<false, false>        112.1 us  (n=26)
-  void phase_b_filter_wavestage<false>       2925.5 us  (n=26)
-  void phase_c_select_waveseg<false, false, false>    124.4 us  (n=26)
+  void phase_a_threshold<false, false>        197.4 us  (n=26)
+  void phase_b_filter_wavestage<false>       2960.6 us  (n=26)
+  void phase_c_select_waveseg<false, false, false>    223.2 us  (n=26)
 === decode M=128 N=65536 ===
 GPU: AMD Instinct MI355X CUs=256 path=decode S=4096 margin=1.400 cap=4096 coop_g=8 fuse_ab=0
-TIMING wall_ms_median=0.0330 stddev_pct=0.000 repeats=1 iters=20 warmup=5
-RESULT pipeline=fused wall_ms=0.0330 fallback_rows=0 hipgraph=0
+TIMING wall_ms_median=0.0347 stddev_pct=0.000 repeats=1 iters=20 warmup=5
+RESULT pipeline=fused wall_ms=0.0347 fallback_rows=0 hipgraph=0
 kernel_us_median:
-  void phase_a_threshold<false, false>          7.2 us  (n=26)
-  void phase_b_filter_coop<false>              11.2 us  (n=26)
-  void phase_c_select_contig<false, false>      9.4 us  (n=26)
+  void phase_a_threshold<false, false>          6.5 us  (n=26)
+  void phase_b_filter_coop<false>              11.5 us  (n=26)
+  void phase_c_select_contig<false, false>      9.1 us  (n=26)
 profiles under /home/mh/topk-prefill-avo/log/large_n_profile

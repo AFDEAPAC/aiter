@@ -708,6 +708,48 @@ those declarations would return ~1 KB of LDS per block, which changes
 occupancy and so needs `PHASE_A_STATIC_LDS` / `PHASE_C_STATIC_LDS` re-read off
 `.group_segment_fixed_size`. Deliberately left as a separate change.
 
+### Clearing the histogram on read removes a second barrier, but it is a regime trade
+**Accepted, g_14.** With the reduction already folded in (g_13), the remaining
+per-pass clear loop only exists to zero buckets the scan has just finished
+reading, so `block_find_pivot_bucket_rep<CLEAR=true>` zeroes each bucket as it
+reads it and both the loop and its barrier disappear: 4 block barriers per radix
+pass, down from 5 before g_13. No LDS cost, which is what makes it preferable to
+double-buffering the histogram (+4 KB, enough to cut phase_a from 4 to 3
+blocks/CU at S=8192 -- the max-sized-static-LDS trap this repo has already hit
+twice).
+
+Exact rather than opportunistic, which is the part to preserve if this is ever
+refactored: `HIST_SLOTS == 256 * HIST_REP` and thread `t` owns exactly
+`[t*HIST_REP, (t+1)*HIST_REP)`, so the 256 threads that read the histogram cover
+every slot once, and blocks here are always >= 256 threads because the scan
+indexes buckets by `threadIdx.x`. Drop either property and slots silently stop
+being cleared, which would corrupt the NEXT pass rather than this one.
+
+It is a trade, not a free win: anchor -0.35%, M=1 N=1M -0.8%, decode -0.8%,
+prefill -0.8%, against **M=4096 N=8192 +1.8%** (small_n regime geomean +0.40%,
+inside the 0.5% band, so the scoring rule accepts it). Taken because large N is
+the target and N <= 32768 is routed to aiter's own prefill by the
+`stride0 >= 32768` dispatch. [unverified hypothesis] for the small_n point: the
+clear now runs on the 256 threads that also carry the wave-scan, where the old
+loop spread it over all `blockDim.x` threads (512 at that shape), so the work
+moved onto the critical path rather than disappearing.
+
+### A transient contention artifact reported +24% across every regime at once
+During g_14's baseline save, `score_grid --tier inner` reported geomean 78.30 us
+with decode 39.79 / prefill 254.65 / small_n 37.57 -- about +24% on all three at
+once, against 62.69 us measured minutes earlier on the same binary. Three quiet
+re-runs gave 62.62 / 62.68 / 62.66, and `rocm-smi` showed no other KFD process
+and 39-42 C junction temperatures afterwards, so it was another tenant's job
+overlapping the run, not the change.
+
+The tell is that a real kernel change does not move decode, prefill AND small_n
+by the same large factor -- those paths share almost no code. Treat a uniform
+multi-regime shift as a machine event and re-measure before recording it. The
+damage here was that the bad number had already been written to
+`knowledge/grid_baseline_inner.json` by the same command that measured it;
+`--save-baseline` commits whatever it happens to see, so on a shared box do a
+quiet re-run BEFORE saving, not after.
+
 ### Compacting the radix select's active set between passes buys nothing
 **Falsified, kept as `--phase-a-compact 1` so the measurement reproduces.**
 The filter-rescan select reads all `c` keys every pass and discards the ~255/256
