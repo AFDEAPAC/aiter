@@ -766,7 +766,36 @@ g_16, and M<=8 shapes now take coop_g 8-64 from the extended table. It needs its
 own sweep on a post-g_16 binary before it can be judged, so nothing here is
 evidence either way.
 
-### A baseline cell can drift 8-13% with no code change; prove it before believing a REJECT
+### CORRECTED: those nine v4 cells were not drift, the per-point KEY was wrong
+The entry below diagnosed nine outer-tier cells as baseline decay. **That
+diagnosis is wrong.** The interleaved A/B in it was sound and did establish that
+the change was not responsible; the error was the next step, concluding
+"therefore the baseline decayed" without testing the other candidate, "therefore
+the comparison is wrong".
+
+`compare()` keyed its per-point map on `(m, n)`, but `all_shapes()` emits the
+same `(m, n)` at k = 512, 1024 and 2048. In the v4 outer baseline **134 of 134
+distinct `(m, n)` pairs collide**, so the map kept whichever k happened to come
+last and every k's measurement was scored against it.
+
+The test that settles it needs no GPU and no second binary: compare a baseline
+against **itself**. Under the old key the v4 baseline flags **43 of its own 402
+points** as regressing beyond 5%, including all nine cells called drift here --
+`M=1024 N=16384 K=2048` 46.50 us scored against 40.90 us from a different k,
+`M=4096 N=16384 K=2048` 163.00 against 139.60, `M=4096 N=65536 K=512` 348.30
+against 316.60. A gate that fires when compared with itself is not measuring the
+candidate.
+
+Fixed in v5 Stage 3: the key is `(m, n, topk)` and `score_grid.py --self-test`
+asserts both tiers compare clean against themselves. Under the corrected key the
+same v5 outer run that reported the entire N=65536 column at +5.4% to +12.7%
+reports **0 cells regressed and 23 improved**.
+
+**Generalises to:** before believing either "my change regressed it" or "the
+baseline drifted", check that the comparison itself is sound. Self-comparison is
+free, instant, and would have saved both of these investigations.
+
+### SUPERSEDED (see above): "a baseline cell can drift 8-13% with no code change"
 Nine outer-tier cells (M in {1024, 2048, 4096} x N in {16384, 32768, 65536})
 scored +5.9% to +13.0% against the g_15 outer baseline and tripped
 `POINT_REGRESS_PCT`. None of it was the change. Interleaved, same-session A/B of
@@ -785,12 +814,42 @@ where `coop` is false and `phase_b_filter_coop` is never launched -- so the only
 two shipped kernel diffs cannot reach them even in principle. The baseline is the
 thing that moved.
 
-Method worth reusing: when a per-point REJECT lands on cells whose code path you
+Method worth reusing, and it is still worth reusing -- it is only the conclusion
+above that was wrong: when a per-point REJECT lands on cells whose code path you
 can show is untouched, do NOT tune against it. Build the OLD commit into a
-separate directory, interleave the two binaries in one session, and check the GPU
-is idle (`rocm-smi --showpids`, junction temp) before re-saving. A baseline is a
-measurement, so it decays like one; this repo has already recorded one contention
-event writing a bogus 78.30 us into a baseline.
+separate directory and interleave the two binaries in one session. Then, before
+blaming the machine, run the baseline against itself. A baseline is a
+measurement and can decay -- this repo has recorded one contention event writing
+a bogus 78.30 us into a baseline -- but a broken comparison looks exactly the
+same and is far cheaper to rule out.
+
+### SHIPPED (v5 Stage 3): search for the nearest exact sampling stride
+`derive_shape_params`'s exact-stride repair offered exactly ONE candidate: `N/64`
+chunks, which `align_sample_s` then clamps to `SAMPLE_S_MAX`. So at
+`N = 2^k + 64` -- aiter's own `num_prefix + num_rows` pattern -- the only exact
+choice on offer was the largest one, and S went 4096 -> 16384: four times the
+phase_a sampling for 0.2% more data. Measured on the shipped tree: M=4096
+N=32768 243.0 us against N=32832 **313.6 us (+29%)**, M=1024 +32.5%, M=256
++18.3%, while N=33024 keeps S=4096 and costs 253.3 us. 1.33% of all N in
+[32768, 1048576] were inflated >= 2x, in two bands (1536 values in the 32768
+octave, 1848 in the 65536 one).
+
+Searching upward for the smallest exact-stride S instead finds one very close by:
+N=32832 takes **4608** (72 chunks of 456), N=49216 takes 4800, N=65600 takes
+4352, N=92332 takes 5952. Measured **-10.8% to -22.2%** across M=64..4096 on
+those shapes. Every pow2 N and the other aiter widths are untouched, because an
+exact stride means the repair block never runs at all. N=131328 moves 8256 ->
+8576, trading a masked stride for an exact one at no cost (+0.0% / +0.5%).
+
+**Capping the repair's growth instead is the wrong fix, and measurably so.** A
+growth cap keeps the law's S with a MASKED stride, and the mask is not free: at
+M=4096 N=65600 it produced `under_K=760` on `--dist inf` where the uncapped S
+gives 0, while the neighbouring pow2 N=65536 at the SAME S=4096 also gives 0. So
+the fallback pressure came from the masked stride, not from the sample count.
+The search keeps exactness and pays only the growth exactness actually costs:
+across the whole 547-point grid, `verify_grid --dist all` warnings went 673 ->
+668 and `under_K > 0` lines 113 -> 114. The single residue is M=4096 N=92332 on
+`inf`, 19 rows of 4096, which the exact fallback covers.
 
 ### v4 Stage 4: block-size tables for phase_a/phase_c
 The +12.1% hole at M=2048 N=4096 is on **phase_small_n_topk** and is already

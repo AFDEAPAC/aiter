@@ -1387,6 +1387,7 @@ static void usage(const char* prog) {
           "  --input-bin PATH --dump-indices PATH --inject-fault 0|1|2 (1=index, 2=value)\n"
           "  --path auto|small_n|prefill|decode --coop-g G --fuse-ab 0|1 --hipgraph 0|1\n"
           "  --small-n-block B (256..1024, 0=auto)  --s-rule 0|1 (0=legacy R_TARGET)\n"
+          "  --s-repair-search 0|1 (search for the smallest exact-stride S)\n"
           "  --verify-sample-rows N --verify-oracle gpu|cpu\n"
           "  --ragged 0|1 --ragged-prefix P (row r extent = P+r+1, clamped to N)\n"
           "  --row-starts-stride S (row r start = min(r*S, N-1); 0 = all zero)\n"
@@ -1449,6 +1450,7 @@ int main(int argc, char** argv) {
     else if (a == "--hipgraph") g_use_hipgraph = std::stoi(need());
     else if (a == "--small-n-block") g_small_n_block = std::stoi(need());
     else if (a == "--s-rule") g_s_rule = std::stoi(need());
+    else if (a == "--s-repair-search") g_s_repair_search = std::stoi(need());
     else if (a == "--small-n-passes") g_small_n_passes = std::stoi(need());
     else if (a == "--verify-sample-rows") g_verify_sample_rows = std::stoi(need());
     else if (a == "--verify-oracle") g_verify_oracle_gpu = (need() == "gpu") ? 1 : 0;

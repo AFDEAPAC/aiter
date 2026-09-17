@@ -76,20 +76,28 @@ def _per_point_regressions(cur, base):
     fails = []
     improved = []
     regressed = []
-    bmap = {(r["m"], r["n"]): r for r in base}
+    # Keyed on (m, n, topk), NOT (m, n). all_shapes() emits the same (m, n) at
+    # k = 512, 1024 and 2048, so 134 of the outer tier's 279 distinct (m, n)
+    # pairs collide; a two-part key kept whichever k came last and compared every
+    # k's measurement against it. That produced a reproducible phantom -- the
+    # whole N=65536 column reporting +5.4% to +12.7% while an interleaved A/B of
+    # the old and new binaries at the baseline's own argv agreed to within
+    # 0.2 us -- and it can hide a real regression just as easily.
+    bmap = {(r["m"], r["n"], r.get("topk", grid.TOPK)): r for r in base}
     improve_band = grid.PATH_NOISE_BAND_PCT
     for r in cur:
-        b = bmap.get((r["m"], r["n"]))
+        key = (r["m"], r["n"], r.get("topk", grid.TOPK))
+        b = bmap.get(key)
         if not b:
             continue
         d = (r["us"] - b["us"]) / b["us"] * 100
         if d > grid.POINT_REGRESS_PCT:
-            msg = ("M=%d N=%d %.2f -> %.2f us (+%.1f%%) exceeds the %.0f%% per-point limit"
-                   % (r["m"], r["n"], b["us"], r["us"], d, grid.POINT_REGRESS_PCT))
+            msg = ("M=%d N=%d K=%d %.2f -> %.2f us (+%.1f%%) exceeds the %.0f%% per-point limit"
+                   % (r["m"], r["n"], key[2], b["us"], r["us"], d, grid.POINT_REGRESS_PCT))
             fails.append(msg)
-            regressed.append((r["m"], r["n"], d))
+            regressed.append(key + (d,))
         elif d < -improve_band:
-            improved.append((r["m"], r["n"], d))
+            improved.append(key + (d,))
     return fails, improved, regressed
 
 
@@ -156,7 +164,28 @@ def main():
     ap.add_argument("--allow-noisy", action="store_true",
                     help="record points over the stddev limit instead of failing")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--self-test", action="store_true",
+                    help="assert the baseline compares clean against itself, then exit")
     args = ap.parse_args()
+
+    if args.self_test:
+        # A gate that fires when a baseline is compared against ITSELF is broken,
+        # and this one was: the per-point key dropped `topk`, so the 134 colliding
+        # (m, n) pairs in the outer tier were scored across different k. Keeping
+        # the check here because it needs no GPU and no measurement.
+        bad = 0
+        for tier, path in (("inner", BASELINE_INNER), ("outer", BASELINE_OUTER)):
+            if not path.exists():
+                print("  %-6s no baseline at %s" % (tier, path))
+                continue
+            recs = json.loads(path.read_text())["points"]
+            fails, improved, regressed = _per_point_regressions(recs, recs)
+            ok = not fails and not improved and not regressed
+            print("  %-6s %d points: %d fails, %d improved, %d regressed -> %s"
+                  % (tier, len(recs), len(fails), len(improved), len(regressed),
+                     "clean" if ok else "BROKEN"))
+            bad += 0 if ok else 1
+        return 0 if bad == 0 else 1
 
     if not grid.BENCH.exists():
         print("ERROR: missing %s; run make first" % grid.BENCH, file=sys.stderr)
