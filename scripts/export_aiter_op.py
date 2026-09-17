@@ -30,6 +30,7 @@ HDR_DIR = "csrc/include/topk_avo"
 CU_PATH = "csrc/kernels/topk_per_row_avo_kernels.cu"
 
 BANNER = """// SPDX-License-Identifier: MIT
+// Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 // GENERATED FILE -- DO NOT EDIT.
 //
 // Source of truth: the topk-prefill-avo repo. Regenerate with
