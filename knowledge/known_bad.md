@@ -482,6 +482,37 @@ because the sampler only ever has to serve `min(K, row_len) <= min(K, N)`.
 Passing the raw K instead asked `derive_shape_params` for a candidate capacity
 that cannot exist, which is what produced the refusal.
 
+### the "M=256 is only 1.02x" figure was a measurement artifact
+Chasing it cost several dead ends, all of them from comparing across harnesses.
+The 1.02x came from the op test's `us` column, which is `@perftest()`; the
+standalone benchmark reported 69.1 us for what @perftest called 81.5 us, and
+while the harness, the timer AND the data generator all differed, no comparison
+between them meant anything. Two specific wrong turns: `--dist gaussian` was
+used as a stand-in for `torch.randn` and is not one (M=4096 measured 797 us
+against aiter's 578, i.e. the hash-based Box-Muller in `fill_random_fp32`
+produces a different candidate distribution); and two attempts to profile the
+aiter path with rocprofv3 failed, once on a stale trace and once because
+importing `op_tests/test_topk_per_row.py` RUNS ITS WHOLE SWEEP at import time
+(it has top-level `parse_args()`), which also makes `sys.argv` tricks useless --
+inline the helpers instead.
+
+Fixed by `bench/aiter_ab.py`: same harness, same data, one timer, times only the
+op. With that, M=256 is **1.19x**, not 1.02x.
+
+The residual dip is real but second-order, and it is NOT a path switch.
+Measured ratio vs aiter across rows at width ~131k: 1.58x (64), 1.52x (128),
+1.31x (192), **1.19x (256)**, 1.25x (320), 1.41x (512), 1.48x (1024), 1.65x
+(2048), 1.46x (4096) -- a shallow V centred on 256. `should_use_mulblocks`
+(topk_per_row_kernels.cu:2648) shows why it cannot be a dispatch effect: on a
+256-CU part it takes the multi-block path only for `batch_size <= 64` with
+`seq_len >= 131072`, and `batch_size > 128` returns false outright, so every
+point from M=128 up is one-block-per-row on BOTH sides. Both are amortizing
+fixed per-row cost and aiter's curve happens to fall faster over 192->256
+(+8.9% time for +33% rows, against avo's +19.2%). avo's own per-row cost is
+monotone with no knee at the CU count: 0.525, 0.298, 0.266, 0.268, 0.244,
+0.206, 0.183, 0.170, 0.158, 0.140 us/row at M=64..2048, so there is no
+1-block-per-CU cliff to find.
+
 ### one unused kernarg cost 1% of the small_n geomean
 Adding `values` as `template <bool WRITE_VALUES>` compiles the stores out of the
 no-values instantiation, and the resource remark confirmed it: `<false,false>`
