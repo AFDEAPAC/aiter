@@ -640,13 +640,40 @@ Fix: add three explicit shapes to `bench/grid.py` `VALUES` -- (256, 524288),
 verify_grid; 2130/2130 green. Same lesson as the unused-kernarg trap: a template
 makes the body free, not the obligation to test every instantiation that ships.
 
-### Phase C ships 3 radix passes, not 4, on fp32 candidates
-The 4th 8-bit pass is bit-identical to stopping at 3 for fp32 sortable keys
-(known_bad "Phase A with 2 radix passes" note). Default `g_phase_c_passes` is
-now 3: anchor M=4096 N=131072 615 -> 609 us (-1%), rocprof phase_c 69.7 ->
-64.2 us, full-op 3.69 -> 3.74 TB/s. Inner geomean -1.66% vs g_10. Block-size
-sweep (256..1024 for phase_a/c), fuse-ab on prefill, and phase-a 2-pass did not
-beat the occupancy default; S=8192 remains optimal vs 4096/16384 on anchor.
+### Phase C with 3 radix passes is WRONG, and a partial-dist gate certified it
+Shipped in g_11 and reverted in g_12. `g_phase_c_passes = 3` measured anchor
+M=4096 N=131072 615 -> 609 us (-1%), rocprof phase_c 69.7 -> 64.2 us, inner
+geomean -1.66%. All of that gain was invalid: at M=4096 N=131072 the 3-pass
+Phase C gives `rows_fail=1` on `--dist gaussian` and `--dist inf`, against
+`rows_fail=0` on all five dists at 4 passes (isolated A/B, both oracles).
+
+Two independent mistakes, both worth remembering:
+
+1. **A documented invariant was overwritten instead of read.** The line directly
+   above the edit says "Phase C must use all 4 passes to be exact. Fewer is a
+   TIMING ABLATION ONLY" (`benchmark_topk.hip.cpp:57`), and
+   `block_select_lds`'s own header says Phase A may use fewer passes *because*
+   its pivot is only a filter threshold, while "Phase C and the fallback MUST
+   use all 4 (their result is the answer)". The "3 passes are bit-identical to
+   4" note is about **Phase A's candidate counts**, not about a pivot that is
+   returned as the answer. Carrying a note across kernels whose pivots mean
+   different things is how a correct fact produces a wrong change.
+2. **The gate that passed did not cover the axis the change moved.** Only
+   `verify_grid.py --dist adversarial --inner` (24 points) was re-run; it was
+   green while gaussian/inf were broken. `--dist all` (2140 points) fails on
+   the 3-pass build and passes at 2140/2140 after the revert. A pass count is a
+   distribution-sensitive knob, so the dist axis was exactly the one that had to
+   be swept, and the skipped check was flagged "unverified" yet still shipped.
+
+Negative control that caught it: the SAME `rows_fail=1` appeared on the shipped
+default, which briefly looked like a pre-existing failure. Re-running the
+baseline binary with `--phase-c-passes 4` separated them -- without that A/B the
+regression would have been mis-attributed to the distribution instead of the
+change. Always price a suspected pre-existing failure against the specific knob.
+
+Still true after the revert: the block-size sweep (256..1024 for phase_a/c),
+`--fuse-ab 1` on prefill, and phase-a 2-pass do not beat the occupancy default,
+and S=8192 remains optimal vs 4096/16384 on the anchor.
 
 ### decode large-N full-op BW is launch-bound, not filter-bound
 rocprof at M=128 N=65536: phase_a+b+c sum ~27.6 us vs 32.5 us wall; 3x launch
