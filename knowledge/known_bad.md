@@ -482,6 +482,29 @@ because the sampler only ever has to serve `min(K, row_len) <= min(K, N)`.
 Passing the raw K instead asked `derive_shape_params` for a candidate capacity
 that cannot exist, which is what produced the refusal.
 
+### one unused kernarg cost 1% of the small_n geomean
+Adding `values` as `template <bool WRITE_VALUES>` compiles the stores out of the
+no-values instantiation, and the resource remark confirmed it: `<false,false>`
+of `phase_small_n_topk` kept VGPRs 43, occupancy 8, zero spills. It was still
+**+1.0% slower** (small_n geomean 28.51/28.54 -> 28.83/28.86 us, two runs each).
+
+Attributed by experiment, not by reading: adding a SINGLE unused
+`float* dummy_val` kernarg to `phase_small_n_topk` on the pre-values tree, with
+no other change, reproduced the whole regression (28.82/28.85). So the cost is
+the kernarg itself -- small_n runs one short block per row, so its prologue is a
+real share of the kernel -- not code size, not registers, not the stores.
+
+Fix: bundle the outputs in `TopkOut<WRITE_VALUES>` (`topk_common.hip.hpp`), a
+struct holding one pointer when false and two when true. `TopkOut<false>` is
+8 bytes, exactly the `int* out_idx` it replaces, so every later argument keeps
+its old offset. SGPRs went back to 74 for `<false,false>` (76 for `<false,true>`)
+and small_n to 28.54/28.64/28.58, inside the band on 3 runs.
+
+**The general lesson: a template parameter makes the BODY free, not the
+SIGNATURE.** On a kernel whose cost is dominated by per-block fixed work, check
+the kernarg layout too, and keep the disabled instantiation byte-identical
+rather than merely branch-free.
+
 ### the ragged prefix decides WHICH path runs, so prefix 0 tests half the kernel
 `row_ends[r] = r + 1` bounds every extent by M, so at the S the prefill path
 derives (8192) every row is under `max(S, K)` and takes the identity/exact

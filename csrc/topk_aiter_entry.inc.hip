@@ -138,9 +138,14 @@ void top_k_per_row_prefill_avo(const aiter_tensor_t& logits,
                 "top_k_per_row_prefill_avo: indices must be int32");
     AITER_CHECK(indices.numel() >= static_cast<size_t>(numRows) * static_cast<size_t>(k),
                 "top_k_per_row_prefill_avo: indices must hold numRows*k entries");
-    AITER_CHECK(!values.has_value(),
-                "top_k_per_row_prefill_avo: these kernels emit indices only; pass "
-                "values=None (the selected scores are a gather away on the caller side)");
+    if(values.has_value())
+    {
+        AITER_CHECK(values.value().dtype() == AITER_DTYPE_fp32,
+                    "top_k_per_row_prefill_avo: values must be fp32");
+        AITER_CHECK(values.value().numel() >=
+                        static_cast<size_t>(numRows) * static_cast<size_t>(k),
+                    "top_k_per_row_prefill_avo: values must hold numRows*k entries");
+    }
     AITER_CHECK(rowStarts.numel() >= static_cast<size_t>(numRows) &&
                     rowEnds.numel() >= static_cast<size_t>(numRows),
                 "top_k_per_row_prefill_avo: rowStarts/rowEnds must have numRows entries");
@@ -165,10 +170,14 @@ void top_k_per_row_prefill_avo(const aiter_tensor_t& logits,
     const float* in      = static_cast<const float*>(logits.data_ptr());
     const int* row_ends  = static_cast<const int*>(rowEnds.data_ptr());
     int* idx             = static_cast<int*>(indices.data_ptr());
+    float* val = values.has_value() ? static_cast<float*>(values.value().data_ptr()) : nullptr;
 
     if(sp.path == PATH_SMALL_N)
     {
-        topk_small_n<true>(in, M, N, row_ends, K, idx, stream);
+        if(val)
+            topk_small_n<true, true>(in, M, N, row_ends, K, idx, val, stream);
+        else
+            topk_small_n<true, false>(in, M, N, row_ends, K, idx, nullptr, stream);
         return;
     }
 
@@ -178,5 +187,8 @@ void top_k_per_row_prefill_avo(const aiter_tensor_t& logits,
                 workspace.value().numel() * workspace.value().element_size(),
                 L.total);
     Bufs b = avo::bind_bufs(workspace.value().data_ptr(), L, sp.cap);
-    topk_fused_impl<true>(in, M, N, row_ends, K, idx, b, sp, stream);
+    if(val)
+        topk_fused_impl<true, true>(in, M, N, row_ends, K, idx, val, b, sp, stream);
+    else
+        topk_fused_impl<true, false>(in, M, N, row_ends, K, idx, nullptr, b, sp, stream);
 }

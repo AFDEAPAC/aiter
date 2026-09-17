@@ -148,6 +148,35 @@ def ragged_shapes():
     return list(RAGGED)
 
 
+# ---------------------------------------------------------------------------
+# Values coverage, as (m, pitch, topk, ragged_prefix or None). WRITE_VALUES is a
+# template parameter on the four OUTPUT-emitting kernels, so what has to be
+# covered is those emit sites, not the shape grid again -- phase_a and phase_b
+# never touch the output and are not instantiated on it.
+#
+#   phase_small_n_topk          -> the small_n rows
+#   phase_c_select_waveseg      -> the prefill rows (STATIC_CAP both ways)
+#   phase_c_select_contig       -> the coop rows (small M, very large N)
+#   exact_row_select            -> reached via the adversarial distribution,
+#                                  which overflows the candidate area
+#   emit_identity_row / pad     -> the ragged prefix-0 rows
+# ---------------------------------------------------------------------------
+VALUES = [
+    (256, 4096, 2048, None),        # small_n, uniform
+    (256, 131072, 2048, None),      # prefill waveseg, cap <= PHASE_C_CAP
+    (8, 524288, 2048, None),        # coop -> phase_c_select_contig
+    (1024, 1024, 2048, 0),          # ragged, k > pitch, all identity
+    (256, 2048, 2048, 0),           # ragged identity + pad tail
+    (4096, 512, 2048, 0),           # ragged, M > pitch clamp
+    (256, 131328, 2048, 131072),    # ragged sampler, non-pow2 width
+    (1024, 132096, 1024, 131072),   # ragged sampler, multi-K
+]
+
+
+def values_shapes():
+    return list(VALUES)
+
+
 ANCHOR = (4096, 131072, TOPK)
 ANCHOR_LIMIT_US = 620.0     # v1 best measured here is 615.5-616.1 us
 POINT_REGRESS_PCT = 5.0     # no single point may be slower than this

@@ -25,9 +25,11 @@ import grid  # noqa: E402
 ROOT = grid.ROOT
 
 
-def verify_one(m, n, k, dist, extra=(), ragged_prefix=None):
+def verify_one(m, n, k, dist, extra=(), ragged_prefix=None, values=False):
     cmd = [str(grid.BENCH), "--mode", "verify", "--m", str(m), "--n", str(n), "--topk", str(k),
            "--dist", dist, "--dump-stats", "1"]
+    if values:
+        cmd += ["--values", "1"]
     if ragged_prefix is not None:
         # CPU oracle, not the GPU one: phase_d_fallback shares exact_row_select
         # with the kernel under test, so on a ragged row both would use the same
@@ -40,7 +42,7 @@ def verify_one(m, n, k, dist, extra=(), ragged_prefix=None):
                        universal_newlines=True)
     out = p.stdout
     res = {"m": m, "n": n, "topk": k, "dist": dist, "ok": False, "why": "",
-           "ragged_prefix": ragged_prefix}
+           "ragged_prefix": ragged_prefix, "values": values}
     if p.returncode != 0 or "VERDICT PASS" not in out:
         res["why"] = (p.stderr.strip() or out.strip() or "no verdict")[:160]
         return res
@@ -48,6 +50,14 @@ def verify_one(m, n, k, dist, extra=(), ragged_prefix=None):
     if rf and int(rf.group(1)) != 0:
         res["why"] = "rows_fail=%s" % rf.group(1)
         return res
+    if values:
+        vv = re.search(r"VERIFY_VALUES ok=(\d)(.*)", out)
+        if not vv:
+            res["why"] = "values requested but no VERIFY_VALUES line"
+            return res
+        if vv.group(1) != "1":
+            res["why"] = "values: %s" % vv.group(2).strip()
+            return res
     mp = re.search(r"path=(\w+)", out)
     res["path"] = mp.group(1) if mp else "?"
     # small_n has no candidate stage, so its CANDSTATS line is n/a by design.
@@ -80,6 +90,8 @@ def main():
                     help="treat under_K/over_Calloc > 0 as a failure, not a warning")
     ap.add_argument("--no-ragged", action="store_true",
                     help="skip the ragged points (grid.RAGGED)")
+    ap.add_argument("--no-values", action="store_true",
+                    help="skip the values points (grid.VALUES)")
     args = ap.parse_args()
 
     if not grid.BENCH.exists():
@@ -91,9 +103,10 @@ def main():
         else (args.dist,)
 
     ragged = [] if (args.inner or args.no_ragged) else grid.ragged_shapes()
-    n_runs = (len(shapes) + len(ragged)) * len(dists)
-    print("=== correctness gate: %d uniform + %d ragged shapes x %d distribution(s) ==="
-          % (len(shapes), len(ragged), len(dists)))
+    values = [] if (args.inner or args.no_values) else grid.values_shapes()
+    n_runs = (len(shapes) + len(ragged) + len(values)) * len(dists)
+    print("=== correctness gate: %d uniform + %d ragged + %d values shapes x %d distribution(s) ==="
+          % (len(shapes), len(ragged), len(values), len(dists)))
     bad, warned = [], []
     for dist in dists:
         for (m, n, k) in shapes:
@@ -110,6 +123,12 @@ def main():
             if not r["ok"]:
                 bad.append(r)
                 print("  FAIL  ragged M=%-5d N=%-8d K=%-5d prefix=%-7d %-12s %s"
+                      % (m, n, k, prefix, dist, r["why"]))
+        for (m, n, k, prefix) in values:
+            r = verify_one(m, n, k, dist, ragged_prefix=prefix, values=True)
+            if not r["ok"]:
+                bad.append(r)
+                print("  FAIL  values M=%-5d N=%-8d K=%-5d prefix=%-7s %-12s %s"
                       % (m, n, k, prefix, dist, r["why"]))
 
     print("\n  passed   %d" % (n_runs - len(bad)))

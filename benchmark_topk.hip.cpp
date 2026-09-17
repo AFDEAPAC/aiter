@@ -73,6 +73,7 @@ static int g_ragged = 0;
 // (M=512 N=131072 reported fallback_rows for all 512 rows). aiter's real
 // prefill config uses prefix 131072, where every extent is long and ragged.
 static int g_ragged_prefix = 0;
+static int g_values = 0;            // also emit the selected scores
 
 // ---------------------------------------------------------------------------
 // Block-wide exact radix select over keys already resident in LDS.
@@ -204,21 +205,23 @@ __device__ __forceinline__ void block_select_stream(const vfloat4* __restrict__ 
 // Exact full-row select for ONE row, streaming it from global memory. Shared by
 // the fallback branch inside Phase C and by the standalone Phase D oracle, so
 // the two can never drift apart. All threads of the block must call.
-template <bool RAGGED>
+template <bool RAGGED, bool WRITE_VALUES>
 __device__ __forceinline__ void exact_row_select(const float* __restrict__ input, int pitch,
                                                  int len, int K, int row, int* __restrict__ out,
+                                                 float* __restrict__ out_val,
                                                  uint32_t* __restrict__ s_hist,
                                                  uint32_t* __restrict__ s_red,
                                                  uint32_t* __restrict__ s_scan,
                                                  unsigned* __restrict__ s_wgt,
                                                  unsigned* __restrict__ s_weq) {
+  const float* rif0 = input + (size_t)row * pitch;
   if (RAGGED && len <= K) {
-    emit_identity_row(out, len, K);
+    emit_identity_row<WRITE_VALUES>(out, out_val, rif0, len, K);
     return;
   }
   const int k_out = RAGGED ? k_take_dev(K, len) : K;
   const int n4 = RAGGED ? n4_cover(len) : (pitch / FP32_EPT);
-  const vfloat4* ri4 = reinterpret_cast<const vfloat4*>(input + (size_t)row * pitch);
+  const vfloat4* ri4 = reinterpret_cast<const vfloat4*>(rif0);
   uint32_t pivot;
   int eq_needed;
   block_select_stream<RAGGED>(ri4, n4, len, k_out, s_hist, s_red, s_scan, pivot, eq_needed);
@@ -228,11 +231,12 @@ __device__ __forceinline__ void exact_row_select(const float* __restrict__ input
   }
   __syncthreads();
   const float* rif = reinterpret_cast<const float*>(ri4);
-  block_gather_topk(len, pivot, k_out - eq_needed, eq_needed, out, s_wgt, s_weq,
-                    [&](int i) { return fp32_to_sortable(rif[i]); }, [](int i) { return i; });
+  block_gather_topk<WRITE_VALUES>(len, pivot, k_out - eq_needed, eq_needed, out, out_val, s_wgt,
+                                  s_weq, [&](int i) { return fp32_to_sortable(rif[i]); },
+                                  [](int i) { return i; });
   if (RAGGED && k_out < K) {
     __syncthreads();
-    pad_topk_tail(out, k_out, K);
+    pad_topk_tail<WRITE_VALUES>(out, out_val, k_out, K);
   }
 }
 
@@ -539,13 +543,13 @@ __global__ __launch_bounds__(512) void phase_b_filter_wavestage(
 // unconditionally and halves occupancy (measured 0.6215 -> 0.6702 ms); making
 // the main config pay the runtime split instead costs the +0.6% that the
 // runtime base offset adds (measured 0.6254 vs 0.6215 ms).
-template <bool STATIC_CAP, bool RAGGED>
+template <bool STATIC_CAP, bool RAGGED, bool WRITE_VALUES>
 __global__ void phase_c_select_waveseg(const float* __restrict__ input, int pitch,
                                        const int* __restrict__ row_ends,
                                        const uint64_t* __restrict__ cand_pack,
                                        const int* __restrict__ cand_seg,
                                        const unsigned int* __restrict__ cand_count, int seg_stride,
-                                       int nwaves_b, int K, int cap, int* __restrict__ out_idx,
+                                       int nwaves_b, int K, int cap, TopkOut<WRITE_VALUES> dst,
                                        int* __restrict__ fb_rows, int* __restrict__ fb_count,
                                        int npasses) {
   const int row = blockIdx.x;
@@ -566,7 +570,8 @@ __global__ void phase_c_select_waveseg(const float* __restrict__ input, int pitc
   __shared__ int s_off[MAX_WAVES_PER_BLOCK];
   __shared__ unsigned s_wgt, s_weq;
 
-  int* out_row = out_idx + (size_t)row * K;
+  int* out_row = dst.idx_row(row, K);
+  float* val_row = dst.val_row(row, K);
   // `len <= K` is routed unconditionally rather than via cand_count, so the
   // identity emit does not depend on how many candidates Phase B happened to
   // keep: under the `inf` distribution a row of +inf values passes the +inf
@@ -574,8 +579,8 @@ __global__ void phase_c_select_waveseg(const float* __restrict__ input, int pitc
   // an identity row down the candidate path and order it differently to aiter.
   if ((RAGGED && len <= K) || c_raw < (unsigned)k_out || c_raw > (unsigned)cap) {
     if (threadIdx.x == 0) fb_rows[atomicAdd(fb_count, 1)] = row;
-    exact_row_select<RAGGED>(input, pitch, len, K, row, out_row, s_hist, s_red, s_scan, &s_wgt,
-                             &s_weq);
+    exact_row_select<RAGGED, WRITE_VALUES>(input, pitch, len, K, row, out_row, val_row, s_hist,
+                                           s_red, s_scan, &s_wgt, &s_weq);
     return;
   }
   const int c = (int)c_raw;
@@ -610,11 +615,12 @@ __global__ void phase_c_select_waveseg(const float* __restrict__ input, int pitc
   block_select_lds(s_keys, c, k_out, s_hist, s_red, s_scan, s_mm, pivot, eq_needed, npasses,
                    /*prefix_skip=*/true);
 
-  block_gather_topk(c, pivot, k_out - eq_needed, eq_needed, out_row, &s_wgt, &s_weq,
-                    [&](int i) { return s_keys[i]; }, [&](int i) { return s_idx[i]; });
+  block_gather_topk<WRITE_VALUES>(c, pivot, k_out - eq_needed, eq_needed, out_row, val_row, &s_wgt,
+                                  &s_weq, [&](int i) { return s_keys[i]; },
+                                  [&](int i) { return s_idx[i]; });
   if (RAGGED && k_out < K) {
     __syncthreads();
-    pad_topk_tail(out_row, k_out, K);
+    pad_topk_tail<WRITE_VALUES>(out_row, val_row, k_out, K);
   }
 }
 
@@ -623,12 +629,12 @@ __global__ void phase_c_select_waveseg(const float* __restrict__ input, int pitc
 // --pipeline direct as the independent oracle; the fused path folds the same
 // work into Phase C to save a dispatch.
 // ---------------------------------------------------------------------------
-template <bool RAGGED>
+template <bool RAGGED, bool WRITE_VALUES>
 __global__ __launch_bounds__(1024) void phase_d_fallback(const float* __restrict__ input, int pitch,
                                                          const int* __restrict__ row_ends, int K,
                                                          const int* __restrict__ fb_rows,
                                                          const int* __restrict__ fb_count,
-                                                         int* __restrict__ out_idx) {
+                                                         TopkOut<WRITE_VALUES> dst) {
   const int count = *fb_count;
 
   __shared__ uint32_t s_hist[HIST_SLOTS];
@@ -640,8 +646,9 @@ __global__ __launch_bounds__(1024) void phase_d_fallback(const float* __restrict
   for (int slot = blockIdx.y; slot < count; slot += gridDim.y) {
     const int row = fb_rows[slot];
     const int len = row_len_dev(row, pitch, row_ends);
-    exact_row_select<RAGGED>(input, pitch, len, K, row, out_idx + (size_t)row * K, s_hist, s_red,
-                             s_scan, &s_wgt, &s_weq);
+    exact_row_select<RAGGED, WRITE_VALUES>(input, pitch, len, K, row, dst.idx_row(row, K),
+                                           dst.val_row(row, K), s_hist, s_red, s_scan, &s_wgt,
+                                           &s_weq);
     __syncthreads();
   }
 }
@@ -751,16 +758,36 @@ static int small_n_block(int M, int N) {
                                  std::max(1, (N / FP32_EPT) / WAVE_SIZE));
 }
 
-template <bool RAGGED>
-static void topk_small_n(const float* d_in, int M, int pitch, const int* d_row_ends, int K,
-                         int* d_idx, hipStream_t s) {
-  phase_small_n_topk<RAGGED><<<M, small_n_block(M, pitch), (size_t)pitch * sizeof(uint32_t), s>>>(
-      d_in, pitch, d_row_ends, K, d_idx, g_small_n_passes);
+// Builds the output bundle for the requested instantiation. The WRITE_VALUES
+// =false form ignores d_val, so a stray non-null pointer cannot quietly turn
+// into stores the caller did not ask for.
+template <bool WRITE_VALUES>
+static TopkOut<WRITE_VALUES> make_topk_out(int* d_idx, float* d_val);
+
+template <>
+TopkOut<false> make_topk_out<false>(int* d_idx, float*) {
+  return TopkOut<false>{d_idx};
 }
 
-template <bool RAGGED>
+template <>
+TopkOut<true> make_topk_out<true>(int* d_idx, float* d_val) {
+  return TopkOut<true>{d_idx, d_val};
+}
+
+template <bool RAGGED, bool WRITE_VALUES>
+static void topk_small_n(const float* d_in, int M, int pitch, const int* d_row_ends, int K,
+                         int* d_idx, float* d_val, hipStream_t s) {
+  phase_small_n_topk<RAGGED, WRITE_VALUES>
+      <<<M, small_n_block(M, pitch), (size_t)pitch * sizeof(uint32_t), s>>>(
+          d_in, pitch, d_row_ends, K, make_topk_out<WRITE_VALUES>(d_idx, d_val),
+          g_small_n_passes);
+}
+
+template <bool RAGGED, bool WRITE_VALUES>
 static void topk_fused_impl(const float* d_in, int M, int pitch, const int* d_row_ends, int K,
-                            int* d_idx, Bufs& b, const ShapeParams& sp, hipStream_t s) {
+                            int* d_idx, float* d_val, Bufs& b, const ShapeParams& sp,
+                            hipStream_t s) {
+  const auto dst = make_topk_out<WRITE_VALUES>(d_idx, d_val);
   const int S = sp.S;
   const float margin = sp.margin;
   const int rank = g_sample_rank > 0 ? g_sample_rank : sp.rank;
@@ -806,66 +833,93 @@ static void topk_fused_impl(const float* d_in, int M, int pitch, const int* d_ro
   if (coop) {
     const size_t lds_c = (size_t)cap * (sp.keys_only_c ? sizeof(uint32_t)
                                                        : sizeof(uint32_t) + sizeof(int));
-    phase_c_select_contig<RAGGED><<<M, c_block, lds_c, s>>>(
+    phase_c_select_contig<RAGGED, WRITE_VALUES><<<M, c_block, lds_c, s>>>(
         d_in, pitch, d_row_ends, b.cand_pack, b.cand_reserved, b.cand_bad, b.cand_count, cap, K,
-        d_idx, b.fb_rows, b.fb_count, g_phase_c_passes, sp.keys_only_c);
+        dst, b.fb_rows, b.fb_count, g_phase_c_passes, sp.keys_only_c);
   } else if (cap <= PHASE_C_CAP) {
-    phase_c_select_waveseg<true, RAGGED><<<M, c_block, 0, s>>>(
+    phase_c_select_waveseg<true, RAGGED, WRITE_VALUES><<<M, c_block, 0, s>>>(
         d_in, pitch, d_row_ends, b.cand_pack, b.cand_seg, b.cand_count, seg_stride, nwaves_b, K,
-        cap, d_idx, b.fb_rows, b.fb_count, g_phase_c_passes);
+        cap, dst, b.fb_rows, b.fb_count, g_phase_c_passes);
   } else {
     const size_t lds_c = (size_t)cap * (sizeof(uint32_t) + sizeof(int));
-    phase_c_select_waveseg<false, RAGGED><<<M, c_block, lds_c, s>>>(
+    phase_c_select_waveseg<false, RAGGED, WRITE_VALUES><<<M, c_block, lds_c, s>>>(
         d_in, pitch, d_row_ends, b.cand_pack, b.cand_seg, b.cand_count, seg_stride, nwaves_b, K,
-        cap, d_idx, b.fb_rows, b.fb_count, g_phase_c_passes);
+        cap, dst, b.fb_rows, b.fb_count, g_phase_c_passes);
   }
 
   (void)margin;
   (void)gx;
 }
 
+// RAGGED and WRITE_VALUES are both compile-time, so a runtime dispatcher has to
+// pick one of four instantiations. It is expanded in ONE place, here, rather
+// than at each launch site: the four phase kernels would otherwise each carry
+// the same 4-way if-tree, and the launch-site version is where a missed branch
+// silently runs the wrong instantiation.
+template <bool RAGGED, bool WRITE_VALUES>
+static void topk_indices_inst(const float* d_in, int M, int pitch, const int* d_row_ends, int K,
+                              int* d_idx, float* d_val, Bufs& b, const ShapeParams& sp,
+                              hipStream_t s) {
+  const int* re = RAGGED ? d_row_ends : nullptr;
+  if (sp.path == PATH_SMALL_N) {
+    topk_small_n<RAGGED, WRITE_VALUES>(d_in, M, pitch, re, K, d_idx, d_val, s);
+    return;
+  }
+  topk_fused_impl<RAGGED, WRITE_VALUES>(d_in, M, pitch, re, K, d_idx, d_val, b, sp, s);
+}
+
 static void topk_indices(const float* d_in, int M, int pitch, const int* d_row_ends, int K,
-                         int* d_idx, Bufs& b, int smc, hipStream_t s) {
+                         int* d_idx, float* d_val, Bufs& b, int smc, hipStream_t s) {
   const int k_geom = g_ragged ? geometry_k_ragged(K, pitch) : K;
   ShapeParams sp = derive_shape_params(M, pitch, k_geom, g_margin, g_sample_s, g_coop_g,
                                        (TopkPath)g_path_override);
   g_sample_s = sp.S > 0 ? sp.S : g_sample_s;
-  if (sp.path == PATH_SMALL_N) {
-    if (g_ragged)
-      topk_small_n<true>(d_in, M, pitch, d_row_ends, K, d_idx, s);
-    else
-      topk_small_n<false>(d_in, M, pitch, nullptr, K, d_idx, s);
-    return;
+  if (g_ragged) {
+    if (d_val) topk_indices_inst<true, true>(d_in, M, pitch, d_row_ends, K, d_idx, d_val, b, sp, s);
+    else topk_indices_inst<true, false>(d_in, M, pitch, d_row_ends, K, d_idx, nullptr, b, sp, s);
+  } else {
+    if (d_val) topk_indices_inst<false, true>(d_in, M, pitch, nullptr, K, d_idx, d_val, b, sp, s);
+    else topk_indices_inst<false, false>(d_in, M, pitch, nullptr, K, d_idx, nullptr, b, sp, s);
   }
-  if (g_ragged)
-    topk_fused_impl<true>(d_in, M, pitch, d_row_ends, K, d_idx, b, sp, s);
-  else
-    topk_fused_impl<false>(d_in, M, pitch, nullptr, K, d_idx, b, sp, s);
   (void)smc;
 }
 
 static void topk_fused(const float* d_in, int M, int pitch, const int* d_row_ends, int K,
-                       int* d_idx, Bufs& b, int smc, hipStream_t s) {
-  topk_indices(d_in, M, pitch, d_row_ends, K, d_idx, b, smc, s);
+                       int* d_idx, float* d_val, Bufs& b, int smc, hipStream_t s) {
+  topk_indices(d_in, M, pitch, d_row_ends, K, d_idx, d_val, b, smc, s);
 }
 
 static void topk_direct(const float* d_in, int M, int pitch, const int* d_row_ends, int K,
-                        int* d_idx, Bufs& b, hipStream_t s) {
+                        int* d_idx, float* d_val, Bufs& b, hipStream_t s) {
   fill_identity_rows<<<(M + 255) / 256, 256, 0, s>>>(b.fb_rows, b.fb_count, M);
-  if (g_ragged)
-    phase_d_fallback<true><<<dim3(1, FB_GRID), 1024, 0, s>>>(d_in, pitch, d_row_ends, K, b.fb_rows,
-                                                               b.fb_count, d_idx);
-  else
-    phase_d_fallback<false><<<dim3(1, FB_GRID), 1024, 0, s>>>(d_in, pitch, nullptr, K, b.fb_rows,
-                                                               b.fb_count, d_idx);
+  const dim3 g(1, FB_GRID);
+  if (g_ragged) {
+    if (d_val)
+      phase_d_fallback<true, true><<<g, 1024, 0, s>>>(d_in, pitch, d_row_ends, K, b.fb_rows,
+                                                      b.fb_count,
+                                                      make_topk_out<true>(d_idx, d_val));
+    else
+      phase_d_fallback<true, false><<<g, 1024, 0, s>>>(d_in, pitch, d_row_ends, K, b.fb_rows,
+                                                       b.fb_count,
+                                                       make_topk_out<false>(d_idx, nullptr));
+  } else {
+    if (d_val)
+      phase_d_fallback<false, true><<<g, 1024, 0, s>>>(d_in, pitch, nullptr, K, b.fb_rows,
+                                                       b.fb_count,
+                                                       make_topk_out<true>(d_idx, d_val));
+    else
+      phase_d_fallback<false, false><<<g, 1024, 0, s>>>(d_in, pitch, nullptr, K, b.fb_rows,
+                                                        b.fb_count,
+                                                        make_topk_out<false>(d_idx, nullptr));
+  }
 }
 
 static void run_topk(const float* d_in, int M, int pitch, const int* d_row_ends, int K, int* d_idx,
-                     Bufs& b, int smc, hipStream_t s) {
+                     float* d_val, Bufs& b, int smc, hipStream_t s) {
   if (g_pipeline_direct)
-    topk_direct(d_in, M, pitch, d_row_ends, K, d_idx, b, s);
+    topk_direct(d_in, M, pitch, d_row_ends, K, d_idx, d_val, b, s);
   else
-    topk_fused(d_in, M, pitch, d_row_ends, K, d_idx, b, smc, s);
+    topk_fused(d_in, M, pitch, d_row_ends, K, d_idx, d_val, b, smc, s);
 }
 
 // ---- AITER_EXPORT_END ----
@@ -900,12 +954,16 @@ static bool verify_row_gpu_oracle(const float* d_in, int pitch, const int* d_row
   int h_count = 1;
   HIP_CHECK(hipMemcpy(b.fb_rows, h_rows, sizeof(h_rows), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(b.fb_count, &h_count, sizeof(int), hipMemcpyHostToDevice));
+  // WRITE_VALUES=false: the oracle exists to produce indices to compare
+  // against, and the value check is a separate, index-anchored one.
   if (g_ragged)
-    phase_d_fallback<true><<<dim3(1, 1), 1024>>>(d_in, pitch, d_row_ends, K, b.fb_rows, b.fb_count,
-                                                 d_idx);
+    phase_d_fallback<true, false><<<dim3(1, 1), 1024>>>(d_in, pitch, d_row_ends, K, b.fb_rows,
+                                                        b.fb_count,
+                                                        make_topk_out<false>(d_idx, nullptr));
   else
-    phase_d_fallback<false><<<dim3(1, 1), 1024>>>(d_in, pitch, nullptr, K, b.fb_rows, b.fb_count,
-                                                  d_idx);
+    phase_d_fallback<false, false><<<dim3(1, 1), 1024>>>(d_in, pitch, nullptr, K, b.fb_rows,
+                                                         b.fb_count,
+                                                         make_topk_out<false>(d_idx, nullptr));
   HIP_CHECK(hipDeviceSynchronize());
   return true;
 }
@@ -969,6 +1027,63 @@ static bool verify_rows_sampled(const float* d_in, int M, int pitch, const int* 
   return true;
 }
 
+// Values are checked AGAINST THE INDICES the same call emitted, not against a
+// separately sorted reference: that is what makes the check able to fail. The
+// kernel recovers the score from the sortable key rather than re-reading the
+// row, so a wrong inverse, a wrong slot or a stale lane shows up as
+// out_val[i] != input[row][out_idx[i]] -- a reference top-k of the same row
+// would agree with a consistently-wrong value and prove nothing.
+//
+// Exact equality, not a tolerance: no arithmetic is performed on the value, so
+// anything other than a bit-identical round-trip is a defect. NaN cannot appear
+// from the inverse and is compared by bits so it is not silently accepted.
+// Copies only the sampled rows off the device: a whole-input copy is 2.2 GB of
+// host memory at M=4096 N=135168, which bounds which shapes the gate could
+// include for no reason -- the check only ever reads `pitch` floats at a time.
+static bool verify_values_rows(const float* d_in, int M, int pitch, const int* h_row_ends, int K,
+                               const int* h_idx, const float* h_val, int sample_n,
+                               std::string& why) {
+  auto bits = [](float f) {
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    return u;
+  };
+  const uint32_t neg_inf = bits(-std::numeric_limits<float>::infinity());
+  const int step = std::max(1, M / std::max(1, sample_n));
+  std::vector<float> row((size_t)pitch);
+  for (int r = 0; r < M; r += step) {
+    HIP_CHECK(hipMemcpy(row.data(), d_in + (size_t)r * pitch, (size_t)pitch * sizeof(float),
+                        hipMemcpyDeviceToHost));
+    const int len = h_row_ends ? h_row_ends[r] : pitch;
+    const int k_take = std::min(K, len);
+    for (int i = 0; i < K; i++) {
+      const int idx = h_idx[(size_t)r * K + i];
+      const uint32_t got = bits(h_val[(size_t)r * K + i]);
+      if (i >= k_take || idx < 0) {
+        if (idx != -1 || got != neg_inf) {
+          char buf[192];
+          snprintf(buf, sizeof(buf), "row %d slot %d: pad expected idx=-1 val=-inf, got idx=%d",
+                   r, i, idx);
+          why = buf;
+          return false;
+        }
+        continue;
+      }
+      if (idx >= len) {
+        why = "index past the row extent";
+        return false;
+      }
+      if (got != bits(row[idx])) {
+        char buf[192];
+        snprintf(buf, sizeof(buf), "row %d slot %d: val does not match input[%d]", r, i, idx);
+        why = buf;
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 static double median(std::vector<double> v) {
   if (v.empty()) return 0.0;
   std::sort(v.begin(), v.end());
@@ -993,11 +1108,12 @@ static void usage(const char* prog) {
           "  --pipeline fused|direct\n"
           "  --margin F --sample-rank R --cf-block B --cf-gx G\n"
           "  --nt-load 0|1 --phase-b 0|1|2 --phase-c-block B --phase-a-block B\n"
-          "  --input-bin PATH --dump-indices PATH --inject-fault 0|1\n"
+          "  --input-bin PATH --dump-indices PATH --inject-fault 0|1|2 (1=index, 2=value)\n"
           "  --path auto|small_n|prefill|decode --coop-g G --fuse-ab 0|1 --hipgraph 0|1\n"
           "  --small-n-block B (256..1024, 0=auto)  --s-rule 0|1 (0=legacy R_TARGET)\n"
           "  --verify-sample-rows N --verify-oracle gpu|cpu\n"
-          "  --ragged 0|1 --ragged-prefix P (row r extent = P+r+1, clamped to N)\n",
+          "  --ragged 0|1 --ragged-prefix P (row r extent = P+r+1, clamped to N)\n"
+          "  --values 0|1 (also emit the selected scores)\n",
           prog);
 }
 
@@ -1060,6 +1176,7 @@ int main(int argc, char** argv) {
     else if (a == "--verify-oracle") g_verify_oracle_gpu = (need() == "gpu") ? 1 : 0;
     else if (a == "--ragged") g_ragged = std::stoi(need());
     else if (a == "--ragged-prefix") g_ragged_prefix = std::stoi(need());
+    else if (a == "--values") g_values = std::stoi(need());
     else {
       usage(argv[0]);
       exit(1);
@@ -1106,10 +1223,12 @@ int main(int argc, char** argv) {
   const size_t out_elems = (size_t)M * K;
   float* d_in = nullptr;
   int* d_idx = nullptr;
+  float* d_val = nullptr;
   int* d_row_ends = nullptr;
   std::vector<int> h_row_ends;
   HIP_CHECK(hipMalloc(&d_in, in_elems * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_idx, out_elems * sizeof(int)));
+  if (g_values) HIP_CHECK(hipMalloc(&d_val, out_elems * sizeof(float)));
   if (g_ragged) {
     // Triangular, the shape aiter's create_row_boundaries produces. Clamped to
     // the pitch because a row extent above it is not a ragged matrix at all:
@@ -1146,7 +1265,7 @@ int main(int argc, char** argv) {
   alloc_bufs(bufs, M, K, shape.cap);
 
   HIP_CHECK(hipMemset(d_idx, 0xFF, out_elems * sizeof(int)));
-  run_topk(d_in, M, N, d_row_ends, K, d_idx, bufs, info.sm_count, 0);
+  run_topk(d_in, M, N, d_row_ends, K, d_idx, d_val, bufs, info.sm_count, 0);
   // A launch that never started is not slow, it is instant and wrong: an
   // over-large dynamic LDS request reported 4.40 us with garbage output before
   // this check existed.
@@ -1192,7 +1311,10 @@ int main(int argc, char** argv) {
   const bool do_time = (mode == "time" || mode == "verify_and_time");
 
   if (do_verify) {
-    if (g_inject_fault) h_idx[0] ^= 1;
+    // 1 corrupts an index, 2 corrupts only a VALUE. They have to be separate:
+    // with one flag the index check fails first and returns, so the value check
+    // never runs and is never shown to be failable.
+    if (g_inject_fault == 1) h_idx[0] ^= 1;
     int bad_rows = 0;
     const size_t full_elems = (size_t)M * N;
     if (full_elems <= 64 * 1024 * 1024 && M <= 256) {
@@ -1210,6 +1332,17 @@ int main(int argc, char** argv) {
     printf("VERIFY rows_fail=%d fallback_rows=%d pipeline=%s inject_fault=%d path=%s\n", bad_rows,
            fb, g_pipeline_direct ? "direct" : "fused", g_inject_fault, path_name);
     if (bad_rows != 0) return 2;
+
+    if (g_values) {
+      std::vector<float> h_val(out_elems);
+      HIP_CHECK(hipMemcpy(h_val.data(), d_val, out_elems * sizeof(float), hipMemcpyDeviceToHost));
+      if (g_inject_fault == 2) h_val[0] = -0.5f;
+      std::string why;
+      const bool ok = verify_values_rows(d_in, M, N, g_ragged ? h_row_ends.data() : nullptr, K,
+                                         h_idx.data(), h_val.data(), g_verify_sample_rows, why);
+      printf("VERIFY_VALUES ok=%d %s\n", ok ? 1 : 0, ok ? "" : why.c_str());
+      if (!ok) return 2;
+    }
     if (!dump_path.empty()) {
       FILE* f = fopen(dump_path.c_str(), "wb");
       if (!f) {
@@ -1233,11 +1366,11 @@ int main(int argc, char** argv) {
       // default stream returns 900 "operation not permitted when stream is
       // capturing" regardless of what is being captured.
       HIP_CHECK(hipStreamCreateWithFlags(&gs, hipStreamNonBlocking));
-      for (int w = 0; w < warmup; w++) run_topk(d_in, M, N, d_row_ends, K, d_idx, bufs, info.sm_count, gs);
+      for (int w = 0; w < warmup; w++) run_topk(d_in, M, N, d_row_ends, K, d_idx, d_val, bufs, info.sm_count, gs);
       HIP_CHECK(hipStreamSynchronize(gs));
       hipError_t cap_err = hipStreamBeginCapture(gs, hipStreamCaptureModeGlobal);
       if (cap_err == hipSuccess) {
-        run_topk(d_in, M, N, d_row_ends, K, d_idx, bufs, info.sm_count, gs);
+        run_topk(d_in, M, N, d_row_ends, K, d_idx, d_val, bufs, info.sm_count, gs);
         cap_err = hipStreamEndCapture(gs, &graph);
       }
       if (cap_err == hipSuccess && graph != nullptr) {
@@ -1253,7 +1386,7 @@ int main(int argc, char** argv) {
     }
     for (int rep = 0; rep < repeats; rep++) {
       if (!g_use_hipgraph || g_pipeline_direct) {
-        for (int w = 0; w < warmup; w++) run_topk(d_in, M, N, d_row_ends, K, d_idx, bufs, info.sm_count, 0);
+        for (int w = 0; w < warmup; w++) run_topk(d_in, M, N, d_row_ends, K, d_idx, d_val, bufs, info.sm_count, 0);
         HIP_CHECK(hipDeviceSynchronize());
       }
       std::vector<double> samples;
@@ -1265,7 +1398,7 @@ int main(int argc, char** argv) {
           samples.push_back(timer.end(gs));
         } else {
           timer.begin();
-          run_topk(d_in, M, N, d_row_ends, K, d_idx, bufs, info.sm_count, 0);
+          run_topk(d_in, M, N, d_row_ends, K, d_idx, d_val, bufs, info.sm_count, 0);
           samples.push_back(timer.end());
         }
       }
@@ -1285,6 +1418,7 @@ int main(int argc, char** argv) {
   free_bufs(bufs);
   (void)hipFree(d_in);
   (void)hipFree(d_idx);
+  if (d_val) (void)hipFree(d_val);
   if (d_row_ends) (void)hipFree(d_row_ends);
   return 0;
 }

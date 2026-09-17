@@ -3,15 +3,16 @@
 // GPU kernels for generalized top-k paths. Include AFTER block_select_lds / block_gather_topk
 // are visible in the translation unit.
 
-template <bool RAGGED>
+template <bool RAGGED, bool WRITE_VALUES>
 __global__ void phase_small_n_topk(const float* __restrict__ input, int pitch,
                                    const int* __restrict__ row_ends, int K,
-                                   int* __restrict__ out_idx, int npasses) {
+                                   TopkOut<WRITE_VALUES> dst, int npasses) {
   const int row = blockIdx.x;
   const int len = row_len_dev(row, pitch, row_ends);
   const float* ri = input + (size_t)row * pitch;
+  float* val = dst.val_row(row, K);
   if (RAGGED && len <= K) {
-    emit_identity_row(out_idx + (size_t)row * K, len, K);
+    emit_identity_row<WRITE_VALUES>(dst.idx_row(row, K), val, ri, len, K);
     return;
   }
   extern __shared__ uint32_t s_keys[];
@@ -37,17 +38,18 @@ __global__ void phase_small_n_topk(const float* __restrict__ input, int pitch,
   int eq_needed;
   block_select_lds(s_keys, len, k_out, s_hist, s_red, s_scan, s_mm, pivot, eq_needed, npasses, true);
 
-  int* out = out_idx + (size_t)row * K;
+  int* out = dst.idx_row(row, K);
   if (threadIdx.x == 0) {
     s_wgt = 0;
     s_weq = 0;
   }
   __syncthreads();
-  block_gather_topk(len, pivot, k_out - eq_needed, eq_needed, out, &s_wgt, &s_weq,
-                    [&](int i) { return s_keys[i]; }, [](int i) { return i; });
+  block_gather_topk<WRITE_VALUES>(len, pivot, k_out - eq_needed, eq_needed, out, val, &s_wgt,
+                                  &s_weq, [&](int i) { return s_keys[i]; },
+                                  [](int i) { return i; });
   if (RAGGED && k_out < K) {
     __syncthreads();
-    pad_topk_tail(out, k_out, K);
+    pad_topk_tail<WRITE_VALUES>(out, val, k_out, K);
   }
 }
 
@@ -171,14 +173,14 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
   }
 }
 
-template <bool RAGGED>
+template <bool RAGGED, bool WRITE_VALUES>
 __global__ void phase_c_select_contig(const float* __restrict__ input, int pitch,
                                       const int* __restrict__ row_ends,
                                       const uint64_t* __restrict__ cand_pack,
                                       const unsigned int* __restrict__ cand_reserved,
                                       const unsigned int* __restrict__ cand_bad,
                                       unsigned int* __restrict__ cand_count, int cap, int K,
-                                      int* __restrict__ out_idx, int* __restrict__ fb_rows,
+                                      TopkOut<WRITE_VALUES> dst, int* __restrict__ fb_rows,
                                       int* __restrict__ fb_count, int npasses, bool keys_only) {
   const int row = blockIdx.x;
   const int len = row_len_dev(row, pitch, row_ends);
@@ -194,13 +196,15 @@ __global__ void phase_c_select_contig(const float* __restrict__ input, int pitch
   __shared__ uint32_t s_mm[2 * MAX_WAVES_PER_BLOCK];
   __shared__ unsigned s_wgt, s_weq;
 
-  int* out = out_idx + (size_t)row * K;
+  int* out = dst.idx_row(row, K);
+  float* val = dst.val_row(row, K);
   const int k_out = RAGGED ? k_take_dev(K, len) : K;
   // See phase_c_select_waveseg: len <= K routes unconditionally so the identity
   // emit cannot be diverted by a cand_count the +inf threshold let through.
   if ((RAGGED && len <= K) || c_raw < (unsigned)k_out || c_raw > (unsigned)cap) {
     if (threadIdx.x == 0) fb_rows[atomicAdd(fb_count, 1)] = row;
-    exact_row_select<RAGGED>(input, pitch, len, K, row, out, s_hist, s_red, s_scan, &s_wgt, &s_weq);
+    exact_row_select<RAGGED, WRITE_VALUES>(input, pitch, len, K, row, out, val, s_hist, s_red,
+                                           s_scan, &s_wgt, &s_weq);
     return;
   }
   const int c = (int)c_raw;
@@ -224,16 +228,17 @@ __global__ void phase_c_select_contig(const float* __restrict__ input, int pitch
   __syncthreads();
 
   if (keys_only) {
-    block_gather_topk(c, pivot, k_out - eq_needed, eq_needed, out, &s_wgt, &s_weq,
-                      [&](int i) { return s_keys_ext[i]; },
-                      [&](int i) { return (int)(uint32_t)(base[i] & 0xFFFFFFFFull); });
+    block_gather_topk<WRITE_VALUES>(c, pivot, k_out - eq_needed, eq_needed, out, val, &s_wgt,
+                                    &s_weq, [&](int i) { return s_keys_ext[i]; },
+                                    [&](int i) { return (int)(uint32_t)(base[i] & 0xFFFFFFFFull); });
   } else {
-    block_gather_topk(c, pivot, k_out - eq_needed, eq_needed, out, &s_wgt, &s_weq,
-                      [&](int i) { return s_keys_ext[i]; }, [&](int i) { return s_idx[i]; });
+    block_gather_topk<WRITE_VALUES>(c, pivot, k_out - eq_needed, eq_needed, out, val, &s_wgt,
+                                    &s_weq, [&](int i) { return s_keys_ext[i]; },
+                                    [&](int i) { return s_idx[i]; });
   }
   if (RAGGED && k_out < K) {
     __syncthreads();
-    pad_topk_tail(out, k_out, K);
+    pad_topk_tail<WRITE_VALUES>(out, val, k_out, K);
   }
 }
 
