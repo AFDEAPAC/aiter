@@ -1,0 +1,167 @@
+{
+  "bw_model": {
+    "peak_tb_s": 6.6117,
+    "latency_us": 5.8
+  },
+  "empty_launch": {
+    "four_launch_us": 10.56,
+    "per_launch_us": 2.64,
+    "grid_1_us": 5.84,
+    "grid_4_us": 5.76,
+    "grid_16_us": 5.8,
+    "grid_64_us": 5.8,
+    "grid_256_us": 5.84,
+    "grid_1024_us": 5.8,
+    "grid_4096_us": 5.8
+  },
+  "phaseb_floor": {
+    "m": 4096,
+    "n": 131072,
+    "traffic_gb": 2.2414,
+    "median_ms": 0.4438
+  },
+  "phaseb_anchors": [
+    {
+      "m": 4096,
+      "n": 16384,
+      "traffic_gb": 0.3624,
+      "median_ms": 0.0746
+    },
+    {
+      "m": 4096,
+      "n": 131072,
+      "traffic_gb": 2.2414,
+      "median_ms": 0.4438
+    },
+    {
+      "m": 1024,
+      "n": 1048576,
+      "traffic_gb": 4.3185,
+      "median_ms": 0.8122
+    }
+  ],
+  "bw_sweep": [
+    {
+      "bytes": 4096,
+      "median_us": 5.8,
+      "stddev_pct": 0.488,
+      "bandwidth_tb_s": 0.0007
+    },
+    {
+      "bytes": 8192,
+      "median_us": 5.8,
+      "stddev_pct": 0.597,
+      "bandwidth_tb_s": 0.0014
+    },
+    {
+      "bytes": 16384,
+      "median_us": 5.8,
+      "stddev_pct": 0.482,
+      "bandwidth_tb_s": 0.0028
+    },
+    {
+      "bytes": 32768,
+      "median_us": 5.8,
+      "stddev_pct": 0.69,
+      "bandwidth_tb_s": 0.0056
+    },
+    {
+      "bytes": 65536,
+      "median_us": 5.76,
+      "stddev_pct": 1.432,
+      "bandwidth_tb_s": 0.0114
+    },
+    {
+      "bytes": 131072,
+      "median_us": 5.8,
+      "stddev_pct": 0.597,
+      "bandwidth_tb_s": 0.0226
+    },
+    {
+      "bytes": 262144,
+      "median_us": 5.84,
+      "stddev_pct": 0.484,
+      "bandwidth_tb_s": 0.0449
+    },
+    {
+      "bytes": 524288,
+      "median_us": 5.8,
+      "stddev_pct": 0.597,
+      "bandwidth_tb_s": 0.0904
+    },
+    {
+      "bytes": 1048576,
+      "median_us": 5.84,
+      "stddev_pct": 0.766,
+      "bandwidth_tb_s": 0.1796
+    },
+    {
+      "bytes": 2097152,
+      "median_us": 5.8,
+      "stddev_pct": 0.771,
+      "bandwidth_tb_s": 0.3616
+    },
+    {
+      "bytes": 4194304,
+      "median_us": 5.8,
+      "stddev_pct": 0.345,
+      "bandwidth_tb_s": 0.7232
+    },
+    {
+      "bytes": 8388608,
+      "median_us": 5.8,
+      "stddev_pct": 0.345,
+      "bandwidth_tb_s": 1.4463
+    },
+    {
+      "bytes": 16777216,
+      "median_us": 5.84,
+      "stddev_pct": 0.685,
+      "bandwidth_tb_s": 2.8728
+    },
+    {
+      "bytes": 33554432,
+      "median_us": 5.84,
+      "stddev_pct": 0.484,
+      "bandwidth_tb_s": 5.7456
+    },
+    {
+      "bytes": 67108864,
+      "median_us": 12.96,
+      "stddev_pct": 0.463,
+      "bandwidth_tb_s": 5.1782
+    },
+    {
+      "bytes": 134217728,
+      "median_us": 22.12,
+      "stddev_pct": 0.7,
+      "bandwidth_tb_s": 6.0677
+    },
+    {
+      "bytes": 268435456,
+      "median_us": 40.6,
+      "stddev_pct": 0.927,
+      "bandwidth_tb_s": 6.6117
+    },
+    {
+      "bytes": 536870912,
+      "median_us": 92.0,
+      "stddev_pct": 2.298,
+      "bandwidth_tb_s": 5.8356
+    },
+    {
+      "bytes": 1073741824,
+      "median_us": 177.84,
+      "stddev_pct": 1.713,
+      "bandwidth_tb_s": 6.0377
+    },
+    {
+      "bytes": 2147483648,
+      "median_us": 363.8,
+      "stddev_pct": 1.244,
+      "bandwidth_tb_s": 5.9029
+    }
+  ],
+  "n_launches": 3,
+  "formula": "floor_us = max(traffic/peak_bw * achievable_scale(N), latency_us, n_launches*per_launch_us); achievable_scale is interpolated in log2(N) between the measured read+write anchors"
+}

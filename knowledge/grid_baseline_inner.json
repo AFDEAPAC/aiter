@@ -1,0 +1,420 @@
+{
+  "tier": "inner",
+  "summary": {
+    "n_points": 24,
+    "geomean_us": 64.808,
+    "geomean_ratio": 2.74,
+    "per_path_geomean_us": {
+      "decode": 36.12,
+      "prefill": 211.589,
+      "small_n": 28.554
+    },
+    "regime_counts": {
+      "small_n": 8,
+      "decode": 7,
+      "prefill": 9
+    },
+    "worst_ratio": {
+      "m": 32,
+      "n": 262144,
+      "topk": 2048,
+      "regime": "decode",
+      "path": "decode",
+      "us": 37.0,
+      "stddev_pct": 0.062,
+      "floor_us": 7.92,
+      "ratio": 4.672,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    }
+  },
+  "points": [
+    {
+      "m": 1,
+      "n": 2048,
+      "topk": 2048,
+      "regime": "small_n",
+      "path": "small_n",
+      "us": 10.6,
+      "stddev_pct": 0.153,
+      "floor_us": 5.8,
+      "ratio": 1.828,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 64,
+      "n": 4096,
+      "topk": 2048,
+      "regime": "small_n",
+      "path": "small_n",
+      "us": 12.4,
+      "stddev_pct": 0.131,
+      "floor_us": 5.8,
+      "ratio": 2.138,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 512,
+      "n": 8192,
+      "topk": 2048,
+      "regime": "small_n",
+      "path": "small_n",
+      "us": 20.8,
+      "stddev_pct": 0.342,
+      "floor_us": 5.8,
+      "ratio": 3.586,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 1024,
+      "n": 4096,
+      "topk": 2048,
+      "regime": "small_n",
+      "path": "small_n",
+      "us": 20.9,
+      "stddev_pct": 0.271,
+      "floor_us": 5.8,
+      "ratio": 3.603,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 2048,
+      "n": 4096,
+      "topk": 2048,
+      "regime": "small_n",
+      "path": "small_n",
+      "us": 36.8,
+      "stddev_pct": 0.239,
+      "floor_us": 9.48,
+      "ratio": 3.881,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 2048,
+      "n": 8192,
+      "topk": 2048,
+      "regime": "small_n",
+      "path": "small_n",
+      "us": 55.5,
+      "stddev_pct": 0.059,
+      "floor_us": 15.81,
+      "ratio": 3.512,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 4096,
+      "n": 2048,
+      "topk": 2048,
+      "regime": "small_n",
+      "path": "small_n",
+      "us": 38.8,
+      "stddev_pct": 0.139,
+      "floor_us": 12.64,
+      "ratio": 3.069,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 4096,
+      "n": 8192,
+      "topk": 2048,
+      "regime": "small_n",
+      "path": "small_n",
+      "us": 97.6,
+      "stddev_pct": 0.071,
+      "floor_us": 31.61,
+      "ratio": 3.088,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 1,
+      "n": 1048576,
+      "topk": 2048,
+      "regime": "decode",
+      "path": "decode",
+      "us": 32.0,
+      "stddev_pct": 0.072,
+      "floor_us": 7.92,
+      "ratio": 4.04,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 2,
+      "n": 1048576,
+      "topk": 2048,
+      "regime": "decode",
+      "path": "decode",
+      "us": 33.7,
+      "stddev_pct": 0.085,
+      "floor_us": 7.92,
+      "ratio": 4.255,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 8,
+      "n": 524288,
+      "topk": 2048,
+      "regime": "decode",
+      "path": "decode",
+      "us": 35.9,
+      "stddev_pct": 0.064,
+      "floor_us": 7.92,
+      "ratio": 4.533,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 16,
+      "n": 1048576,
+      "topk": 2048,
+      "regime": "decode",
+      "path": "decode",
+      "us": 44.6,
+      "stddev_pct": 0.052,
+      "floor_us": 12.69,
+      "ratio": 3.514,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 32,
+      "n": 262144,
+      "topk": 2048,
+      "regime": "decode",
+      "path": "decode",
+      "us": 37.0,
+      "stddev_pct": 0.062,
+      "floor_us": 7.92,
+      "ratio": 4.672,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 64,
+      "n": 262144,
+      "topk": 2048,
+      "regime": "decode",
+      "path": "decode",
+      "us": 40.9,
+      "stddev_pct": 0.069,
+      "floor_us": 13.31,
+      "ratio": 3.073,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 128,
+      "n": 65536,
+      "topk": 2048,
+      "regime": "decode",
+      "path": "decode",
+      "us": 30.7,
+      "stddev_pct": 0.053,
+      "floor_us": 7.92,
+      "ratio": 3.876,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 256,
+      "n": 32768,
+      "topk": 2048,
+      "regime": "prefill",
+      "path": "prefill",
+      "us": 34.2,
+      "stddev_pct": 0.083,
+      "floor_us": 7.92,
+      "ratio": 4.318,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 4096,
+      "n": 131072,
+      "topk": 2048,
+      "regime": "prefill",
+      "path": "prefill",
+      "us": 615.8,
+      "stddev_pct": 0.022,
+      "floor_us": 443.8,
+      "ratio": 1.388,
+      "argv": [
+        20,
+        100,
+        5
+      ]
+    },
+    {
+      "m": 512,
+      "n": 16384,
+      "topk": 2048,
+      "regime": "prefill",
+      "path": "prefill",
+      "us": 35.7,
+      "stddev_pct": 0.092,
+      "floor_us": 9.32,
+      "ratio": 3.828,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 1024,
+      "n": 32768,
+      "topk": 2048,
+      "regime": "prefill",
+      "path": "prefill",
+      "us": 58.7,
+      "stddev_pct": 0.048,
+      "floor_us": 31.66,
+      "ratio": 1.854,
+      "argv": [
+        100,
+        500,
+        7
+      ]
+    },
+    {
+      "m": 2048,
+      "n": 65536,
+      "topk": 2048,
+      "regime": "prefill",
+      "path": "prefill",
+      "us": 192.8,
+      "stddev_pct": 0.086,
+      "floor_us": 115.83,
+      "ratio": 1.664,
+      "argv": [
+        20,
+        100,
+        5
+      ]
+    },
+    {
+      "m": 4096,
+      "n": 16384,
+      "topk": 2048,
+      "regime": "prefill",
+      "path": "prefill",
+      "us": 167.1,
+      "stddev_pct": 0.128,
+      "floor_us": 74.6,
+      "ratio": 2.24,
+      "argv": [
+        20,
+        100,
+        5
+      ]
+    },
+    {
+      "m": 4096,
+      "n": 262144,
+      "topk": 2048,
+      "regime": "prefill",
+      "path": "prefill",
+      "us": 1108.0,
+      "stddev_pct": 0.044,
+      "floor_us": 851.87,
+      "ratio": 1.301,
+      "argv": [
+        20,
+        100,
+        5
+      ]
+    },
+    {
+      "m": 1024,
+      "n": 1048576,
+      "topk": 2048,
+      "regime": "prefill",
+      "path": "prefill",
+      "us": 948.6,
+      "stddev_pct": 0.047,
+      "floor_us": 812.2,
+      "ratio": 1.168,
+      "argv": [
+        20,
+        100,
+        5
+      ]
+    },
+    {
+      "m": 2048,
+      "n": 262144,
+      "topk": 2048,
+      "regime": "prefill",
+      "path": "prefill",
+      "us": 568.8,
+      "stddev_pct": 0.09,
+      "floor_us": 425.93,
+      "ratio": 1.335,
+      "argv": [
+        20,
+        100,
+        5
+      ]
+    }
+  ]
+}

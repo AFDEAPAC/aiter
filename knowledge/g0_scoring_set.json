@@ -1,0 +1,17 @@
+{
+  "note": "Proposed scoring set from G0 matrix sweep (12 shapes max). Geomean target for .evo v2.",
+  "shapes": [
+    {"name": "prefill_main", "m": 4096, "n": 131072, "topk": 2048, "regime": "prefill"},
+    {"name": "small_n_512", "m": 64, "n": 512, "topk": 256, "regime": "small_n"},
+    {"name": "small_n_8k", "m": 64, "n": 8192, "topk": 2048, "regime": "small_n"},
+    {"name": "prefill_m256_n128k", "m": 256, "n": 131072, "topk": 2048, "regime": "prefill"},
+    {"name": "large_n_512k", "m": 64, "n": 524288, "topk": 2048, "regime": "large_n"},
+    {"name": "large_n_1m", "m": 64, "n": 1048576, "topk": 2048, "regime": "large_n"},
+    {"name": "decode_m1_n1m", "m": 1, "n": 1048576, "topk": 2048, "regime": "decode"},
+    {"name": "decode_m16_n256k", "m": 16, "n": 262144, "topk": 2048, "regime": "decode"},
+    {"name": "decode_m128_n1m", "m": 128, "n": 1048576, "topk": 2048, "regime": "decode"},
+    {"name": "prefill_m1024_n1m", "m": 1024, "n": 1048576, "topk": 2048, "regime": "prefill"},
+    {"name": "launch_bound_m1_n8k", "m": 1, "n": 8192, "topk": 2048, "regime": "launch"},
+    {"name": "n_lds_boundary", "m": 64, "n": 8192, "topk": 2048, "regime": "boundary"}
+  ]
+}
