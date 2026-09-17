@@ -826,6 +826,37 @@ clear now runs on the 256 threads that also carry the wave-scan, where the old
 loop spread it over all `blockDim.x` threads (512 at that shape), so the work
 moved onto the critical path rather than disappearing.
 
+### The @perftest cell for M=4096 N=131072 has ~1% spread, and one 2% outlier got reported
+A canvas built 2026-09-17 recorded the AVO op at **562.6 us** for the dense
+M=4096 N=131072 k=2048 cell of `bench/topk_select_grid.py`. That number does not
+reproduce, **not even on the commit it was taken from**:
+
+| aiter-topk csrc | AVO us | topk_select us (same cell, same run) |
+|---|---|---|
+| `bb1413ed2` (the build the canvas used) | 574.6 | 958.9 |
+| `4bb5c2634` (g_12) | 577.2 | 961.6 |
+| `c291d154c` (g_15, current) | 571.3 | 960.0 |
+| canvas, 2026-09-17 16:27 | **562.6** | 964.2 |
+
+The control is the `topk_select` column: 958.9-964.2 across all four, a ~0.5%
+spread, so the harness and the machine are steady. The AVO column across three
+structurally different builds is 571-577, also ~0.5%, and the canvas's 562.6
+sits 2% below every one of them including its own. It is measurement spread in
+that pipeline, not a code change -- and the barrier work of g_13..g_15 is in
+fact marginally net-POSITIVE here (571.3 against 574.6).
+
+Two lessons. First, do not read a single `@perftest` cell as a baseline; it needs
+the same repeat-and-compare discipline as `score_grid`. Second, and this is the
+one that actually cost time: **that cell is not comparable to the standalone
+benchmark's wall time at all**, so seeing 562.6 next to `benchmark_topk`'s ~609
+us invites the conclusion that something regressed by 8%. The two differ in
+three ways at once -- `@perftest` reports DEVICE time while `--mode time` reports
+wall; the aiter op always instantiates `RAGGED=true` while the benchmark's
+default is `RAGGED=false`; and the data comes from `torch.randn` rather than the
+benchmark's own generator. `bench/aiter_ab.py` exists precisely because that
+comparison already went wrong once, at 18% on M=256. Quote one pipeline or the
+other, never one number from each.
+
 ### A transient contention artifact reported +24% across every regime at once
 During g_14's baseline save, `score_grid --tier inner` reported geomean 78.30 us
 with decode 39.79 / prefill 254.65 / small_n 37.57 -- about +24% on all three at
