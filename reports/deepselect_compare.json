@@ -1,0 +1,74 @@
+[
+ {
+  "m": 1,
+  "n": 65536,
+  "ds_us": null,
+  "err": "RuntimeError: HIP build supports bfloat16 input only"
+ },
+ {
+  "m": 1,
+  "n": 262144,
+  "ds_us": null,
+  "err": "RuntimeError: HIP build supports bfloat16 input only"
+ },
+ {
+  "m": 1,
+  "n": 1048576,
+  "ds_us": null,
+  "err": "RuntimeError: HIP build supports bfloat16 input only"
+ },
+ {
+  "m": 8,
+  "n": 65536,
+  "ds_us": null,
+  "err": "RuntimeError: HIP build supports bfloat16 input only"
+ },
+ {
+  "m": 64,
+  "n": 65536,
+  "ds_us": null,
+  "err": "RuntimeError: HIP build supports bfloat16 input only"
+ },
+ {
+  "m": 256,
+  "n": 65536,
+  "ds_us": null,
+  "err": "RuntimeError: HIP build supports bfloat16 input only"
+ },
+ {
+  "m": 64,
+  "n": 131072,
+  "ds_us": null,
+  "err": "RuntimeError: HIP build supports bfloat16 input only"
+ },
+ {
+  "m": 256,
+  "n": 131072,
+  "ds_us": null,
+  "err": "RuntimeError: HIP build supports bfloat16 input only"
+ },
+ {
+  "m": 1024,
+  "n": 131072,
+  "ds_us": null,
+  "err": "RuntimeError: HIP build supports bfloat16 input only"
+ },
+ {
+  "m": 4096,
+  "n": 131072,
+  "ds_us": null,
+  "err": "RuntimeError: HIP build supports bfloat16 input only"
+ },
+ {
+  "m": 64,
+  "n": 262144,
+  "ds_us": null,
+  "err": "RuntimeError: HIP build supports bfloat16 input only"
+ },
+ {
+  "m": 1024,
+  "n": 1048576,
+  "ds_us": null,
+  "err": "RuntimeError: HIP build supports bfloat16 input only"
+ }
+]
