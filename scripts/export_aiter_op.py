@@ -51,8 +51,8 @@ BANNER = """// SPDX-License-Identifier: MIT
 
 """
 
-# Where to look for clang-format when it is not on PATH. The ROCm toolchain
-# ships one and a dev box for this repo has ROCm by definition.
+# The ROCm toolchain ships a clang-format and a dev box for this repo has ROCm
+# by definition, so this is the default rather than a fallback. See Formatter.
 CLANG_FORMAT_FALLBACK = "/opt/rocm/llvm/bin/clang-format"
 
 
@@ -77,8 +77,15 @@ class Formatter:
     """
 
     def __init__(self, explicit=None):
+        # ROCm's build is preferred over whatever is on PATH, which is the
+        # opposite of the usual order and is a measured choice: the two disagree
+        # on short function bodies, and the AMD build keeps `{ return x; }` on
+        # one line the way aiter's own sources do (20 occurrences under csrc/,
+        # e.g. csrc/kernels/mla/reduce.cu:124) while upstream expands it to
+        # three lines. Preferring PATH would make an upstream install silently
+        # produce code that deviates from the repo it is being formatted for.
         for cand in (explicit, os.environ.get("CLANG_FORMAT"),
-                     shutil.which("clang-format"), CLANG_FORMAT_FALLBACK):
+                     CLANG_FORMAT_FALLBACK, shutil.which("clang-format")):
             if cand and (shutil.which(cand) or os.path.isfile(cand)):
                 self.exe = cand
                 break
