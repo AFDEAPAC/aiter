@@ -154,22 +154,36 @@ def ragged_shapes():
 # covered is those emit sites, not the shape grid again -- phase_a and phase_b
 # never touch the output and are not instantiated on it.
 #
-#   phase_small_n_topk          -> the small_n rows
-#   phase_c_select_waveseg      -> the prefill rows (STATIC_CAP both ways)
-#   phase_c_select_contig       -> the coop rows (small M, very large N)
-#   exact_row_select            -> reached via the adversarial distribution,
-#                                  which overflows the candidate area
-#   emit_identity_row / pad     -> the ragged prefix-0 rows
+#   phase_small_n_topk                  -> the small_n rows
+#   phase_c_select_waveseg<STATIC_CAP>  -> BOTH ways: true when cap <=
+#       PHASE_C_CAP, false when the candidate area needs dynamic LDS. The
+#       second one is only reachable at cap > 4096 with coop_g == 1, which on
+#       this part means M >= 256 at N in {524288, 1048576} -- no other point
+#       here reaches it, so without an explicit shape that instantiation was
+#       never run with values on.
+#   phase_c_select_contig               -> the coop rows, uniform AND ragged.
+#       Every other ragged point derives coop_g == 1, so ragged+coop+values
+#       needed its own shape too.
+#   exact_row_select                    -> reached via the adversarial
+#       distribution, which overflows the candidate area
+#   emit_identity_row / pad_topk_tail   -> the ragged prefix-0 rows
+#
+# phase_d_fallback<*, true> is deliberately NOT covered: it is reachable only
+# from `--pipeline direct`, which the gate does not run with values, and the
+# value logic inside it is exact_row_select, which the Phase C fallback covers.
 # ---------------------------------------------------------------------------
 VALUES = [
     (256, 4096, 2048, None),        # small_n, uniform
-    (256, 131072, 2048, None),      # prefill waveseg, cap <= PHASE_C_CAP
-    (8, 524288, 2048, None),        # coop -> phase_c_select_contig
+    (256, 131072, 2048, None),      # prefill waveseg, STATIC_CAP=true
+    (256, 524288, 2048, None),      # prefill waveseg, STATIC_CAP=false (cap 8192)
+    (8, 524288, 2048, None),        # coop -> phase_c_select_contig, uniform
     (1024, 1024, 2048, 0),          # ragged, k > pitch, all identity
     (256, 2048, 2048, 0),           # ragged identity + pad tail
     (4096, 512, 2048, 0),           # ragged, M > pitch clamp
     (256, 131328, 2048, 131072),    # ragged sampler, non-pow2 width
     (1024, 132096, 1024, 131072),   # ragged sampler, multi-K
+    (256, 1048576, 2048, 131072),   # ragged, STATIC_CAP=false
+    (8, 524288, 2048, 131072),      # ragged + coop -> phase_c_select_contig
 ]
 
 

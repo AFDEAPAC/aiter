@@ -580,3 +580,19 @@ an identity row down the candidate path and order it differently to aiter.
 `create_row_boundaries` cannot hit this because it sizes the matrix at
 `max(row_ends)`. A harness bug, not a kernel bug -- but it presents as an
 illegal access inside the kernel, so check the generator first.
+
+### a template parameter creates a separate instantiation per value, so the gate must cover each one
+`WRITE_VALUES` is a compile-time flag on the four OUTPUT kernels only
+(phase_a/phase_b never touch the output). The uniform gate at 8 values shapes
+exercised `phase_small_n_topk`, `phase_c_select_waveseg<STATIC_CAP=true>`,
+`phase_c_select_contig`, and `exact_row_select` -- but NOT
+`phase_c_select_waveseg<STATIC_CAP=false>` (only reachable at cap > 4096 with
+coop_g == 1, i.e. M >= 256 at N in {524288, 1048576}) nor
+`phase_c_select_contig` on the ragged path (every other ragged point derives
+coop_g == 1). A green gate on the 8-shape set therefore said nothing about
+those two instantiations with values on.
+
+Fix: add three explicit shapes to `bench/grid.py` `VALUES` -- (256, 524288),
+(256, 1048576, prefix=131072), (8, 524288, prefix=131072) -- and re-run
+verify_grid; 2130/2130 green. Same lesson as the unused-kernarg trap: a template
+makes the body free, not the obligation to test every instantiation that ships.
