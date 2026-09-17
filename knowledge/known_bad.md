@@ -823,6 +823,46 @@ measurement and can decay -- this repo has recorded one contention event writing
 a bogus 78.30 us into a baseline -- but a broken comparison looks exactly the
 same and is far cheaper to rule out.
 
+### SHIPPED (v5 Stage 6): the S rule is regional, and its own search was broken
+The v3-era note said rule 1 "wins 5-7.5% at M <= 8 but regresses the anchor by
++3.9% ... for an overall geomean of just -0.91%", and concluded FALSIFIED. Two
+things were wrong with that conclusion.
+
+**The region is bigger than M <= 8.** Re-measured on g_22, rule 1 against rule 0:
+M=1 -5.8/-6.9/-6.1%, M=2 -3.0/-7.7/-6.2%, M=4 -1.2/-7.2/-5.9%,
+M=8 -1.6/-7.7/-7.7%, M=16 -1.5/-10.8/-6.8%, M=32 -2.8/-9.5/-4.0% at
+N=131072/262144/524288. M=64 turns: it wins at two of the three N and loses
+**+17.2%** at the middle one, so the boundary is M <= 32. The anchor measures
++1.7% under rule 1, not +3.9%, and keeps rule 0 either way.
+
+**Rule 1's own search had the Stage 3 bug.** It stepped `S *= 2`, so it only ever
+considered powers of two, and a non-pow2 N has no exact stride at those -- the
+loop ran to SAMPLE_S_MAX and rule 1 asked for MORE sampling than rule 0, the
+opposite of its purpose. At M=1 that cost +21.5% at N=65532 (4160 -> 16384),
++13.2% at N=131068 (8256 -> 16384) and +8.1% at N=32832 (4608 -> 8192). Stage 3
+fixed exactly this in the repair path and left this search behind. Stepping by
+SAMPLE_CHUNK_ELEMS instead zeroes all three and finds wins the doubling form
+could not reach at all: N=524288 16384 -> 5440 (-5.0%), N=1048572 16384 -> 10816
+(-4.6%).
+
+Result: outer per-cell **-1.71% with 130 cells improved and 0 regressed**, the
+largest single move of the v5 run. And fallback pressure went DOWN where the
+rule changed, not up: `under_K > 0` lines at M <= 32 fell from 37 to 6, because
+a smaller S comes with a larger `auto_margin` and so a wider candidate window.
+
+### THIRD instance this run: a table fitted on a subset of the domain it serves
+Stage 4 picked a coop_g cell from the argmin at the one N it was measured at, and
+that cell was wrong by 12.6% at another N in the same bucket. Stage 4's
+tie-breaker did it again one level down. Stage 6 then fitted the S-rule REGION on
+three pow2 N and shipped +21.9% on a non-pow2 N inside it.
+
+Same error three times, each time one level up: a cell fitted on one N, a
+tie-break checked at one N, a region fitted on one class of N. The rule that
+catches all three: **whatever range a decision serves, measure at both edges of
+that range before believing the middle.** For a table cell that means >= 2 N per
+bucket; for a region it means the non-pow2 N as well as the pow2 ones; for a
+tie-break it means the same worst-case test as the selection it is overriding.
+
 ### SHIPPED (v5 Stage 4): kCoopLog2G at half-octave N, fitted minimax not argmin
 Two separate things, and the second one is the transferable part.
 
