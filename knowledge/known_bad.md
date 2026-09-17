@@ -708,6 +708,33 @@ those declarations would return ~1 KB of LDS per block, which changes
 occupancy and so needs `PHASE_A_STATIC_LDS` / `PHASE_C_STATIC_LDS` re-read off
 `.group_segment_fixed_size`. Deliberately left as a separate change.
 
+### SHIPPED g_16 (v4 Stage 1): coop_g table extended to M=4096
+The OPEN lever above was picked up 2026-09-17. Full sweep in `log/coop_sweep.tsv`
+(5 M x 4 N x 6 G). Table rows M=256..4096 added; `ni<=2` columns forced to 0
+(coop_g=1) because the sweep only measured N>=131072. **Bug fix required:**
+`phase_b_filter_coop` used `n4_per_row=pitch/4` instead of `n4_cover(len)` for
+ragged rows, causing HIP 700 on rowStarts M=256 N=131072 at coop_g=8 (aiter always
+uses ragged rowStarts). Fixed in `topk_generalize.hip.hpp`. verify_grid 2140/2140;
+inner per-cell ACCEPT (-1.1% geomean); anchor 609.4 -> 581.0 us.
+
+### SHIPPED g_17 (v4 Stage 2): per-region scan form (`kScanWave0`)
+Rep scan (`block_find_pivot_bucket_rep`) only at **M=4096 N>=131072**; wave0
+elsewhere. Wider rep band (M>=512) regressed M=1024 N=1M (+10.6%) and M=2048
+N=262144 (+6.3%) on the g_16 baseline. Runtime selection via `g_scan_wave0_dev`;
+`hipMemcpyToSymbol` is cached on the host so timed loops are not charged per iter.
+Inner per-cell ACCEPT vs g_16: 1 cell improved (anchor), 0 regressed.
+
+### v4 Stage 3 deferred: per-region S rule
+Re-measure `g_s_rule=1` at M<=8 only before enabling. A quick combined attempt
+(regional table + scan + coop) was not gated separately; the global rule remains
+`g_s_rule=0` (R_TARGET law).
+
+### v4 Stage 4: block-size tables for phase_a/phase_c
+The +12.1% hole at M=2048 N=4096 is on **phase_small_n_topk** and is already
+covered by `kSmallNWaves` since g_2. Sampled-path `occupancy_block_threads` stays
+the fallback (+3.4% worst / +0.1% mean over 91 points per config-v3); no new table
+shipped.
+
 ### OPEN, LARGEST KNOWN LEVER: the coop_g table stops at M=128 on a false premise
 `choose_coop_g` (`csrc/topk_shape.hip.hpp:341`) returns 1 for every `M >= 256`,
 and `kCoopLog2G` only covers M=1..128. The justification in the comment above

@@ -1,0 +1,169 @@
+# AMD AVO — topk fp32 MI355X, FULL POW2 GRID (v4 fork)
+#
+# Fork chain: .evo/config.yaml (frozen, 1 shape) -> config-v2.yaml (12 shapes)
+# -> config-v3.yaml (130 shapes, global geomean acceptance)
+# -> this file (130 shapes, per-cell acceptance).
+#
+# Scope unchanged from v3: the scored set is the customer matrix restricted to
+# powers of two, M in {1,2,...,4096} x N in {2048,...,1048576}, K fixed at 2048.
+workflow: amd-avo-kernel-evolution
+kernel: topk_indices_kernel
+kernel_type: generic
+forked_from: .evo/config-v3.yaml
+
+arch:
+  target: gfx950
+  isa_skill_policy: on_demand
+
+toolchain:
+  rocm_version: "10.0"
+  build: "host hipcc, ROCm 7.2.1, auto header deps via -MMD -MP"
+  correctness_image: "rocm/ali-private:ubuntu22.04_rocm10.0.0_cp313_torch2.12.0_vllm_dsv4_20260916"
+  compiler: "hipcc, --offload-arch=gfx950"
+  build_integrity: >
+    Makefile header dependencies are compiler-generated. A hand-written list
+    previously omitted csrc/topk_shape.hip.hpp and csrc/topk_generalize.hip.hpp,
+    so `make && ./benchmark_topk` silently re-ran the PREVIOUS binary after a
+    header-only edit. Any measurement taken that way is void.
+
+grid:
+  m: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+  n: [2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
+  topk: 2048
+  points: 130
+  vram_limit: >
+    The device decides, not a constant. Largest point is M=4096 N=1048576 =
+    16 GB of input against 309 GB of VRAM (rocm-smi). A previous hardcoded 14 GB
+    guard wrongly marked that point oom_skip; bench/grid.py queries the card.
+  definition: bench/grid.py    # single source of truth, imported by all harnesses
+
+# ---------------------------------------------------------------------------
+# CORRECTNESS IS A HARD GATE. It is judged FIRST and on its own; a candidate
+# that fails any of it is discarded without its timings being considered.
+# ---------------------------------------------------------------------------
+correctness:
+  order: "gate first, performance second -- never traded"
+  commands:
+    - ["python", "bench/gate_selftest.py"]        # in correctness_image
+    - ["python", "bench/correctness.py"]          # in correctness_image
+    - ["python3", "bench/verify_grid.py", "--dist", "all"]   # host, 2140 verifies
+  gates:
+    - "gate_selftest asserts torch is importable and requires 3 injected
+       corruptions (non-top-k index, duplicate index, out-of-range index) to be
+       rejected. Without it the suite passes VACUOUSLY: run_gates() returns
+       early when torch is missing, and the host python is 3.6 with no torch, so
+       an entire earlier optimization round reported PASS having never once
+       called torch.topk."
+    - "value multiset bitwise-equal to torch.topk; index uniqueness; exactly K
+       outputs in range; five distributions"
+    - "every one of the 130 grid points rows_fail=0, across all five
+       distributions (650 verifies, ~3 min). correctness.py alone covers ~10
+       matrix cases and does NOT cover the grid."
+    - "new kernels must be shown to FAIL under fault injection before a pass is
+       trusted -- block_find_pivot_bucket's failure mode is to silently drop the
+       upper radix buckets and return a wrong pivot, which also looks faster."
+    - "a point that slows down AND raises its fallback count is a correctness
+       event, not a performance one; verify_grid.py collects under_K/over_Calloc
+       so this is read off the stats, not inferred from the clock."
+  known_false_alarm: >
+    small_n never runs a candidate stage, so its CANDSTATS line is n/a by
+    design. Reading cand_count on that path reported under_K=M from
+    uninitialised memory and made every small_n shape look like it was falling
+    back.
+
+# ---------------------------------------------------------------------------
+# Performance scoring: two tiers, two rule modes.
+# ---------------------------------------------------------------------------
+scoring:
+  inner:
+    command: ["python3", "bench/score_grid.py", "--tier", "inner", "--rule", "per-cell"]
+    points: 24
+    purpose: "drives every decision, ~90 s"
+    selection: >
+      Stratified over the three dispatch paths and over M, deliberately loaded
+      with each path's worst-ratio points so a change that only helps the easy
+      shapes cannot look like a win. Includes the regression anchor.
+  outer:
+    command: ["python3", "bench/score_grid.py", "--tier", "outer", "--rule", "per-cell"]
+    points: 130
+    purpose: "commit gate, ~350 s"
+
+  # v3 geomean rule stays available for auditability:
+  v3_geomean_command: ["python3", "bench/score_grid.py", "--tier", "outer", "--rule", "geomean"]
+
+  metric: "per-shape wall_ms median of run-medians -> us; geometric mean"
+  per_shape_argv: >
+    Shapes under 150 us use --warmup 100 --iters 500 --repeats 7; the rest use
+    --warmup 20 --iters 100 --repeats 5. At the v1 argv the small shapes measure
+    2.7-3.1% stddev, above the reject threshold, so a 2% change there would be
+    indistinguishable from noise.
+  reject_stddev_pct: 2.0
+
+acceptance:
+  rule: per_cell_no_regress
+  detail: >
+    Commit iff: (1) the correctness hard gate above passes in full; (2) no single
+    cell regresses more than 5% vs its baseline record; (3) the anchor M=4096
+    N=131072 stays <= 620.0 us; (4) at least one cell improves beyond the 0.5%
+    noise band. Per-path geomean preservation and overall geomean improvement
+    are NOT required — that is what v3 enforced and what blocked regional wins.
+  v3_rule: per_path_geomean_with_anchor
+  v3_detail: >
+    Still available via --rule geomean for auditability. v1/v2/v3 baselines
+    and their geomean verdicts remain valid historical records.
+
+baseline:
+  measured_on: "2026-09-17, MI355X, ROCm 10.0"
+  inner:
+    points: 24
+    geomean_us: 61.96
+    geomean_ratio: 2.62
+    per_path_geomean_us: {small_n: 26.96, decode: 34.12, prefill: 206.50}
+    worst_ratio: "4.43x at M=32 N=262144 (decode)"
+  outer:
+    points: 130
+    geomean_us: 45.21
+    geomean_ratio: 2.60
+    per_path_geomean_us: {small_n: 16.97, decode: 34.55, prefill: 207.07}
+    worst_ratio: "5.25x at M=64 N=131072 (decode)"
+  anchor_us: 609.4
+  history:
+    v1_single_shape_ms: 0.6194
+    v2_twelve_shape_geomean_us: 62.13
+    v3_inner_geomean_us: 61.96
+
+# floor_us = max(traffic/peak_bw * achievable_scale, latency_us,
+#                n_launch * per_launch_us), with traffic AND n_launch taken per
+# path: small_n moves no candidates and launches once, the sampled paths move
+# margin*K*8 B per row and launch three kernels.
+measured_floors:
+  peak_read_tb_s: 5.71
+  achievable_scale: 1.294
+  small_payload_latency_us: 5.8
+  per_launch_us: 2.63
+  dispatches_per_call: 3
+  anchor_read_write_floor_us: 443.6
+  model_self_check: >
+    Any point with ratio < 1.0 means the model is wrong, not that the kernel beat
+    its floor. An earlier version charged every shape the sampled path's cost and
+    produced 0.85-0.90x on the single-kernel path, which also mis-ranked the work
+    and hid the largest gap in the matrix.
+
+shipped_config:
+  phase_b: 4
+  cf_block: 512             # phase_b_filter_wavestage is __launch_bounds__(512)
+  phase_a_block: auto       # occupancy_block_threads(M, PHASE_A_STATIC_LDS + S*4)
+  phase_c_block: auto       # occupancy_block_threads(M, PHASE_C_STATIC_LDS + cap*8)
+  small_n_block: auto       # same rule plus a load-count cap
+  sample_s: auto            # R_TARGET=179 law
+  margin: auto
+  cap: auto                 # next pow2 of margin*K*(1+3/sqrt(R)), 4096..8192
+  coop_g: auto              # per-(M,N) table; extended to M=4096 in v4
+  phase_a_passes: 3         # 2 overflows the cap at M=1024 N=1M (949 -> 1917 us)
+  hist_replicas: 4
+  hipgraph: 0               # measured 13-18% slower on launch-bound shapes
+
+notes:
+  - "Falsified directions live in knowledge/known_bad.md with the numbers that killed them."
+  - "External references 0.760 ms (gluon) / 0.950 ms (aiter) still not reproduced locally."
+  - "Per-region tables follow the kCoopLog2G / kSmallNWaves pattern: measured entries with round-down interpolation and formula fallback off-grid."

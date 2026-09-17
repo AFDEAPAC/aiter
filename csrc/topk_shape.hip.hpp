@@ -193,6 +193,7 @@ struct ShapeParams {
   int cap;
   int coop_g;
   bool keys_only_c;
+  bool scan_wave0;  // true: block_find_pivot_bucket_wave0; false: _rep
   bool geom_ok;
 };
 
@@ -291,9 +292,8 @@ static inline int snap_coop_g(int g, int max_g) {
   return std::max(1, std::min(p, max_g));
 }
 
-// Measured best log2(coop_g) over the customer pow2 grid: a full sweep of
-// 8 M values x 7 N values x up to 9 G values at warmup 30 / iters 150 /
-// repeats 3 (2026-09-17, MI355X).
+// Measured best log2(coop_g) over the customer pow2 grid: full sweeps at
+// M=1..128 (2026-09-17) and M=256..4096 x N=131072..1048576 (v4, 2026-09-17).
 //
 // This is a table and not a formula on purpose. The best G falls roughly as
 // M^-0.3 and saturates differently per N, which no simple closed form
@@ -302,22 +302,28 @@ static inline int snap_coop_g(int g, int max_g) {
 // +77% -- measured at M=128 N=1048576, where it picked G=2 for 225 us against
 // 127 us at G=16.
 //
-// Rows are log2(M) for M = 1..128; M >= 256 has enough rows to fill the GPU
-// without splitting any of them. Columns are log2(N) for N = 16384..1048576;
-// N <= 8192 takes the small_n path and never reaches here.
-constexpr int COOP_TAB_M = 8;
+// Rows are log2(M) for M = 1..4096. Columns are log2(N) for N = 16384..1048576;
+// N <= 8192 takes the small_n path and never reaches here. For M >= 256 the
+// ni <= 2 columns (N <= 65536) are 0 (coop_g=1): the v4 sweep only measured
+// N >= 131072 and M=256 N=32768 has no win at any G.
+constexpr int COOP_TAB_M = 13;
 constexpr int COOP_TAB_N = 7;
 constexpr int COOP_N_LOG2_BASE = 14;
 
 static const signed char kCoopLog2G[COOP_TAB_M][COOP_TAB_N] = {
-    /* M=1   */ {2, 4, 5, 6, 6, 6, 7},
-    /* M=2   */ {2, 4, 4, 5, 6, 6, 6},
-    /* M=4   */ {3, 4, 4, 5, 5, 5, 6},
-    /* M=8   */ {3, 3, 4, 4, 5, 5, 6},
-    /* M=16  */ {3, 3, 3, 4, 5, 5, 5},
-    /* M=32  */ {3, 3, 3, 3, 4, 4, 4},
-    /* M=64  */ {3, 3, 3, 3, 3, 4, 4},
-    /* M=128 */ {0, 3, 3, 3, 3, 3, 4},
+    /* M=1    */ {2, 4, 5, 6, 6, 6, 7},
+    /* M=2    */ {2, 4, 4, 5, 6, 6, 6},
+    /* M=4    */ {3, 4, 4, 5, 5, 5, 6},
+    /* M=8    */ {3, 3, 4, 4, 5, 5, 6},
+    /* M=16   */ {3, 3, 3, 4, 5, 5, 5},
+    /* M=32   */ {3, 3, 3, 3, 4, 4, 4},
+    /* M=64   */ {3, 3, 3, 3, 3, 4, 4},
+    /* M=128  */ {0, 3, 3, 3, 3, 3, 4},
+    /* M=256  */ {0, 0, 0, 3, 3, 3, 4},
+    /* M=512  */ {0, 0, 0, 1, 2, 3, 4},
+    /* M=1024 */ {0, 0, 0, 1, 3, 3, 4},
+    /* M=2048 */ {0, 0, 0, 3, 3, 3, 4},
+    /* M=4096 */ {0, 0, 0, 3, 3, 3, 4},
 };
 
 // Off-grid fallback, fitted to the same sweep: worst +27%, mean +6.1%.
@@ -327,7 +333,7 @@ constexpr int COOP_MIN_VEC4_PER_BLOCK = 256;
 // Shapes between grid points round DOWN on both axes, which keeps the value on
 // the conservative side of the measured optimum.
 static inline int coop_g_from_table(int M, int N, int max_g) {
-  if (M < 1 || M > 128 || N < (1 << COOP_N_LOG2_BASE)) return -1;
+  if (M < 1 || M > 4096 || N < (1 << COOP_N_LOG2_BASE)) return -1;
   const int mi = ilog2_floor(M);
   int ni = ilog2_floor(N) - COOP_N_LOG2_BASE;
   if (mi >= COOP_TAB_M || ni < 0) return -1;
@@ -339,7 +345,6 @@ static inline int choose_coop_g(int M, int N, int n4_per_row, int block, int ove
   const int max_g = std::max(1, n4_per_row / block);
   if (override_g > 0) return snap_coop_g(override_g, max_g);
   if (N <= N_LDS_MAX) return 1;
-  if (M >= 256) return 1;
   const int t = coop_g_from_table(M, N, max_g);
   if (t > 0) return t;
   const int by_target = (M <= COOP_TARGET_BLOCKS) ? (COOP_TARGET_BLOCKS / M) : 1;
@@ -347,9 +352,46 @@ static inline int choose_coop_g(int M, int N, int n4_per_row, int block, int ove
   return snap_coop_g(std::min(by_target, by_work), max_g);
 }
 
+// Per-region radix scan form. Measured trade (g_14 rep vs g_15 wave0):
+// rep wins the anchor band (M>=512 N>=131072, -0.35% at M=4096 N=131072);
+// wave0 wins small_n (-2.2%) and decode (-1.3%). Unmeasured cells default wave0.
+constexpr int SCAN_TAB_M = 13;
+constexpr int SCAN_TAB_N = 7;
+
+static const signed char kScanWave0[SCAN_TAB_M][SCAN_TAB_N] = {
+    /* M=1    */ {1, 1, 1, 1, 1, 1, 1},
+    /* M=2    */ {1, 1, 1, 1, 1, 1, 1},
+    /* M=4    */ {1, 1, 1, 1, 1, 1, 1},
+    /* M=8    */ {1, 1, 1, 1, 1, 1, 1},
+    /* M=16   */ {1, 1, 1, 1, 1, 1, 1},
+    /* M=32   */ {1, 1, 1, 1, 1, 1, 1},
+    /* M=64   */ {1, 1, 1, 1, 1, 1, 1},
+    /* M=128  */ {1, 1, 1, 1, 1, 1, 1},
+    /* M=256  */ {1, 1, 1, 1, 1, 1, 1},
+    /* M=512  */ {1, 1, 1, 1, 1, 1, 1},
+    /* M=1024 */ {1, 1, 1, 1, 1, 1, 1},
+    /* M=2048 */ {1, 1, 1, 1, 1, 1, 1},
+    /* M=4096 */ {1, 1, 1, 0, 0, 0, 0},
+};
+
+static inline bool scan_wave0_from_table(int M, int N) {
+  if (M < 1 || M > 4096 || N < (1 << COOP_N_LOG2_BASE)) return true;
+  const int mi = ilog2_floor(M);
+  int ni = ilog2_floor(N) - COOP_N_LOG2_BASE;
+  if (mi >= SCAN_TAB_M || ni < 0) return true;
+  if (ni >= SCAN_TAB_N) ni = SCAN_TAB_N - 1;
+  return kScanWave0[mi][ni] != 0;
+}
+
+static inline bool choose_scan_wave0(int M, int N, int override_v) {
+  if (override_v >= 0) return override_v != 0;
+  return scan_wave0_from_table(M, N);
+}
+
 static inline ShapeParams derive_shape_params(int M, int N, int K, float margin_override,
                                               int sample_s_override, int coop_g_override,
-                                              TopkPath path_override) {
+                                              TopkPath path_override,
+                                              int scan_wave0_override = -1) {
   ShapeParams p{};
   p.path = path_override;
   const bool small_n_fits =
@@ -365,6 +407,7 @@ static inline ShapeParams derive_shape_params(int M, int N, int K, float margin_
     p.cap = N;
     p.coop_g = 1;
     p.keys_only_c = false;
+    p.scan_wave0 = true;
     p.geom_ok = (N % FP32_EPT == 0 && K <= N);
     return p;
   }
@@ -417,5 +460,6 @@ static inline ShapeParams derive_shape_params(int M, int N, int K, float margin_
     if (p.path == PATH_DECODE && p.coop_g <= 1) p.coop_g = choose_coop_g(M, N, n4, 512, 64);
     if (p.path == PATH_PREFILL) p.coop_g = 1;
   }
+  p.scan_wave0 = choose_scan_wave0(M, N, scan_wave0_override);
   return p;
 }

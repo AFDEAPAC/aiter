@@ -62,8 +62,39 @@ def summarize(recs):
     }
 
 
+def _anchor_fail(cur):
+    am, an, _ak = grid.ANCHOR
+    anchor = next((r for r in cur if r["m"] == am and r["n"] == an), None)
+    if anchor and anchor["us"] > grid.ANCHOR_LIMIT_US:
+        return ("anchor M=%d N=%d %.2f us over the %.1f us limit"
+                % (am, an, anchor["us"], grid.ANCHOR_LIMIT_US))
+    return None
+
+
+def _per_point_regressions(cur, base):
+    """Return (fails, improved_cells, regressed_cells)."""
+    fails = []
+    improved = []
+    regressed = []
+    bmap = {(r["m"], r["n"]): r for r in base}
+    improve_band = grid.PATH_NOISE_BAND_PCT
+    for r in cur:
+        b = bmap.get((r["m"], r["n"]))
+        if not b:
+            continue
+        d = (r["us"] - b["us"]) / b["us"] * 100
+        if d > grid.POINT_REGRESS_PCT:
+            msg = ("M=%d N=%d %.2f -> %.2f us (+%.1f%%) exceeds the %.0f%% per-point limit"
+                   % (r["m"], r["n"], b["us"], r["us"], d, grid.POINT_REGRESS_PCT))
+            fails.append(msg)
+            regressed.append((r["m"], r["n"], d))
+        elif d < -improve_band:
+            improved.append((r["m"], r["n"], d))
+    return fails, improved, regressed
+
+
 def compare(cur, base):
-    """Apply the performance acceptance rules. Returns (ok, list of reasons)."""
+    """v3 acceptance: per-path geomean + overall geomean improvement."""
     fails = []
     cs, bs = summarize(cur), summarize(base)
 
@@ -83,31 +114,43 @@ def compare(cur, base):
             fails.append("regime %s geomean %.2f -> %.2f us (+%.2f%%), over the %.1f%% band"
                          % (path, bg, cg, (cg - bg) / bg * 100, grid.PATH_NOISE_BAND_PCT))
 
-    # Rule 3: no single point slower than POINT_REGRESS_PCT.
-    bmap = {(r["m"], r["n"]): r for r in base}
-    for r in cur:
-        b = bmap.get((r["m"], r["n"]))
-        if not b:
-            continue
-        d = (r["us"] - b["us"]) / b["us"] * 100
-        if d > grid.POINT_REGRESS_PCT:
-            fails.append("M=%d N=%d %.2f -> %.2f us (+%.1f%%) exceeds the %.0f%% per-point limit"
-                         % (r["m"], r["n"], b["us"], r["us"], d, grid.POINT_REGRESS_PCT))
+    point_fails, _, _ = _per_point_regressions(cur, base)
+    fails.extend(point_fails)
 
-    # Rule 4: the anchor.
-    am, an, ak = grid.ANCHOR
-    anchor = next((r for r in cur if r["m"] == am and r["n"] == an), None)
-    if anchor and anchor["us"] > grid.ANCHOR_LIMIT_US:
-        fails.append("anchor M=%d N=%d %.2f us over the %.1f us limit"
-                     % (am, an, anchor["us"], grid.ANCHOR_LIMIT_US))
+    af = _anchor_fail(cur)
+    if af:
+        fails.append(af)
 
     improved = cs["geomean_us"] < bs["geomean_us"]
     return (not fails and improved), fails, cs, bs
 
 
+def compare_per_cell(cur, base):
+    """v4 acceptance: no cell regresses beyond POINT_REGRESS_PCT, anchor limit,
+    and at least one cell improves beyond the noise band."""
+    fails = []
+    cs, bs = summarize(cur), summarize(base)
+
+    point_fails, improved, _regressed = _per_point_regressions(cur, base)
+    fails.extend(point_fails)
+
+    af = _anchor_fail(cur)
+    if af:
+        fails.append(af)
+
+    if not improved:
+        fails.append("no cell improved beyond the %.1f%% noise band"
+                       % grid.PATH_NOISE_BAND_PCT)
+
+    return (not fails), fails, cs, bs
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tier", choices=("inner", "outer"), default="inner")
+    ap.add_argument("--rule", choices=("geomean", "per-cell"), default="geomean",
+                    help="geomean: v3 per-path + overall geomean (default); "
+                         "per-cell: v4 no-regress + at-least-one-win")
     ap.add_argument("--save-baseline", action="store_true")
     ap.add_argument("--baseline", default=None)
     ap.add_argument("--allow-noisy", action="store_true",
@@ -154,11 +197,18 @@ def main():
 
     if base_path.exists():
         base = json.loads(base_path.read_text())["points"]
-        ok, fails, cs, bs = compare(recs, base)
-        print("\n=== acceptance vs %s ===" % base_path.name)
+        scorer = compare_per_cell if args.rule == "per-cell" else compare
+        ok, fails, cs, bs = scorer(recs, base)
+        print("\n=== acceptance (%s) vs %s ===" % (args.rule, base_path.name))
         print("  geomean %.2f -> %.2f us (%+.2f%%)"
               % (bs["geomean_us"], cs["geomean_us"],
                  (cs["geomean_us"] - bs["geomean_us"]) / bs["geomean_us"] * 100))
+        if args.rule == "per-cell":
+            _, improved, regressed = _per_point_regressions(recs, base)
+            print("  cells improved     %d (beyond %.1f%% band)"
+                  % (len(improved), grid.PATH_NOISE_BAND_PCT))
+            print("  cells regressed    %d (within %.0f%% limit)"
+                  % (len(regressed), grid.POINT_REGRESS_PCT))
         if fails:
             for f in fails:
                 print("  REJECT: %s" % f)
