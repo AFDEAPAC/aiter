@@ -1,0 +1,175 @@
+# AMD AVO — topk fp32 MI355X, POW2 GRID + NON-POW2 N AXIS (v5 fork)
+#
+# Fork chain: .evo/config.yaml (frozen, 1 shape) -> config-v2.yaml (12 shapes)
+# -> config-v3.yaml (130 shapes, global geomean acceptance)
+# -> config-v4.yaml (402 shapes, per-cell acceptance)
+# -> this file (547 shapes: adds a 29-value non-pow2 N axis).
+#
+# Scope change vs v4: M stays on powers of two; N gains 29 off-grid values, each
+# chosen to reach a configuration the pow2 grid cannot express rather than to
+# fill a range. The pow2 N only ever produce S in {4096, 8192, 16384} = 7, 4 and
+# 2 LDS-limited phase_a blocks/CU, so the whole S ladder between them -- and the
+# coop table's within-octave behaviour -- was unmeasured before this fork.
+workflow: amd-avo-kernel-evolution
+kernel: topk_indices_kernel
+kernel_type: generic
+forked_from: .evo/config-v4.yaml
+
+arch:
+  target: gfx950
+  isa_skill_policy: on_demand
+
+toolchain:
+  rocm_version: "10.0"
+  build: "host hipcc, ROCm 7.2.1, auto header deps via -MMD -MP"
+  correctness_image: "rocm/ali-private:ubuntu22.04_rocm10.0.0_cp313_torch2.12.0_vllm_dsv4_20260916"
+  compiler: "hipcc, --offload-arch=gfx950"
+  build_integrity: >
+    Makefile header dependencies are compiler-generated, but that is not
+    sufficient on its own: during the v4 run `make` reported "Nothing to be done
+    for 'all'" right after an edit to csrc/topk_shape.hip.hpp, score_grid timed
+    the PREVIOUS binary, and the result was saved into a baseline. Before
+    trusting any number, check the benchmark_topk mtime against the headers and
+    run `make -n`. Any measurement taken without that check is void.
+
+grid:
+  m: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+  n_pow2: [2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
+  n_nonpow2: [10240, 12288, 20480, 24576, 32832, 49152, 65532, 65792, 73728,
+              81920, 98304, 131068, 163840, 196608, 229376, 262140, 262400,
+              294912, 327680, 393216, 458752, 491520, 524284, 524544, 655360,
+              786432, 917504, 1048572, 1052672]
+  n_nonpow2_m: [1, 64, 256, 1024, 4096]
+  topk: 2048
+  points: 547
+  definition: bench/grid.py    # single source of truth, imported by all harnesses
+  nonpow2_rationale: >
+    midpoint 1.5x (49152, 98304, 196608, 393216, 786432) and the quarter points
+    (163840, 229376, 327680, 458752, 655360, 917504) are the worst case for the
+    ilog2_floor round-down in kCoopLog2G, measured 1.8-4.1% off at M >= 512.
+    73728 and 81920 reach phase_a S classes 4608 / 5120 (6 blocks/CU), which no
+    pow2 N produces. The just-below-a-pow2 set (65532 ... 1048572) is both the
+    round-down cliff and the masked-stride path, which 71.9% of all N in the
+    dispatch range take against 1 of v4's 402 points. 2^k + num_rows (32832,
+    65792, 262400, 524544, 1052672) is aiter's real width pattern and the
+    S-repair inflation class. 10240-24576 straddle the small_n boundary. 294912
+    leaves the 1.4 margin clamp; 491520 flips cap 4096 -> 8192.
+
+# ---------------------------------------------------------------------------
+# CORRECTNESS IS A HARD GATE. Judged FIRST, on its own, and never traded for a
+# performance number. A candidate that fails any of it is discarded without its
+# timings being considered.
+# ---------------------------------------------------------------------------
+correctness:
+  order: "gate first, performance second -- never traded"
+  commands:
+    - ["python", "bench/gate_selftest.py"]        # in correctness_image
+    - ["python", "bench/correctness.py"]          # in correctness_image
+    - ["python3", "bench/verify_grid.py", "--dist", "all"]   # host, ~2865 verifies
+    - ["python", "bench/aiter_contract_audit.py"] # in correctness_image, vs aiter
+  gates:
+    - "PROVE THE GATE CAN GO RED ON THE PATH BEING CHANGED, BEFORE TRUSTING ANY
+       GREEN. --inject-fault 1 (index) and 2 (value, needs --values 1) on a shape
+       that actually takes the new path. g_11 shipped a 3-pass Phase C that
+       measured -1% and was green on `--dist adversarial --inner` while being
+       WRONG on gaussian and inf."
+    - "gate_selftest asserts torch is importable and requires 3 injected
+       corruptions to be rejected. Without it the suite passes VACUOUSLY:
+       run_gates() returns early when torch is missing, and an entire earlier
+       optimization round reported PASS having never called torch.topk."
+    - "value multiset bitwise-equal to torch.topk; index uniqueness; exactly K
+       outputs in range; five distributions"
+    - "every one of the 547 grid points rows_fail=0 across all five
+       distributions. correctness.py alone covers ~10 matrix cases and does NOT
+       cover the grid."
+    - "under_K / over_Calloc are read off the CANDSTATS line, never inferred from
+       the clock. A point that slows down AND raises its fallback count is a
+       correctness event, not a performance one."
+    - "the differential audit against aiter (bench/aiter_contract_audit.py) is
+       part of the gate, not a one-off: this op is dispatched in place of
+       top_k_per_row_prefill, so a term aiter honours and AVO does not is a
+       functional bug. See knowledge/aiter_contract_audit.md."
+  known_false_alarm: >
+    small_n never runs a candidate stage, so its CANDSTATS line is n/a by
+    design. Reading cand_count on that path reported under_K=M from
+    uninitialised memory and made every small_n shape look like it was falling
+    back.
+  known_open_defects:
+    - "rowStarts[r] % 4 != 0 faults (HIP 700) on the sampled path. aiter serves
+       it. Fix is v5 Stage 2; reproduce with bench/aiter_contract_audit.py."
+    - "stride1 != 1 aborts via AITER_CHECK where aiter ignores the argument, and
+       topk_avo_supports cannot see stride1 so Python cannot route around it."
+
+# ---------------------------------------------------------------------------
+# Performance scoring: two tiers, two rule modes.
+# ---------------------------------------------------------------------------
+scoring:
+  inner:
+    command: ["python3", "bench/score_grid.py", "--tier", "inner", "--rule", "per-cell"]
+    points: 28
+    purpose: "drives every decision, ~25 s"
+    selection: >
+      Stratified over the three dispatch paths and over M, loaded with each
+      path's worst-ratio points, plus the regression anchor. v5 adds four
+      non-pow2 cells, one per known hole (4096x32832 the S-repair class,
+      256x98304 the coop hole, 1024x196608 and 64x196608 the phase_a S class),
+      so the tier that drives every decision cannot be blind to this axis.
+  outer:
+    command: ["python3", "bench/score_grid.py", "--tier", "outer", "--rule", "per-cell"]
+    points: 547
+    purpose: "commit gate, ~7 min"
+
+  v3_geomean_command: ["python3", "bench/score_grid.py", "--tier", "outer", "--rule", "geomean"]
+
+  metric: "per-shape wall_ms median of run-medians -> us; geometric mean"
+  per_shape_argv: >
+    Shapes under 150 us use --warmup 100 --iters 500 --repeats 7; the rest use
+    --warmup 20 --iters 100 --repeats 5 (9 for the outer tier's large shapes).
+  reject_stddev_pct: 2.0
+
+acceptance:
+  rule: per_cell_no_regress
+  detail: >
+    Commit iff: (1) the correctness hard gate above passes in full; (2) no single
+    cell regresses more than 5% vs its baseline record; (3) the anchor M=4096
+    N=131072 stays <= 620.0 us; (4) at least one cell improves beyond the 0.5%
+    noise band. Per-path geomean preservation and overall geomean improvement are
+    NOT required -- that is what v3 enforced and what blocked regional wins.
+  baseline_decay_warning: >
+    Before believing a per-point REJECT on a path you can show is untouched:
+    build the old commit into a separate directory and interleave the two
+    binaries in ONE session. Nine v4 cells scored +5.9% to +13.0% that way and
+    were baseline drift, identical on both binaries.
+
+measured_floors:
+  peak_read_tb_s: 5.71
+  achievable_scale: 1.294
+  small_payload_latency_us: 5.8
+  per_launch_us: 2.63
+  dispatches_per_call: 3
+  anchor_read_write_floor_us: 443.6
+  model_self_check: >
+    Any point with ratio < 1.0 means the model is wrong, not that the kernel beat
+    its floor. The floor interpolates in log2(N) from three anchors and is stated
+    as +/-3%, so a non-pow2 N gets an interpolated floor and its ratio column is
+    a ranking aid, not a measurement.
+
+shipped_config:
+  phase_b: 4
+  cf_block: 512
+  phase_a_block: auto       # occupancy_block_threads(M, PHASE_A_STATIC_LDS + S*4)
+  phase_c_block: auto
+  small_n_block: auto
+  sample_s: auto            # R_TARGET=179 law, then the exact-stride repair
+  margin: auto
+  cap: auto
+  coop_g: auto              # per-(M,N) table, extended to M=4096 in v4 (g_16)
+  scan_form: wave0          # compile-time; a per-region table was FALSIFIED (g_17/g_18)
+  phase_a_passes: 3
+  hist_replicas: 4
+  hipgraph: 0
+
+notes:
+  - "Falsified directions live in knowledge/known_bad.md with the numbers that killed them."
+  - "The aiter contract audit lives in knowledge/aiter_contract_audit.md."
+  - "Per-region tables follow the kCoopLog2G / kSmallNWaves pattern: measured entries, round-down interpolation, formula fallback off-grid."

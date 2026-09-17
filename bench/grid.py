@@ -29,6 +29,36 @@ NS = [2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
 AITER_PREFIX = 131072
 AITER_M = [64, 256, 1024, 4096]
 
+# ---------------------------------------------------------------------------
+# Non-pow2 N axis (v5). M stays on powers of two; only N moves off the grid.
+#
+# Not a range fill: every value is here to reach a configuration the pow2 grid
+# cannot express. The pow2 N only ever produce S in {4096, 8192, 16384}, which
+# is 7, 4 and 2 LDS-limited phase_a blocks/CU; the S ladder in between, and the
+# coop table's within-octave behaviour, are reachable only from here. 71.9% of
+# all N in the aiter dispatch range take the masked (non-exact) sampling stride,
+# against 1 of the 402 v4 points (131328).
+#
+#   midpoint 1.5x     worst case for the ilog2_floor round-down in both tables
+#   quarter points    where the measured coop optimum moves inside an octave
+#   S class 6         73728 -> S=4608, 81920 -> S=5120: unmeasured occupancy
+#   just below a pow2 round-down cliff; all of these take the masked stride
+#   2^k + num_rows    aiter's real widths, and the S-repair inflation class
+#   small_n boundary  the N_LDS_MAX / N_LDS_MAX_SMALL_M crossover region
+#   margin / cap edge 294912 leaves the 1.4 margin clamp, 491520 flips cap 4096->8192
+# ---------------------------------------------------------------------------
+NPOW2_NS = [
+    49152, 98304, 196608, 393216, 786432,                    # midpoint 1.5x
+    163840, 229376, 327680, 458752, 655360, 917504,          # quarter points
+    73728, 81920,                                            # phase_a S class 6
+    65532, 131068, 262140, 524284, 1048572,                  # just below a pow2
+    32832, 65792, 262400, 524544, 1052672,                   # 2^k + num_rows
+    10240, 12288, 20480, 24576,                              # small_n boundary
+    294912, 491520,                                          # margin / cap edge
+]
+# 131328 / 132096 / 135168 already arrive via AITER_PREFIX + AITER_M.
+NPOW2_MS = [1, 64, 256, 1024, 4096]
+
 # Largest shape is M=4096 N=1048576 = 16 GB of input against 309 GB of VRAM
 # (measured with rocm-smi). An earlier 14 GB guard was arbitrary and wrongly
 # marked that point oom_skip; the real limit is the device, so query it.
@@ -89,6 +119,9 @@ def all_shapes():
         n = AITER_PREFIX + m
         for k in TOPK_VALUES:
             add(m, n, k)
+    for n in NPOW2_NS:
+        for m in NPOW2_MS:
+            add(m, n, TOPK)
     return out
 
 
@@ -108,6 +141,13 @@ INNER = [
     # prefill (large M)
     (4096, 131072), (512, 16384), (1024, 32768), (2048, 65536),
     (4096, 16384), (4096, 262144), (1024, 1048576), (2048, 262144),
+    # non-pow2 N (v5). One cell per known hole, so the inner tier -- which
+    # drives every decision -- cannot be blind to the axis the run is about:
+    #   4096 x 32832   the S-repair inflation class, measured +29%
+    #    256 x 98304   the coop_g hole in the ni <= 2 columns, measured 1.28x
+    #   1024 x 196608  S=12288, the phase_a occupancy class only non-pow2 N reach
+    #     64 x 196608  the same N in the decode regime
+    (4096, 32832), (256, 98304), (1024, 196608), (64, 196608),
 ]
 
 # ---------------------------------------------------------------------------
