@@ -823,6 +823,36 @@ measurement and can decay -- this repo has recorded one contention event writing
 a bogus 78.30 us into a baseline -- but a broken comparison looks exactly the
 same and is far cheaper to rule out.
 
+### SHIPPED (v5 Stage 5): occupancy_block_threads truncated twice, so it undershot
+`occupancy_block_threads` computed `TARGET_WAVES_PER_CU / min(lds_blocks, g)`
+with integer division and then rounded the result DOWN to a power of two. Two
+truncations in a row, and they cost up to 40% of the target wave count whenever
+the quotient was not already a power of two -- which phase_a hits as soon as S
+leaves {4096, 8192, 16384}, i.e. only at non-pow2 N. Measured best block against
+what the old form picked, M=1024..4096:
+
+| LDS-limited blocks/CU | S range | old pick | measured best | gap |
+|---|---|---|---|---|
+| 7 | 4096..4544 | 256 | 512 | -0.0% .. -2.2% |
+| 6 | 4608..5504 | 256 | 512 | -0.1% .. -1.1% |
+| 5 | 5568..6848 | 256 | 512 | +0.1% .. -3.0% |
+| 4 | 6912..8896 | 512 | 512 | agree |
+| 3 | 8960..12352 | 512 | 1024 | -0.3% .. -3.0% |
+| 2 | 12416+ | 1024 | 1024 | agree |
+
+Ceiling division plus rounding UP to a power of two reproduces the measured
+optimum in every class: all 14 shapes re-checked land within +/-0.3% of their own
+best. Both halves are needed -- with truncating division, `32/7` becomes 4, which
+is already a power of two, so rounding up afterwards cannot recover it (+2.2% at
+M=2048 N=49152).
+
+**Shipped as a formula fix, not the per-class table the plan called for.** The
+table would have matched these six classes just as well and then been silent
+about every S nobody measured; one systematic flaw explaining all four gaps is
+the cheaper and more general answer. Gate: 2885/2885, inner -0.26%, outer -0.05%
+with 38 cells improved and 0 regressed -- a small geomean move because the wins
+sit on the non-pow2 N and dilute across 547 points.
+
 ### SHIPPED (v5 Stage 6): the S rule is regional, and its own search was broken
 The v3-era note said rule 1 "wins 5-7.5% at M <= 8 but regresses the anchor by
 +3.9% ... for an overall geomean of just -0.91%", and concluded FALSIFIED. Two
