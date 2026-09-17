@@ -57,8 +57,10 @@ static inline WsLayout ws_layout(int M, int cap) {
 // library that write is a bug: the next call on a different shape would be
 // handed the previous shape's S as an override and derive different parameters,
 // making the result depend on call order.
+// Every call here is ragged, so the geometry is sized by geometry_k_ragged()
+// (topk_shape.hip.hpp) rather than the caller's k.
 static inline ShapeParams params_for(int M, int N, int K) {
-  return derive_shape_params(M, N, K, 0.0f, 0, 0, PATH_AUTO);
+  return derive_shape_params(M, N, geometry_k_ragged(K, N), 0.0f, 0, 0, PATH_AUTO);
 }
 
 static inline Bufs bind_bufs(void* ws, const WsLayout& L, int cap) {
@@ -104,7 +106,7 @@ bool topk_avo_supports(int64_t numRows, int64_t stride0, int64_t k)
 {
     if(numRows <= 0 || stride0 <= 0 || k <= 0)
         return false;
-    if(k > PHASE_C_CAP_MAX || k > stride0)
+    if(k > PHASE_C_CAP_MAX)
         return false;
     if(stride0 % FP32_EPT != 0)
         return false;

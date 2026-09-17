@@ -204,6 +204,10 @@ __device__ __forceinline__ void exact_row_select(const float* __restrict__ input
                                                  uint32_t* __restrict__ s_scan,
                                                  unsigned* __restrict__ s_wgt,
                                                  unsigned* __restrict__ s_weq) {
+  if (RAGGED && len <= K) {
+    emit_identity_row(out, len, K);
+    return;
+  }
   const int k_out = RAGGED ? k_take_dev(K, len) : K;
   const int n4 = RAGGED ? n4_cover(len) : (pitch / FP32_EPT);
   const vfloat4* ri4 = reinterpret_cast<const vfloat4*>(input + (size_t)row * pitch);
@@ -254,7 +258,12 @@ __global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restric
     if (row == 0) *fb_count = 0;
   }
 
-  if (RAGGED && len < max(S, K)) {
+  // Two separate reasons a row cannot go through the sampler, and they do not
+  // coincide: len <= K means every element is selected so there is nothing to
+  // rank (aiter's identity case), while len < S means the sampler would read
+  // past the row. Either way Phase B must collect nothing for this row, so the
+  // threshold is +inf and Phase C takes it through the exact/identity path.
+  if (RAGGED && (len <= K || len < S)) {
     if (threadIdx.x == 0) {
       threshold[row] = 0u;
       threshold_f[row] = __builtin_inff();
@@ -800,8 +809,9 @@ static void topk_fused_impl(const float* d_in, int M, int pitch, const int* d_ro
 
 static void topk_indices(const float* d_in, int M, int pitch, const int* d_row_ends, int K,
                          int* d_idx, Bufs& b, int smc, hipStream_t s) {
-  ShapeParams sp =
-      derive_shape_params(M, pitch, K, g_margin, g_sample_s, g_coop_g, (TopkPath)g_path_override);
+  const int k_geom = g_ragged ? geometry_k_ragged(K, pitch) : K;
+  ShapeParams sp = derive_shape_params(M, pitch, k_geom, g_margin, g_sample_s, g_coop_g,
+                                       (TopkPath)g_path_override);
   g_sample_s = sp.S > 0 ? sp.S : g_sample_s;
   if (sp.path == PATH_SMALL_N) {
     if (g_ragged)
@@ -1047,14 +1057,15 @@ int main(int argc, char** argv) {
   }
 
   ShapeParams shape =
-      derive_shape_params(M, N, K, g_margin, g_sample_s, g_coop_g, (TopkPath)g_path_override);
+      derive_shape_params(M, N, g_ragged ? geometry_k_ragged(K, N) : K, g_margin, g_sample_s,
+                          g_coop_g, (TopkPath)g_path_override);
   if (g_sample_s <= 0 || g_path_override != PATH_SMALL_N) g_sample_s = shape.S > 0 ? shape.S : g_sample_s;
   if (!shape.geom_ok) {
     fprintf(stderr, "ERROR: shape M=%d N=%d K=%d incompatible (path=%d S=%d cap=%d)\n", M, N, K,
             (int)shape.path, shape.S, shape.cap);
     return 2;
   }
-  if (K > shape.cap && shape.path != PATH_SMALL_N) {
+  if ((g_ragged ? geometry_k_ragged(K, N) : K) > shape.cap && shape.path != PATH_SMALL_N) {
     fprintf(stderr, "ERROR: topk=%d exceeds derived cap=%d\n", K, shape.cap);
     return 2;
   }
@@ -1081,8 +1092,12 @@ int main(int argc, char** argv) {
   HIP_CHECK(hipMalloc(&d_in, in_elems * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_idx, out_elems * sizeof(int)));
   if (g_ragged) {
+    // Triangular, the shape aiter's create_row_boundaries produces. Clamped to
+    // the pitch because a row extent above it is not a ragged matrix at all:
+    // at M > N the raw r+1 runs off the end of the allocation (M=4096 N=512
+    // faulted with HIP 700 on row 512 onward).
     h_row_ends.resize(M);
-    for (int r = 0; r < M; r++) h_row_ends[r] = r + 1;
+    for (int r = 0; r < M; r++) h_row_ends[r] = std::min(r + 1, N);
     HIP_CHECK(hipMalloc(&d_row_ends, (size_t)M * sizeof(int)));
     HIP_CHECK(hipMemcpy(d_row_ends, h_row_ends.data(), (size_t)M * sizeof(int),
                         hipMemcpyHostToDevice));

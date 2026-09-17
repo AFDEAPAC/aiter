@@ -456,3 +456,35 @@ Fix: `template <bool RAGGED>` plus `row_ends` kernarg; uniform launches pass
 route through `phase_a_threshold` to the exact path via `threshold_f = +inf`.
 2010/2010 expanded-grid verifies green (402 shapes x 5 distributions); inner
 geomean 64.53 us vs 64.81 us baseline (-0.43%).
+
+### A short row needs no select at all -- copy aiter, do not out-think it
+First ragged version routed every `row_len <= K` row through the exact radix
+select. Correct, but aiter does not: both of its kernels special-case
+`row_len <= k` and emit the columns in index order with a `-1` tail
+(`topk_per_row_kernels.cu:398` mb path, `:2241` ob path), because when every
+element is selected there is nothing to rank. Adopting the same identity emit
+took the triangular 4096-row k=2048 case **46.21 -> 42.40 us** and k=512
+**44.34 -> 40.98 us**, against aiter's 47.36 / 67.04.
+
+The convention is load-bearing, not cosmetic: aiter picks between its two
+kernels with a perf heuristic (`should_use_mulblocks`), so both write the SAME
+padding, and a third implementation that ordered short rows differently would
+give the same call a different meaning at a batch-size boundary.
+
+### `k > stride0` is servable, and aiter has no guard against it
+`topk_avo_supports` refused `k > stride0`, so aiter's own default prefill config
+declined at num_rows 64/256/1024 (`unsupported geometry`, stride0 = num_rows
+there). aiter's `top_k_per_row_prefill` has no such check -- with ragged rows
+`k > stride0` just means EVERY row is the identity case above. Fix: the geometry
+is sized by `geometry_k_ragged(K, N) = min(K, N)` (one definition in
+`topk_shape.hip.hpp`, used by both the harness dispatcher and the aiter entry),
+because the sampler only ever has to serve `min(K, row_len) <= min(K, N)`.
+Passing the raw K instead asked `derive_shape_params` for a candidate capacity
+that cannot exist, which is what produced the refusal.
+
+### triangular test data must clamp row_ends to the pitch
+`row_ends[r] = r + 1` faults with HIP 700 as soon as `M > N` (M=4096 N=512: row
+512 onward claims an extent past the allocation). aiter's
+`create_row_boundaries` cannot hit this because it sizes the matrix at
+`max(row_ends)`. A harness bug, not a kernel bug -- but it presents as an
+illegal access inside the kernel, so check the generator first.
