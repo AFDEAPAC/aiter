@@ -708,6 +708,50 @@ those declarations would return ~1 KB of LDS per block, which changes
 occupancy and so needs `PHASE_A_STATIC_LDS` / `PHASE_C_STATIC_LDS` re-read off
 `.group_segment_fixed_size`. Deliberately left as a separate change.
 
+### OPEN, LARGEST KNOWN LEVER: the coop_g table stops at M=128 on a false premise
+`choose_coop_g` (`csrc/topk_shape.hip.hpp:341`) returns 1 for every `M >= 256`,
+and `kCoopLog2G` only covers M=1..128. The justification in the comment above
+the table is "M >= 256 has enough rows to fill the GPU without splitting any of
+them". **That is measurably wrong.** 256 rows at one block per row is 256 blocks
+on 256 CUs, which fills the CUs but leaves 1 block per CU and so no latency
+hiding inside one.
+
+Measured with `--coop-g` (warmup 20 / iters 100 / repeats 9), which bypasses the
+early return, so no code change was needed to price it:
+
+| shape | default (coop_g=1) | best override | speedup |
+|---|---|---|---|
+| M=256 N=1048576 | 410.8 us | **215.5 us** (G=16) | **1.90x** |
+| M=256 N=524288 | 227.1 us | 126.4 us (G=8) | 1.80x |
+| M=256 N=131072 | 64.4 us | 47.0 us (G=8) | 1.37x |
+| M=512 N=1048576 | 598.8 us | 448.4 us (G=8) | 1.34x |
+| M=1024 N=1048576 | 944.8 us | 885.3 us (G=8) | 1.07x |
+| M=2048 N=1048576 | 1847.6 us | 1738.1 us (G=8) | 1.06x |
+
+Correct at M=256 N=1048576 G=16 on all five distributions (rows_fail=0,
+under_K=0; the `over_Calloc` on equal/adversarial is the usual sampling-off
+warning the default path also raises).
+
+Scope, so the table extension is not overfitted: the win needs BOTH large M and
+large N. At **M=256 N=32768 there is no win at all** -- default 32.5 us is
+already the best, G=2 is 36.0 and G=4 is 43.0 -- so the boundary is a 2D region
+like the existing table, not a single raised threshold. G is not monotone
+either: at M=256 N=1048576, G=16 is 215.5 us but G=32 is 220.8 and G=64 is
+237.2, so each cell has an interior optimum and must be swept, exactly as
+M=1..128 already was.
+
+Note the reported `path=` stays `prefill` for M >= 512 because `PATH_DECODE`
+additionally requires `M <= N_LDS_SMALL_M_LIMIT`; the cooperative filter is
+selected by `coop_g > 1` alone, so it applies on either path and the label is
+only for reporting.
+
+Next step when this is picked up: sweep G over M in {256, 512, 1024, 2048,
+4096} x N in {131072, 262144, 524288, 1048576}, extend `kCoopLog2G` with the
+measured rows, drop the `M >= 256` early return, then re-run
+`verify_grid --dist all` (the gate has never exercised coop_g > 1 above M=128)
+and `score_grid`. Expect the inner tier's M=256 N=32768 point to be unaffected,
+which is a useful sanity check that the new rows did not over-reach downward.
+
 ### 2 barriers per radix pass is reachable, but only by confining the scan to one wave
 **Accepted, g_15.** After g_13 and g_14 a pass held 3 block barriers: one after
 the histogram, and two inside `block_find_pivot_bucket_rep`. Those two exist for
