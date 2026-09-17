@@ -127,6 +127,24 @@ scoring:
     --warmup 20 --iters 100 --repeats 5 (9 for the outer tier's large shapes).
   reject_stddev_pct: 2.0
 
+baseline:
+  measured_on: "2026-09-18, MI355X, ROCm 10.0, g_24, machine verified quiet"
+  inner: {points: 28, geomean_us: 64.54}
+  outer: {points: 547, geomean_us: 49.83}
+  anchor_us: 581.0
+  run_summary: >
+    From the Stage 1 fork (g_19, outer 51.09 us) to g_24, over the 547 common
+    cells: 178 faster by more than 0.5%, 20 slower by more than 0.5%, worst
+    regression +1.8% at M=32 N=524288, best improvement -26.3% at M=256
+    N=131068. Non-pow2 N cells mean -2.80%, pow2 -2.19%, so the new axis gained
+    slightly more than the old one but the fixes it exposed helped both.
+  save_baseline_trap: >
+    `--save-baseline` writes whatever it measured and returns nonzero when any
+    point is over reject_stddev_pct, but a pipe swallows that exit code. Piping
+    it through `tail` during this run hid a contention event that wrote 7 of 28
+    inner points with 3-50% stddev, including M=256 N=98304 at 997.60 us against
+    a true ~42 us. Read the STDDEV report and the exit code, never truncate them.
+
 acceptance:
   rule: per_cell_no_regress
   detail: >
