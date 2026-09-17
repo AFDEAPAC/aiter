@@ -2,12 +2,12 @@
   "tier": "inner",
   "summary": {
     "n_points": 24,
-    "geomean_us": 64.808,
-    "geomean_ratio": 2.74,
+    "geomean_us": 64.754,
+    "geomean_ratio": 2.737,
     "per_path_geomean_us": {
-      "decode": 36.12,
-      "prefill": 211.589,
-      "small_n": 28.554
+      "decode": 35.619,
+      "prefill": 210.744,
+      "small_n": 28.963
     },
     "regime_counts": {
       "small_n": 8,
@@ -20,10 +20,10 @@
       "topk": 2048,
       "regime": "decode",
       "path": "decode",
-      "us": 37.0,
-      "stddev_pct": 0.062,
+      "us": 36.2,
+      "stddev_pct": 0.118,
       "floor_us": 7.92,
-      "ratio": 4.672,
+      "ratio": 4.571,
       "argv": [
         100,
         500,
@@ -38,10 +38,10 @@
       "topk": 2048,
       "regime": "small_n",
       "path": "small_n",
-      "us": 10.6,
-      "stddev_pct": 0.153,
+      "us": 10.7,
+      "stddev_pct": 0.152,
       "floor_us": 5.8,
-      "ratio": 1.828,
+      "ratio": 1.845,
       "argv": [
         100,
         500,
@@ -54,10 +54,10 @@
       "topk": 2048,
       "regime": "small_n",
       "path": "small_n",
-      "us": 12.4,
-      "stddev_pct": 0.131,
+      "us": 12.7,
+      "stddev_pct": 0.182,
       "floor_us": 5.8,
-      "ratio": 2.138,
+      "ratio": 2.19,
       "argv": [
         100,
         500,
@@ -70,10 +70,10 @@
       "topk": 2048,
       "regime": "small_n",
       "path": "small_n",
-      "us": 20.8,
-      "stddev_pct": 0.342,
+      "us": 21.2,
+      "stddev_pct": 0.399,
       "floor_us": 5.8,
-      "ratio": 3.586,
+      "ratio": 3.655,
       "argv": [
         100,
         500,
@@ -86,10 +86,10 @@
       "topk": 2048,
       "regime": "small_n",
       "path": "small_n",
-      "us": 20.9,
-      "stddev_pct": 0.271,
+      "us": 21.0,
+      "stddev_pct": 0.997,
       "floor_us": 5.8,
-      "ratio": 3.603,
+      "ratio": 3.621,
       "argv": [
         100,
         500,
@@ -102,10 +102,10 @@
       "topk": 2048,
       "regime": "small_n",
       "path": "small_n",
-      "us": 36.8,
-      "stddev_pct": 0.239,
+      "us": 37.3,
+      "stddev_pct": 0.145,
       "floor_us": 9.48,
-      "ratio": 3.881,
+      "ratio": 3.933,
       "argv": [
         100,
         500,
@@ -118,10 +118,10 @@
       "topk": 2048,
       "regime": "small_n",
       "path": "small_n",
-      "us": 55.5,
-      "stddev_pct": 0.059,
+      "us": 56.2,
+      "stddev_pct": 0.23,
       "floor_us": 15.81,
-      "ratio": 3.512,
+      "ratio": 3.556,
       "argv": [
         100,
         500,
@@ -134,10 +134,10 @@
       "topk": 2048,
       "regime": "small_n",
       "path": "small_n",
-      "us": 38.8,
-      "stddev_pct": 0.139,
+      "us": 39.2,
+      "stddev_pct": 0.154,
       "floor_us": 12.64,
-      "ratio": 3.069,
+      "ratio": 3.1,
       "argv": [
         100,
         500,
@@ -150,10 +150,10 @@
       "topk": 2048,
       "regime": "small_n",
       "path": "small_n",
-      "us": 97.6,
-      "stddev_pct": 0.071,
+      "us": 99.6,
+      "stddev_pct": 0.151,
       "floor_us": 31.61,
-      "ratio": 3.088,
+      "ratio": 3.151,
       "argv": [
         100,
         500,
@@ -166,10 +166,10 @@
       "topk": 2048,
       "regime": "decode",
       "path": "decode",
-      "us": 32.0,
-      "stddev_pct": 0.072,
+      "us": 31.4,
+      "stddev_pct": 0.192,
       "floor_us": 7.92,
-      "ratio": 4.04,
+      "ratio": 3.965,
       "argv": [
         100,
         500,
@@ -182,10 +182,10 @@
       "topk": 2048,
       "regime": "decode",
       "path": "decode",
-      "us": 33.7,
-      "stddev_pct": 0.085,
+      "us": 33.4,
+      "stddev_pct": 0.082,
       "floor_us": 7.92,
-      "ratio": 4.255,
+      "ratio": 4.217,
       "argv": [
         100,
         500,
@@ -198,10 +198,10 @@
       "topk": 2048,
       "regime": "decode",
       "path": "decode",
-      "us": 35.9,
-      "stddev_pct": 0.064,
+      "us": 35.4,
+      "stddev_pct": 0.122,
       "floor_us": 7.92,
-      "ratio": 4.533,
+      "ratio": 4.47,
       "argv": [
         100,
         500,
@@ -214,10 +214,10 @@
       "topk": 2048,
       "regime": "decode",
       "path": "decode",
-      "us": 44.6,
-      "stddev_pct": 0.052,
+      "us": 44.0,
+      "stddev_pct": 0.161,
       "floor_us": 12.69,
-      "ratio": 3.514,
+      "ratio": 3.467,
       "argv": [
         100,
         500,
@@ -230,10 +230,10 @@
       "topk": 2048,
       "regime": "decode",
       "path": "decode",
-      "us": 37.0,
-      "stddev_pct": 0.062,
+      "us": 36.2,
+      "stddev_pct": 0.118,
       "floor_us": 7.92,
-      "ratio": 4.672,
+      "ratio": 4.571,
       "argv": [
         100,
         500,
@@ -246,10 +246,10 @@
       "topk": 2048,
       "regime": "decode",
       "path": "decode",
-      "us": 40.9,
-      "stddev_pct": 0.069,
+      "us": 40.6,
+      "stddev_pct": 0.296,
       "floor_us": 13.31,
-      "ratio": 3.073,
+      "ratio": 3.05,
       "argv": [
         100,
         500,
@@ -262,10 +262,10 @@
       "topk": 2048,
       "regime": "decode",
       "path": "decode",
-      "us": 30.7,
-      "stddev_pct": 0.053,
+      "us": 30.3,
+      "stddev_pct": 0.162,
       "floor_us": 7.92,
-      "ratio": 3.876,
+      "ratio": 3.826,
       "argv": [
         100,
         500,
@@ -278,10 +278,10 @@
       "topk": 2048,
       "regime": "prefill",
       "path": "prefill",
-      "us": 34.2,
-      "stddev_pct": 0.083,
+      "us": 33.7,
+      "stddev_pct": 0.224,
       "floor_us": 7.92,
-      "ratio": 4.318,
+      "ratio": 4.255,
       "argv": [
         100,
         500,
@@ -294,14 +294,14 @@
       "topk": 2048,
       "regime": "prefill",
       "path": "prefill",
-      "us": 615.8,
-      "stddev_pct": 0.022,
+      "us": 614.1,
+      "stddev_pct": 0.092,
       "floor_us": 443.8,
-      "ratio": 1.388,
+      "ratio": 1.384,
       "argv": [
         20,
         100,
-        5
+        9
       ]
     },
     {
@@ -310,10 +310,10 @@
       "topk": 2048,
       "regime": "prefill",
       "path": "prefill",
-      "us": 35.7,
-      "stddev_pct": 0.092,
+      "us": 35.6,
+      "stddev_pct": 0.461,
       "floor_us": 9.32,
-      "ratio": 3.828,
+      "ratio": 3.818,
       "argv": [
         100,
         500,
@@ -327,7 +327,7 @@
       "regime": "prefill",
       "path": "prefill",
       "us": 58.7,
-      "stddev_pct": 0.048,
+      "stddev_pct": 0.503,
       "floor_us": 31.66,
       "ratio": 1.854,
       "argv": [
@@ -342,14 +342,14 @@
       "topk": 2048,
       "regime": "prefill",
       "path": "prefill",
-      "us": 192.8,
-      "stddev_pct": 0.086,
+      "us": 192.0,
+      "stddev_pct": 0.274,
       "floor_us": 115.83,
-      "ratio": 1.664,
+      "ratio": 1.658,
       "argv": [
         20,
         100,
-        5
+        9
       ]
     },
     {
@@ -358,14 +358,14 @@
       "topk": 2048,
       "regime": "prefill",
       "path": "prefill",
-      "us": 167.1,
-      "stddev_pct": 0.128,
+      "us": 166.1,
+      "stddev_pct": 0.317,
       "floor_us": 74.6,
-      "ratio": 2.24,
+      "ratio": 2.227,
       "argv": [
         20,
         100,
-        5
+        9
       ]
     },
     {
@@ -374,14 +374,14 @@
       "topk": 2048,
       "regime": "prefill",
       "path": "prefill",
-      "us": 1108.0,
-      "stddev_pct": 0.044,
+      "us": 1104.7,
+      "stddev_pct": 0.187,
       "floor_us": 851.87,
-      "ratio": 1.301,
+      "ratio": 1.297,
       "argv": [
         20,
         100,
-        5
+        9
       ]
     },
     {
@@ -390,14 +390,14 @@
       "topk": 2048,
       "regime": "prefill",
       "path": "prefill",
-      "us": 948.6,
-      "stddev_pct": 0.047,
+      "us": 949.0,
+      "stddev_pct": 0.089,
       "floor_us": 812.2,
       "ratio": 1.168,
       "argv": [
         20,
         100,
-        5
+        9
       ]
     },
     {
@@ -406,14 +406,14 @@
       "topk": 2048,
       "regime": "prefill",
       "path": "prefill",
-      "us": 568.8,
-      "stddev_pct": 0.09,
+      "us": 567.1,
+      "stddev_pct": 0.329,
       "floor_us": 425.93,
-      "ratio": 1.335,
+      "ratio": 1.331,
       "argv": [
         20,
         100,
-        5
+        9
       ]
     }
   ]

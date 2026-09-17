@@ -581,6 +581,49 @@ an identity row down the candidate path and order it differently to aiter.
 `max(row_ends)`. A harness bug, not a kernel bug -- but it presents as an
 illegal access inside the kernel, so check the generator first.
 
+### nonzero rowStarts needs RowExtents and costs ~1.5% on uniform small_n
+Implementing rowStarts as absolute column indices (`out = rowStart + local`) required
+`RowExtents<RAGGED>`: 8 B `{nullptr}` on the uniform path (same slot as the old
+`row_ends` pointer) and 16 B `{starts, ends}` on ragged. Even with `if constexpr
+(RAGGED)` on the gather lambda and `len = pitch` on the uniform body, inner-tier
+small_n geomean moved 28.55 -> 28.98 us (+1.5%, 3 runs) while rowStarts shapes
+pass the CPU oracle. Treat as the price of closing the silent-wrong-answer hazard;
+refresh the inner baseline at g_10 rather than leaving every future candidate
+ fighting a false reject.
+
+### N=4K-8K small_n shortfall is LDS-full-row staging at fixed block geometry
+At M=1024 the target-grid gap concentrates at N=4096 and N=8192 while N=65536+
+is on the prefill path and passes. Measured on this box (5 repeats, warmup 20,
+iters 100): M=1024 N=4096 wall 21.2 us path=small_n, N=8192 31.5 us path=small_n,
+N=16384 48.0 us path=prefill (sampler). Both shortfall points stage the entire row
+into dynamic LDS (`pitch * 4` B) then radix-select with one block per row; there is
+no chunking or bandwidth overlap like the sampler path gets. N=8192 is 1.5x N=4096
+while work is 2x, so the curve is sublinear but still ~1.5-1.7x over the aiter
+oracle at these widths. Next lever: block-size table for small_n at N in {4096,
+8192} (currently sized mainly for N<=2048), not Phase B/C tuning.
+Implementing rowStarts as absolute column indices (`out = rowStart + local`) required
+`RowExtents<RAGGED>`: 8 B `{nullptr}` on the uniform path (same slot as the old
+`row_ends` pointer) and 16 B `{starts, ends}` on ragged. Even with `if constexpr
+(RAGGED)` on the gather lambda and `len = pitch` on the uniform body, inner-tier
+small_n geomean moved 28.55 -> 28.98 us (+1.5%, 3 runs) while rowStarts shapes
+pass the CPU oracle. Treat as the price of closing the silent-wrong-answer hazard;
+refresh the inner baseline at g_10 rather than leaving every future candidate
+ fighting a false reject.
+
+### outer tier run-to-run noise exceeded POINT_REGRESS_PCT on decode N=65536
+Two consecutive outer-tier runs of the same binary differed by >5% on the decode
+M=1024 N=65536 cell, tripping the per-point limit and making sub-10% changes
+unscoreable. `bench/grid.py` `LARGE_ARGV` repeats raised 5 -> 9 so the median
+stabilizes before the per-point compare.
+
+### topk_select backend registration is blocked on missing sweep tooling
+`aiter/ops/topk_select.py` references `topk_backend_sweep.py` and
+`topk_backend_fit.py` (lines 90 and 367) but neither file is in the aiter-topk
+tree. The fitted `_dispatch` rule covers a 565-cell sweep; AVO cannot enter until
+that sweep is re-run. Classify AVO as nondeterministic-tie like `plain`:
+`block_gather_topk` breaks ties by `atomicAdd` arrival order, so it belongs in
+`_NONDETERMINISTIC`, not the `tie='low'` or `'high'` sets.
+
 ### a template parameter creates a separate instantiation per value, so the gate must cover each one
 `WRITE_VALUES` is a compile-time flag on the four OUTPUT kernels only
 (phase_a/phase_b never touch the output). The uniform gate at 8 values shapes

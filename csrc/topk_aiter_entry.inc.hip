@@ -115,8 +115,7 @@ bool topk_avo_supports(int64_t numRows, int64_t stride0, int64_t k)
         .geom_ok;
 }
 
-// rowStarts must be zero (aiter prefill passes zeros). rowEnds[row] is the
-// exclusive end column; indices are relative to the row base in the buffer.
+// rowStarts[row] and rowEnds[row] bound [start, end); indices are absolute columns.
 void top_k_per_row_prefill_avo(const aiter_tensor_t& logits,
                                const aiter_tensor_t& rowStarts,
                                const aiter_tensor_t& rowEnds,
@@ -168,16 +167,17 @@ void top_k_per_row_prefill_avo(const aiter_tensor_t& logits,
 
     const ShapeParams sp = avo::params_for(M, N, K);
     const float* in      = static_cast<const float*>(logits.data_ptr());
-    const int* row_ends  = static_cast<const int*>(rowEnds.data_ptr());
+    const int* row_starts = static_cast<const int*>(rowStarts.data_ptr());
+    const int* row_ends   = static_cast<const int*>(rowEnds.data_ptr());
     int* idx             = static_cast<int*>(indices.data_ptr());
     float* val = values.has_value() ? static_cast<float*>(values.value().data_ptr()) : nullptr;
 
     if(sp.path == PATH_SMALL_N)
     {
         if(val)
-            topk_small_n<true, true>(in, M, N, row_ends, K, idx, val, stream);
+            topk_small_n<true, true>(in, M, N, row_starts, row_ends, K, idx, val, stream);
         else
-            topk_small_n<true, false>(in, M, N, row_ends, K, idx, nullptr, stream);
+            topk_small_n<true, false>(in, M, N, row_starts, row_ends, K, idx, nullptr, stream);
         return;
     }
 
@@ -188,7 +188,7 @@ void top_k_per_row_prefill_avo(const aiter_tensor_t& logits,
                 L.total);
     Bufs b = avo::bind_bufs(workspace.value().data_ptr(), L, sp.cap);
     if(val)
-        topk_fused_impl<true, true>(in, M, N, row_ends, K, idx, val, b, sp, stream);
+        topk_fused_impl<true, true>(in, M, N, row_starts, row_ends, K, idx, val, b, sp, stream);
     else
-        topk_fused_impl<true, false>(in, M, N, row_ends, K, idx, nullptr, b, sp, stream);
+        topk_fused_impl<true, false>(in, M, N, row_starts, row_ends, K, idx, nullptr, b, sp, stream);
 }

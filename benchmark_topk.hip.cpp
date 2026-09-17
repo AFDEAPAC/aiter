@@ -73,6 +73,7 @@ static int g_ragged = 0;
 // (M=512 N=131072 reported fallback_rows for all 512 rows). aiter's real
 // prefill config uses prefix 131072, where every extent is long and ragged.
 static int g_ragged_prefix = 0;
+static int g_row_starts_stride = 0;
 static int g_values = 0;            // also emit the selected scores
 
 // ---------------------------------------------------------------------------
@@ -207,16 +208,18 @@ __device__ __forceinline__ void block_select_stream(const vfloat4* __restrict__ 
 // the two can never drift apart. All threads of the block must call.
 template <bool RAGGED, bool WRITE_VALUES>
 __device__ __forceinline__ void exact_row_select(const float* __restrict__ input, int pitch,
-                                                 int len, int K, int row, int* __restrict__ out,
-                                                 float* __restrict__ out_val,
+                                                 RowExtents<RAGGED> extents, int K, int row,
+                                                 int* __restrict__ out, float* __restrict__ out_val,
                                                  uint32_t* __restrict__ s_hist,
                                                  uint32_t* __restrict__ s_red,
                                                  uint32_t* __restrict__ s_scan,
                                                  unsigned* __restrict__ s_wgt,
                                                  unsigned* __restrict__ s_weq) {
-  const float* rif0 = input + (size_t)row * pitch;
+  const int row_start = RAGGED ? extents.row_start(row) : 0;
+  const int len = row_len_of<RAGGED>(row, pitch, extents);
+  const float* rif0 = input + (size_t)row * pitch + row_start;
   if (RAGGED && len <= K) {
-    emit_identity_row<WRITE_VALUES>(out, out_val, rif0, len, K);
+    emit_identity_row<WRITE_VALUES>(out, out_val, rif0, row_start, len, K);
     return;
   }
   const int k_out = RAGGED ? k_take_dev(K, len) : K;
@@ -231,9 +234,15 @@ __device__ __forceinline__ void exact_row_select(const float* __restrict__ input
   }
   __syncthreads();
   const float* rif = reinterpret_cast<const float*>(ri4);
-  block_gather_topk<WRITE_VALUES>(len, pivot, k_out - eq_needed, eq_needed, out, out_val, s_wgt,
-                                  s_weq, [&](int i) { return fp32_to_sortable(rif[i]); },
-                                  [](int i) { return i; });
+  if constexpr (RAGGED) {
+    block_gather_topk<WRITE_VALUES>(len, pivot, k_out - eq_needed, eq_needed, out, out_val, s_wgt,
+                                    s_weq, [&](int i) { return fp32_to_sortable(rif[i]); },
+                                    [&](int i) { return row_start + i; });
+  } else {
+    block_gather_topk<WRITE_VALUES>(len, pivot, k_out - eq_needed, eq_needed, out, out_val, s_wgt,
+                                    s_weq, [&](int i) { return fp32_to_sortable(rif[i]); },
+                                    [](int i) { return i; });
+  }
   if (RAGGED && k_out < K) {
     __syncthreads();
     pad_topk_tail<WRITE_VALUES>(out, out_val, k_out, K);
@@ -252,7 +261,7 @@ __device__ __forceinline__ void exact_row_select(const float* __restrict__ input
 // cand_reserved / cand_bad may be null on the paths that do not reserve.
 template <bool RAGGED>
 __global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restrict__ input, int pitch,
-                                                          const int* __restrict__ row_ends, int rank,
+                                                          RowExtents<RAGGED> extents, int rank,
                                                           int S, int npasses, int chunk_stride_host,
                                                           uint32_t* __restrict__ threshold,
                                                           float* __restrict__ threshold_f,
@@ -260,8 +269,8 @@ __global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restric
                                                           unsigned int* __restrict__ cand_bad,
                                                           int* __restrict__ fb_count, int K) {
   const int row = blockIdx.x;
-  const int len = row_len_dev(row, pitch, row_ends);
-  const float* ri = input + (size_t)row * pitch;
+  const int len = row_len_of<RAGGED>(row, pitch, extents);
+  const float* ri = input + (size_t)row * pitch + (RAGGED ? extents.row_start(row) : 0);
 
   if (threadIdx.x == 0) {
     if (cand_reserved) cand_reserved[row] = 0u;
@@ -333,14 +342,14 @@ __global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restric
 // Used to attribute Phase B's gap to its own read floor.
 template <int ABLATE, bool RAGGED>
 __global__ void phase_b_filter_waveseg(const float* __restrict__ input, int pitch,
-                                       const int* __restrict__ row_ends,
+                                       RowExtents<RAGGED> extents,
                                        const float* __restrict__ threshold_f,
                                        uint64_t* __restrict__ cand_pack,
                                        int* __restrict__ cand_seg,
                                        unsigned int* __restrict__ cand_count, int seg_stride) {
   const int row = blockIdx.x;
-  const int len = row_len_dev(row, pitch, row_ends);
-  const vfloat4* ri = reinterpret_cast<const vfloat4*>(input + (size_t)row * pitch);
+  const int len = row_len_of<RAGGED>(row, pitch, extents);
+  const vfloat4* ri = reinterpret_cast<const vfloat4*>(input + (size_t)row * pitch + (RAGGED ? extents.row_start(row) : 0));
   const float th = threshold_f[row];
 
   const int lane = threadIdx.x & (WAVE_SIZE - 1);
@@ -436,12 +445,12 @@ __global__ void phase_b_filter_waveseg(const float* __restrict__ input, int pitc
 // WSTAGE_* constants live in topk_generalize.hip.hpp
 template <bool RAGGED>
 __global__ __launch_bounds__(512) void phase_b_filter_wavestage(
-    const float* __restrict__ input, int pitch, const int* __restrict__ row_ends,
+    const float* __restrict__ input, int pitch, RowExtents<RAGGED> extents,
     const float* __restrict__ threshold_f, uint64_t* __restrict__ cand_pack, int* __restrict__ cand_seg,
     unsigned int* __restrict__ cand_count, int seg_stride) {
   const int row = blockIdx.x;
-  const int len = row_len_dev(row, pitch, row_ends);
-  const vfloat4* ri = reinterpret_cast<const vfloat4*>(input + (size_t)row * pitch);
+  const int len = row_len_of<RAGGED>(row, pitch, extents);
+  const vfloat4* ri = reinterpret_cast<const vfloat4*>(input + (size_t)row * pitch + (RAGGED ? extents.row_start(row) : 0));
   const float th = threshold_f[row];
 
   const int lane = threadIdx.x & (WAVE_SIZE - 1);
@@ -545,7 +554,7 @@ __global__ __launch_bounds__(512) void phase_b_filter_wavestage(
 // runtime base offset adds (measured 0.6254 vs 0.6215 ms).
 template <bool STATIC_CAP, bool RAGGED, bool WRITE_VALUES>
 __global__ void phase_c_select_waveseg(const float* __restrict__ input, int pitch,
-                                       const int* __restrict__ row_ends,
+                                       RowExtents<RAGGED> extents,
                                        const uint64_t* __restrict__ cand_pack,
                                        const int* __restrict__ cand_seg,
                                        const unsigned int* __restrict__ cand_count, int seg_stride,
@@ -553,7 +562,8 @@ __global__ void phase_c_select_waveseg(const float* __restrict__ input, int pitc
                                        int* __restrict__ fb_rows, int* __restrict__ fb_count,
                                        int npasses) {
   const int row = blockIdx.x;
-  const int len = row_len_dev(row, pitch, row_ends);
+  const int row_start = RAGGED ? extents.row_start(row) : 0;
+  const int len = row_len_of<RAGGED>(row, pitch, extents);
   const unsigned int c_raw = cand_count[row];
   const int k_out = RAGGED ? k_take_dev(K, len) : K;
 
@@ -579,7 +589,7 @@ __global__ void phase_c_select_waveseg(const float* __restrict__ input, int pitc
   // an identity row down the candidate path and order it differently to aiter.
   if ((RAGGED && len <= K) || c_raw < (unsigned)k_out || c_raw > (unsigned)cap) {
     if (threadIdx.x == 0) fb_rows[atomicAdd(fb_count, 1)] = row;
-    exact_row_select<RAGGED, WRITE_VALUES>(input, pitch, len, K, row, out_row, val_row, s_hist,
+    exact_row_select<RAGGED, WRITE_VALUES>(input, pitch, extents, K, row, out_row, val_row, s_hist,
                                            s_red, s_scan, &s_wgt, &s_weq);
     return;
   }
@@ -615,9 +625,15 @@ __global__ void phase_c_select_waveseg(const float* __restrict__ input, int pitc
   block_select_lds(s_keys, c, k_out, s_hist, s_red, s_scan, s_mm, pivot, eq_needed, npasses,
                    /*prefix_skip=*/true);
 
-  block_gather_topk<WRITE_VALUES>(c, pivot, k_out - eq_needed, eq_needed, out_row, val_row, &s_wgt,
-                                  &s_weq, [&](int i) { return s_keys[i]; },
-                                  [&](int i) { return s_idx[i]; });
+  if constexpr (RAGGED) {
+    block_gather_topk<WRITE_VALUES>(c, pivot, k_out - eq_needed, eq_needed, out_row, val_row, &s_wgt,
+                                    &s_weq, [&](int i) { return s_keys[i]; },
+                                    [&](int i) { return row_start + s_idx[i]; });
+  } else {
+    block_gather_topk<WRITE_VALUES>(c, pivot, k_out - eq_needed, eq_needed, out_row, val_row, &s_wgt,
+                                    &s_weq, [&](int i) { return s_keys[i]; },
+                                    [&](int i) { return s_idx[i]; });
+  }
   if (RAGGED && k_out < K) {
     __syncthreads();
     pad_topk_tail<WRITE_VALUES>(out_row, val_row, k_out, K);
@@ -631,7 +647,7 @@ __global__ void phase_c_select_waveseg(const float* __restrict__ input, int pitc
 // ---------------------------------------------------------------------------
 template <bool RAGGED, bool WRITE_VALUES>
 __global__ __launch_bounds__(1024) void phase_d_fallback(const float* __restrict__ input, int pitch,
-                                                         const int* __restrict__ row_ends, int K,
+                                                         RowExtents<RAGGED> extents, int K,
                                                          const int* __restrict__ fb_rows,
                                                          const int* __restrict__ fb_count,
                                                          TopkOut<WRITE_VALUES> dst) {
@@ -645,8 +661,8 @@ __global__ __launch_bounds__(1024) void phase_d_fallback(const float* __restrict
 
   for (int slot = blockIdx.y; slot < count; slot += gridDim.y) {
     const int row = fb_rows[slot];
-    const int len = row_len_dev(row, pitch, row_ends);
-    exact_row_select<RAGGED, WRITE_VALUES>(input, pitch, len, K, row, dst.idx_row(row, K),
+    const int len = row_len_of<RAGGED>(row, pitch, extents);
+    exact_row_select<RAGGED, WRITE_VALUES>(input, pitch, extents, K, row, dst.idx_row(row, K),
                                            dst.val_row(row, K), s_hist, s_red, s_scan, &s_wgt,
                                            &s_weq);
     __syncthreads();
@@ -774,19 +790,33 @@ TopkOut<true> make_topk_out<true>(int* d_idx, float* d_val) {
   return TopkOut<true>{d_idx, d_val};
 }
 
+template <bool RAGGED>
+static RowExtents<RAGGED> make_row_extents(const int* d_starts, const int* d_ends);
+template <>
+RowExtents<false> make_row_extents<false>(const int*, const int*) {
+  return RowExtents<false>{nullptr};
+}
+template <>
+RowExtents<true> make_row_extents<true>(const int* d_starts, const int* d_ends) {
+  return RowExtents<true>{d_starts, d_ends};
+}
+
 template <bool RAGGED, bool WRITE_VALUES>
-static void topk_small_n(const float* d_in, int M, int pitch, const int* d_row_ends, int K,
+static void topk_small_n(const float* d_in, int M, int pitch, const int* d_row_starts,
+                         const int* d_row_ends, int K,
                          int* d_idx, float* d_val, hipStream_t s) {
   phase_small_n_topk<RAGGED, WRITE_VALUES>
       <<<M, small_n_block(M, pitch), (size_t)pitch * sizeof(uint32_t), s>>>(
-          d_in, pitch, d_row_ends, K, make_topk_out<WRITE_VALUES>(d_idx, d_val),
+          d_in, pitch, make_row_extents<RAGGED>(d_row_starts, d_row_ends), K, make_topk_out<WRITE_VALUES>(d_idx, d_val),
           g_small_n_passes);
 }
 
 template <bool RAGGED, bool WRITE_VALUES>
-static void topk_fused_impl(const float* d_in, int M, int pitch, const int* d_row_ends, int K,
+static void topk_fused_impl(const float* d_in, int M, int pitch, const int* d_row_starts,
+                            const int* d_row_ends, int K,
                             int* d_idx, float* d_val, Bufs& b, const ShapeParams& sp,
                             hipStream_t s) {
+  const RowExtents<RAGGED> ext = make_row_extents<RAGGED>(d_row_starts, d_row_ends);
   const auto dst = make_topk_out<WRITE_VALUES>(d_idx, d_val);
   const int S = sp.S;
   const float margin = sp.margin;
@@ -810,23 +840,23 @@ static void topk_fused_impl(const float* d_in, int M, int pitch, const int* d_ro
 
   if (g_fuse_ab) {
     phase_ab_fused<RAGGED><<<M, a_block, (size_t)S * sizeof(uint32_t), s>>>(
-        d_in, pitch, d_row_ends, rank, S, g_phase_a_passes, chunk_stride, seg_stride, b.cand_pack,
+        d_in, pitch, ext, rank, S, g_phase_a_passes, chunk_stride, seg_stride, b.cand_pack,
         b.cand_seg, b.cand_count, b.fb_count, K);
   } else {
     phase_a_threshold<RAGGED><<<M, a_block, (size_t)S * sizeof(uint32_t), s>>>(
-        d_in, pitch, d_row_ends, rank, S, g_phase_a_passes, chunk_stride, b.threshold, b.threshold_f,
+        d_in, pitch, ext, rank, S, g_phase_a_passes, chunk_stride, b.threshold, b.threshold_f,
         coop ? b.cand_reserved : nullptr, coop ? b.cand_bad : nullptr, b.fb_count, K);
 
     if (coop) {
       phase_b_filter_coop<RAGGED><<<dim3(sp.coop_g, M), g_cf_block, 0, s>>>(
-          d_in, pitch, d_row_ends, n4, b.threshold_f, b.cand_pack, b.cand_reserved, b.cand_bad,
+          d_in, pitch, ext, n4, b.threshold_f, b.cand_pack, b.cand_reserved, b.cand_bad,
           cap);
     } else if (g_phase_b == 4) {
       phase_b_filter_wavestage<RAGGED><<<M, g_cf_block, 0, s>>>(
-          d_in, pitch, d_row_ends, b.threshold_f, b.cand_pack, b.cand_seg, b.cand_count, seg_stride);
+          d_in, pitch, ext, b.threshold_f, b.cand_pack, b.cand_seg, b.cand_count, seg_stride);
     } else {
       phase_b_filter_waveseg<0, RAGGED><<<M, g_cf_block, 0, s>>>(
-          d_in, pitch, d_row_ends, b.threshold_f, b.cand_pack, b.cand_seg, b.cand_count, seg_stride);
+          d_in, pitch, ext, b.threshold_f, b.cand_pack, b.cand_seg, b.cand_count, seg_stride);
     }
   }
 
@@ -834,16 +864,16 @@ static void topk_fused_impl(const float* d_in, int M, int pitch, const int* d_ro
     const size_t lds_c = (size_t)cap * (sp.keys_only_c ? sizeof(uint32_t)
                                                        : sizeof(uint32_t) + sizeof(int));
     phase_c_select_contig<RAGGED, WRITE_VALUES><<<M, c_block, lds_c, s>>>(
-        d_in, pitch, d_row_ends, b.cand_pack, b.cand_reserved, b.cand_bad, b.cand_count, cap, K,
+        d_in, pitch, ext, b.cand_pack, b.cand_reserved, b.cand_bad, b.cand_count, cap, K,
         dst, b.fb_rows, b.fb_count, g_phase_c_passes, sp.keys_only_c);
   } else if (cap <= PHASE_C_CAP) {
     phase_c_select_waveseg<true, RAGGED, WRITE_VALUES><<<M, c_block, 0, s>>>(
-        d_in, pitch, d_row_ends, b.cand_pack, b.cand_seg, b.cand_count, seg_stride, nwaves_b, K,
+        d_in, pitch, ext, b.cand_pack, b.cand_seg, b.cand_count, seg_stride, nwaves_b, K,
         cap, dst, b.fb_rows, b.fb_count, g_phase_c_passes);
   } else {
     const size_t lds_c = (size_t)cap * (sizeof(uint32_t) + sizeof(int));
     phase_c_select_waveseg<false, RAGGED, WRITE_VALUES><<<M, c_block, lds_c, s>>>(
-        d_in, pitch, d_row_ends, b.cand_pack, b.cand_seg, b.cand_count, seg_stride, nwaves_b, K,
+        d_in, pitch, ext, b.cand_pack, b.cand_seg, b.cand_count, seg_stride, nwaves_b, K,
         cap, dst, b.fb_rows, b.fb_count, g_phase_c_passes);
   }
 
@@ -857,69 +887,73 @@ static void topk_fused_impl(const float* d_in, int M, int pitch, const int* d_ro
 // the same 4-way if-tree, and the launch-site version is where a missed branch
 // silently runs the wrong instantiation.
 template <bool RAGGED, bool WRITE_VALUES>
-static void topk_indices_inst(const float* d_in, int M, int pitch, const int* d_row_ends, int K,
+static void topk_indices_inst(const float* d_in, int M, int pitch, const int* d_row_starts,
+                              const int* d_row_ends, int K,
                               int* d_idx, float* d_val, Bufs& b, const ShapeParams& sp,
                               hipStream_t s) {
-  const int* re = RAGGED ? d_row_ends : nullptr;
   if (sp.path == PATH_SMALL_N) {
-    topk_small_n<RAGGED, WRITE_VALUES>(d_in, M, pitch, re, K, d_idx, d_val, s);
+    topk_small_n<RAGGED, WRITE_VALUES>(d_in, M, pitch, d_row_starts, d_row_ends, K, d_idx, d_val, s);
     return;
   }
-  topk_fused_impl<RAGGED, WRITE_VALUES>(d_in, M, pitch, re, K, d_idx, d_val, b, sp, s);
+  topk_fused_impl<RAGGED, WRITE_VALUES>(d_in, M, pitch, d_row_starts, d_row_ends, K, d_idx, d_val, b, sp, s);
 }
 
-static void topk_indices(const float* d_in, int M, int pitch, const int* d_row_ends, int K,
+static void topk_indices(const float* d_in, int M, int pitch, const int* d_row_starts,
+                       const int* d_row_ends, int K,
                          int* d_idx, float* d_val, Bufs& b, int smc, hipStream_t s) {
   const int k_geom = g_ragged ? geometry_k_ragged(K, pitch) : K;
   ShapeParams sp = derive_shape_params(M, pitch, k_geom, g_margin, g_sample_s, g_coop_g,
                                        (TopkPath)g_path_override);
   g_sample_s = sp.S > 0 ? sp.S : g_sample_s;
   if (g_ragged) {
-    if (d_val) topk_indices_inst<true, true>(d_in, M, pitch, d_row_ends, K, d_idx, d_val, b, sp, s);
-    else topk_indices_inst<true, false>(d_in, M, pitch, d_row_ends, K, d_idx, nullptr, b, sp, s);
+    if (d_val) topk_indices_inst<true, true>(d_in, M, pitch, d_row_starts, d_row_ends, K, d_idx, d_val, b, sp, s);
+    else topk_indices_inst<true, false>(d_in, M, pitch, d_row_starts, d_row_ends, K, d_idx, nullptr, b, sp, s);
   } else {
-    if (d_val) topk_indices_inst<false, true>(d_in, M, pitch, nullptr, K, d_idx, d_val, b, sp, s);
-    else topk_indices_inst<false, false>(d_in, M, pitch, nullptr, K, d_idx, nullptr, b, sp, s);
+    if (d_val) topk_indices_inst<false, true>(d_in, M, pitch, nullptr, nullptr, K, d_idx, d_val, b, sp, s);
+    else topk_indices_inst<false, false>(d_in, M, pitch, nullptr, nullptr, K, d_idx, nullptr, b, sp, s);
   }
   (void)smc;
 }
 
-static void topk_fused(const float* d_in, int M, int pitch, const int* d_row_ends, int K,
+static void topk_fused(const float* d_in, int M, int pitch, const int* d_row_starts,
+                       const int* d_row_ends, int K,
                        int* d_idx, float* d_val, Bufs& b, int smc, hipStream_t s) {
-  topk_indices(d_in, M, pitch, d_row_ends, K, d_idx, d_val, b, smc, s);
+  topk_indices(d_in, M, pitch, d_row_starts, d_row_ends, K, d_idx, d_val, b, smc, s);
 }
 
-static void topk_direct(const float* d_in, int M, int pitch, const int* d_row_ends, int K,
+static void topk_direct(const float* d_in, int M, int pitch, const int* d_row_starts,
+                       const int* d_row_ends, int K,
                         int* d_idx, float* d_val, Bufs& b, hipStream_t s) {
   fill_identity_rows<<<(M + 255) / 256, 256, 0, s>>>(b.fb_rows, b.fb_count, M);
   const dim3 g(1, FB_GRID);
   if (g_ragged) {
+    const RowExtents<true> ext = make_row_extents<true>(d_row_starts, d_row_ends);
     if (d_val)
-      phase_d_fallback<true, true><<<g, 1024, 0, s>>>(d_in, pitch, d_row_ends, K, b.fb_rows,
+      phase_d_fallback<true, true><<<g, 1024, 0, s>>>(d_in, pitch, ext, K, b.fb_rows,
                                                       b.fb_count,
                                                       make_topk_out<true>(d_idx, d_val));
     else
-      phase_d_fallback<true, false><<<g, 1024, 0, s>>>(d_in, pitch, d_row_ends, K, b.fb_rows,
+      phase_d_fallback<true, false><<<g, 1024, 0, s>>>(d_in, pitch, ext, K, b.fb_rows,
                                                        b.fb_count,
                                                        make_topk_out<false>(d_idx, nullptr));
   } else {
+    const RowExtents<false> ext = make_row_extents<false>(nullptr, nullptr);
     if (d_val)
-      phase_d_fallback<false, true><<<g, 1024, 0, s>>>(d_in, pitch, nullptr, K, b.fb_rows,
-                                                       b.fb_count,
+      phase_d_fallback<false, true><<<g, 1024, 0, s>>>(d_in, pitch, ext, K, b.fb_rows, b.fb_count,
                                                        make_topk_out<true>(d_idx, d_val));
     else
-      phase_d_fallback<false, false><<<g, 1024, 0, s>>>(d_in, pitch, nullptr, K, b.fb_rows,
-                                                        b.fb_count,
+      phase_d_fallback<false, false><<<g, 1024, 0, s>>>(d_in, pitch, ext, K, b.fb_rows, b.fb_count,
                                                         make_topk_out<false>(d_idx, nullptr));
   }
 }
 
-static void run_topk(const float* d_in, int M, int pitch, const int* d_row_ends, int K, int* d_idx,
+static void run_topk(const float* d_in, int M, int pitch, const int* d_row_starts,
+                     const int* d_row_ends, int K, int* d_idx,
                      float* d_val, Bufs& b, int smc, hipStream_t s) {
   if (g_pipeline_direct)
-    topk_direct(d_in, M, pitch, d_row_ends, K, d_idx, d_val, b, s);
+    topk_direct(d_in, M, pitch, d_row_starts, d_row_ends, K, d_idx, d_val, b, s);
   else
-    topk_fused(d_in, M, pitch, d_row_ends, K, d_idx, d_val, b, smc, s);
+    topk_fused(d_in, M, pitch, d_row_starts, d_row_ends, K, d_idx, d_val, b, smc, s);
 }
 
 // ---- AITER_EXPORT_END ----
@@ -929,15 +963,16 @@ static void run_topk(const float* d_in, int M, int pitch, const int* d_row_ends,
 // oracles, timing, CLI). Moving code across this line changes what ships, so
 // re-run the export and its diff check after doing so.
 
-static bool verify_row_cpu(const float* row, int len, int K, const int* idx) {
+static bool verify_row_cpu(const float* row, int row_start, int len, int K, const int* idx) {
   const int k_take = len < K ? len : K;
   std::vector<uint32_t> sv(len);
-  for (int i = 0; i < len; i++) sv[i] = fp32_to_sortable_host(row[i]);
+  const int row_end = row_start + len;
+  for (int i = 0; i < len; i++) sv[i] = fp32_to_sortable_host(row[row_start + i]);
   std::vector<uint32_t> got;
   got.reserve(k_take);
   for (int i = 0; i < k_take; i++) {
-    if (idx[i] < 0 || idx[i] >= len) return false;
-    got.push_back(sv[idx[i]]);
+    if (idx[i] < row_start || idx[i] >= row_end) return false;
+    got.push_back(fp32_to_sortable_host(row[idx[i]]));
   }
   for (int i = k_take; i < K; i++)
     if (idx[i] != -1) return false;
@@ -948,34 +983,37 @@ static bool verify_row_cpu(const float* row, int len, int K, const int* idx) {
   return got == ref;
 }
 
-static bool verify_row_gpu_oracle(const float* d_in, int pitch, const int* d_row_ends, int K,
-                                  int row, int* d_idx, Bufs& b) {
+static bool verify_row_gpu_oracle(const float* d_in, int pitch, const int* d_row_starts,
+                                  const int* d_row_ends, int K, int row, int* d_idx, Bufs& b) {
   int h_rows[1] = {row};
   int h_count = 1;
   HIP_CHECK(hipMemcpy(b.fb_rows, h_rows, sizeof(h_rows), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(b.fb_count, &h_count, sizeof(int), hipMemcpyHostToDevice));
   // WRITE_VALUES=false: the oracle exists to produce indices to compare
   // against, and the value check is a separate, index-anchored one.
-  if (g_ragged)
-    phase_d_fallback<true, false><<<dim3(1, 1), 1024>>>(d_in, pitch, d_row_ends, K, b.fb_rows,
-                                                        b.fb_count,
-                                                        make_topk_out<false>(d_idx, nullptr));
-  else
-    phase_d_fallback<false, false><<<dim3(1, 1), 1024>>>(d_in, pitch, nullptr, K, b.fb_rows,
-                                                         b.fb_count,
+  if (g_ragged) {
+    const RowExtents<true> ext = make_row_extents<true>(d_row_starts, d_row_ends);
+    phase_d_fallback<true, false><<<dim3(1, 1), 1024>>>(d_in, pitch, ext, K, b.fb_rows, b.fb_count,
+                                                       make_topk_out<false>(d_idx, nullptr));
+  } else {
+    const RowExtents<false> ext = make_row_extents<false>(nullptr, nullptr);
+    phase_d_fallback<false, false><<<dim3(1, 1), 1024>>>(d_in, pitch, ext, K, b.fb_rows, b.fb_count,
                                                          make_topk_out<false>(d_idx, nullptr));
+  }
   HIP_CHECK(hipDeviceSynchronize());
   return true;
 }
 
-static bool row_idx_multiset_match(const float* row, int len, int K, const int* got,
+static bool row_idx_multiset_match(const float* row, int row_start, int len, int K, const int* got,
                                    const int* ref) {
+  const int row_end = row_start + len;
   const int k_take = len < K ? len : K;
   std::vector<uint32_t> gv, rv;
   gv.reserve(k_take);
   rv.reserve(k_take);
   for (int i = 0; i < k_take; i++) {
-    if (got[i] < 0 || got[i] >= len || ref[i] < 0 || ref[i] >= len) return false;
+    if (got[i] < row_start || got[i] >= row_end || ref[i] < row_start || ref[i] >= row_end)
+      return false;
     gv.push_back(fp32_to_sortable_host(row[got[i]]));
     rv.push_back(fp32_to_sortable_host(row[ref[i]]));
   }
@@ -986,7 +1024,8 @@ static bool row_idx_multiset_match(const float* row, int len, int K, const int* 
   return gv == rv;
 }
 
-static bool verify_rows_sampled(const float* d_in, int M, int pitch, const int* d_row_ends,
+static bool verify_rows_sampled(const float* d_in, int M, int pitch, const int* d_row_starts,
+                                const int* d_row_ends, const int* h_row_starts,
                                 const int* h_row_ends, int K, int* d_idx, const int* h_idx,
                                 Bufs& b, int sample_n) {
   std::vector<int> rows;
@@ -996,32 +1035,34 @@ static bool verify_rows_sampled(const float* d_in, int M, int pitch, const int* 
   std::vector<float> h_row((size_t)pitch);
   std::vector<int> oracle((size_t)K);
   for (int r : rows) {
-    const int len = h_row_ends ? h_row_ends[r] : pitch;
+    const int row_start = h_row_starts ? h_row_starts[r] : 0;
+    const int len = h_row_ends ? (h_row_ends[r] - row_start) : pitch;
     HIP_CHECK(hipMemcpy(h_row.data(), d_in + (size_t)r * pitch, (size_t)pitch * sizeof(float),
                         hipMemcpyDeviceToHost));
     if (g_verify_oracle_gpu) {
-      verify_row_gpu_oracle(d_in, pitch, d_row_ends, K, r, d_idx, b);
+      verify_row_gpu_oracle(d_in, pitch, d_row_starts, d_row_ends, K, r, d_idx, b);
       HIP_CHECK(hipMemcpy(oracle.data(), d_idx + (size_t)r * K, (size_t)K * sizeof(int),
                           hipMemcpyDeviceToHost));
     } else {
       const int k_take = len < K ? len : K;
       std::vector<uint32_t> sv(len);
-      for (int i = 0; i < len; i++) sv[i] = fp32_to_sortable_host(h_row[i]);
+      for (int i = 0; i < len; i++) sv[i] = fp32_to_sortable_host(h_row[row_start + i]);
       std::partial_sort(sv.begin(), sv.begin() + k_take, sv.end(), std::greater<uint32_t>());
       for (int i = 0; i < k_take; i++) {
         uint32_t want = sv[i];
         int found = -1;
         for (int j = 0; j < len; j++)
-          if (fp32_to_sortable_host(h_row[j]) == want) {
+          if (fp32_to_sortable_host(h_row[row_start + j]) == want) {
             found = j;
             break;
           }
         if (found < 0) return false;
-        oracle[i] = found;
+        oracle[i] = row_start + found;
       }
       for (int i = k_take; i < K; i++) oracle[i] = -1;
     }
-    if (!row_idx_multiset_match(h_row.data(), len, K, h_idx + (size_t)r * K, oracle.data()))
+    if (!row_idx_multiset_match(h_row.data(), row_start, len, K, h_idx + (size_t)r * K,
+                                oracle.data()))
       return false;
   }
   return true;
@@ -1040,9 +1081,9 @@ static bool verify_rows_sampled(const float* d_in, int M, int pitch, const int* 
 // Copies only the sampled rows off the device: a whole-input copy is 2.2 GB of
 // host memory at M=4096 N=135168, which bounds which shapes the gate could
 // include for no reason -- the check only ever reads `pitch` floats at a time.
-static bool verify_values_rows(const float* d_in, int M, int pitch, const int* h_row_ends, int K,
-                               const int* h_idx, const float* h_val, int sample_n,
-                               std::string& why) {
+static bool verify_values_rows(const float* d_in, int M, int pitch, const int* h_row_starts,
+                               const int* h_row_ends, int K, const int* h_idx, const float* h_val,
+                               int sample_n, std::string& why) {
   auto bits = [](float f) {
     uint32_t u;
     memcpy(&u, &f, 4);
@@ -1054,7 +1095,9 @@ static bool verify_values_rows(const float* d_in, int M, int pitch, const int* h
   for (int r = 0; r < M; r += step) {
     HIP_CHECK(hipMemcpy(row.data(), d_in + (size_t)r * pitch, (size_t)pitch * sizeof(float),
                         hipMemcpyDeviceToHost));
-    const int len = h_row_ends ? h_row_ends[r] : pitch;
+    const int row_start = h_row_starts ? h_row_starts[r] : 0;
+    const int len = h_row_ends ? (h_row_ends[r] - row_start) : pitch;
+    const int row_end = row_start + len;
     const int k_take = std::min(K, len);
     for (int i = 0; i < K; i++) {
       const int idx = h_idx[(size_t)r * K + i];
@@ -1069,7 +1112,7 @@ static bool verify_values_rows(const float* d_in, int M, int pitch, const int* h
         }
         continue;
       }
-      if (idx >= len) {
+      if (idx < row_start || idx >= row_end) {
         why = "index past the row extent";
         return false;
       }
@@ -1113,6 +1156,7 @@ static void usage(const char* prog) {
           "  --small-n-block B (256..1024, 0=auto)  --s-rule 0|1 (0=legacy R_TARGET)\n"
           "  --verify-sample-rows N --verify-oracle gpu|cpu\n"
           "  --ragged 0|1 --ragged-prefix P (row r extent = P+r+1, clamped to N)\n"
+          "  --row-starts-stride S (row r start = min(r*S, N-1); 0 = all zero)\n"
           "  --values 0|1 (also emit the selected scores)\n",
           prog);
 }
@@ -1176,6 +1220,7 @@ int main(int argc, char** argv) {
     else if (a == "--verify-oracle") g_verify_oracle_gpu = (need() == "gpu") ? 1 : 0;
     else if (a == "--ragged") g_ragged = std::stoi(need());
     else if (a == "--ragged-prefix") g_ragged_prefix = std::stoi(need());
+    else if (a == "--row-starts-stride") g_row_starts_stride = std::stoi(need());
     else if (a == "--values") g_values = std::stoi(need());
     else {
       usage(argv[0]);
@@ -1225,7 +1270,9 @@ int main(int argc, char** argv) {
   int* d_idx = nullptr;
   float* d_val = nullptr;
   int* d_row_ends = nullptr;
+  int* d_row_starts = nullptr;
   std::vector<int> h_row_ends;
+  std::vector<int> h_row_starts;
   HIP_CHECK(hipMalloc(&d_in, in_elems * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_idx, out_elems * sizeof(int)));
   if (g_values) HIP_CHECK(hipMalloc(&d_val, out_elems * sizeof(float)));
@@ -1234,9 +1281,19 @@ int main(int argc, char** argv) {
     // the pitch because a row extent above it is not a ragged matrix at all:
     // at M > N the raw r+1 runs off the end of the allocation (M=4096 N=512
     // faulted with HIP 700 on row 512 onward).
+    h_row_starts.resize(M);
     h_row_ends.resize(M);
-    for (int r = 0; r < M; r++) h_row_ends[r] = std::min(g_ragged_prefix + r + 1, N);
+    for (int r = 0; r < M; r++) {
+      const int start =
+          g_row_starts_stride > 0 ? std::min(r * g_row_starts_stride, std::max(0, N - 1)) : 0;
+      h_row_starts[r] = start;
+      h_row_ends[r] = std::min(g_ragged_prefix + r + 1, N);
+      if (h_row_ends[r] <= start) h_row_ends[r] = std::min(start + 1, N);
+    }
+    HIP_CHECK(hipMalloc(&d_row_starts, (size_t)M * sizeof(int)));
     HIP_CHECK(hipMalloc(&d_row_ends, (size_t)M * sizeof(int)));
+    HIP_CHECK(hipMemcpy(d_row_starts, h_row_starts.data(), (size_t)M * sizeof(int),
+                        hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_row_ends, h_row_ends.data(), (size_t)M * sizeof(int),
                         hipMemcpyHostToDevice));
   }
@@ -1265,7 +1322,7 @@ int main(int argc, char** argv) {
   alloc_bufs(bufs, M, K, shape.cap);
 
   HIP_CHECK(hipMemset(d_idx, 0xFF, out_elems * sizeof(int)));
-  run_topk(d_in, M, N, d_row_ends, K, d_idx, d_val, bufs, info.sm_count, 0);
+  run_topk(d_in, M, N, d_row_starts, d_row_ends, K, d_idx, d_val, bufs, info.sm_count, 0);
   // A launch that never started is not slow, it is instant and wrong: an
   // over-large dynamic LDS request reported 4.40 us with garbage output before
   // this check existed.
@@ -1321,12 +1378,16 @@ int main(int argc, char** argv) {
       std::vector<float> h_in(full_elems);
       HIP_CHECK(hipMemcpy(h_in.data(), d_in, full_elems * sizeof(float), hipMemcpyDeviceToHost));
       for (int r = 0; r < M; r++) {
-        const int len = g_ragged ? h_row_ends[r] : N;
-        if (!verify_row_cpu(h_in.data() + (size_t)r * N, len, K, h_idx.data() + (size_t)r * K))
+        const int row_start = g_ragged ? h_row_starts[r] : 0;
+        const int len = g_ragged ? (h_row_ends[r] - row_start) : N;
+        if (!verify_row_cpu(h_in.data() + (size_t)r * N, row_start, len, K,
+                            h_idx.data() + (size_t)r * K))
           bad_rows++;
       }
-    } else if (!verify_rows_sampled(d_in, M, N, d_row_ends, g_ragged ? h_row_ends.data() : nullptr,
-                                    K, d_idx, h_idx.data(), bufs, g_verify_sample_rows)) {
+    } else if (!verify_rows_sampled(d_in, M, N, d_row_starts, d_row_ends,
+                                    g_ragged ? h_row_starts.data() : nullptr,
+                                    g_ragged ? h_row_ends.data() : nullptr, K, d_idx,
+                                    h_idx.data(), bufs, g_verify_sample_rows)) {
       bad_rows = 1;
     }
     printf("VERIFY rows_fail=%d fallback_rows=%d pipeline=%s inject_fault=%d path=%s\n", bad_rows,
@@ -1338,8 +1399,9 @@ int main(int argc, char** argv) {
       HIP_CHECK(hipMemcpy(h_val.data(), d_val, out_elems * sizeof(float), hipMemcpyDeviceToHost));
       if (g_inject_fault == 2) h_val[0] = -0.5f;
       std::string why;
-      const bool ok = verify_values_rows(d_in, M, N, g_ragged ? h_row_ends.data() : nullptr, K,
-                                         h_idx.data(), h_val.data(), g_verify_sample_rows, why);
+      const bool ok = verify_values_rows(d_in, M, N, g_ragged ? h_row_starts.data() : nullptr,
+                                         g_ragged ? h_row_ends.data() : nullptr, K, h_idx.data(),
+                                         h_val.data(), g_verify_sample_rows, why);
       printf("VERIFY_VALUES ok=%d %s\n", ok ? 1 : 0, ok ? "" : why.c_str());
       if (!ok) return 2;
     }
@@ -1366,11 +1428,11 @@ int main(int argc, char** argv) {
       // default stream returns 900 "operation not permitted when stream is
       // capturing" regardless of what is being captured.
       HIP_CHECK(hipStreamCreateWithFlags(&gs, hipStreamNonBlocking));
-      for (int w = 0; w < warmup; w++) run_topk(d_in, M, N, d_row_ends, K, d_idx, d_val, bufs, info.sm_count, gs);
+      for (int w = 0; w < warmup; w++) run_topk(d_in, M, N, d_row_starts, d_row_ends, K, d_idx, d_val, bufs, info.sm_count, gs);
       HIP_CHECK(hipStreamSynchronize(gs));
       hipError_t cap_err = hipStreamBeginCapture(gs, hipStreamCaptureModeGlobal);
       if (cap_err == hipSuccess) {
-        run_topk(d_in, M, N, d_row_ends, K, d_idx, d_val, bufs, info.sm_count, gs);
+        run_topk(d_in, M, N, d_row_starts, d_row_ends, K, d_idx, d_val, bufs, info.sm_count, gs);
         cap_err = hipStreamEndCapture(gs, &graph);
       }
       if (cap_err == hipSuccess && graph != nullptr) {
@@ -1386,7 +1448,7 @@ int main(int argc, char** argv) {
     }
     for (int rep = 0; rep < repeats; rep++) {
       if (!g_use_hipgraph || g_pipeline_direct) {
-        for (int w = 0; w < warmup; w++) run_topk(d_in, M, N, d_row_ends, K, d_idx, d_val, bufs, info.sm_count, 0);
+        for (int w = 0; w < warmup; w++) run_topk(d_in, M, N, d_row_starts, d_row_ends, K, d_idx, d_val, bufs, info.sm_count, 0);
         HIP_CHECK(hipDeviceSynchronize());
       }
       std::vector<double> samples;
@@ -1398,7 +1460,7 @@ int main(int argc, char** argv) {
           samples.push_back(timer.end(gs));
         } else {
           timer.begin();
-          run_topk(d_in, M, N, d_row_ends, K, d_idx, d_val, bufs, info.sm_count, 0);
+          run_topk(d_in, M, N, d_row_starts, d_row_ends, K, d_idx, d_val, bufs, info.sm_count, 0);
           samples.push_back(timer.end());
         }
       }
@@ -1419,6 +1481,7 @@ int main(int argc, char** argv) {
   (void)hipFree(d_in);
   (void)hipFree(d_idx);
   if (d_val) (void)hipFree(d_val);
+  if (d_row_starts) (void)hipFree(d_row_starts);
   if (d_row_ends) (void)hipFree(d_row_ends);
   return 0;
 }

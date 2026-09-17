@@ -143,9 +143,21 @@ RAGGED = [
     (4096, 135168, 2048, 131072),
 ]
 
+# Nonzero rowStarts: each row's window starts at r*stride and keeps the same
+# triangular extent clamped to the pitch. Exercises absolute-index emit on every
+# path; prefix 0 keeps rows short enough for identity/exact on early rows.
+ROWSTARTS = [
+    (64, 8192, 2048, 0, 64),
+    (256, 131072, 2048, 131072, 64),
+]
+
 
 def ragged_shapes():
     return list(RAGGED)
+
+
+def rowstarts_shapes():
+    return list(ROWSTARTS)
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +226,7 @@ def inner_shapes():
 # reject threshold, so a 2% change there would be indistinguishable from noise.
 # ---------------------------------------------------------------------------
 SMALL_ARGV = (100, 500, 7)      # warmup, iters, repeats
-LARGE_ARGV = (20, 100, 5)
+LARGE_ARGV = (20, 100, 9)   # was 5 repeats: decode N=65536 varied >5% run-to-run at 5
 SMALL_THRESHOLD_US = 150.0
 MAX_STDDEV_PCT = 2.0
 

@@ -25,7 +25,8 @@ import grid  # noqa: E402
 ROOT = grid.ROOT
 
 
-def verify_one(m, n, k, dist, extra=(), ragged_prefix=None, values=False):
+def verify_one(m, n, k, dist, extra=(), ragged_prefix=None, values=False,
+               row_starts_stride=None):
     cmd = [str(grid.BENCH), "--mode", "verify", "--m", str(m), "--n", str(n), "--topk", str(k),
            "--dist", dist, "--dump-stats", "1"]
     if values:
@@ -37,6 +38,8 @@ def verify_one(m, n, k, dist, extra=(), ragged_prefix=None, values=False):
         # recomputes the extent independently from the host row_ends.
         cmd += ["--ragged", "1", "--ragged-prefix", str(ragged_prefix),
                 "--verify-oracle", "cpu"]
+        if row_starts_stride is not None:
+            cmd += ["--row-starts-stride", str(row_starts_stride)]
     cmd += list(extra)
     p = subprocess.run(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                        universal_newlines=True)
@@ -92,6 +95,8 @@ def main():
                     help="skip the ragged points (grid.RAGGED)")
     ap.add_argument("--no-values", action="store_true",
                     help="skip the values points (grid.VALUES)")
+    ap.add_argument("--no-rowstarts", action="store_true",
+                    help="skip the rowStarts points (grid.ROWSTARTS)")
     args = ap.parse_args()
 
     if not grid.BENCH.exists():
@@ -104,9 +109,10 @@ def main():
 
     ragged = [] if (args.inner or args.no_ragged) else grid.ragged_shapes()
     values = [] if (args.inner or args.no_values) else grid.values_shapes()
-    n_runs = (len(shapes) + len(ragged) + len(values)) * len(dists)
-    print("=== correctness gate: %d uniform + %d ragged + %d values shapes x %d distribution(s) ==="
-          % (len(shapes), len(ragged), len(values), len(dists)))
+    rowstarts = [] if (args.inner or args.no_rowstarts) else grid.rowstarts_shapes()
+    n_runs = (len(shapes) + len(ragged) + len(values) + len(rowstarts)) * len(dists)
+    print("=== correctness gate: %d uniform + %d ragged + %d values + %d rowStarts shapes x %d distribution(s) ==="
+          % (len(shapes), len(ragged), len(values), len(rowstarts), len(dists)))
     bad, warned = [], []
     for dist in dists:
         for (m, n, k) in shapes:
@@ -130,6 +136,12 @@ def main():
                 bad.append(r)
                 print("  FAIL  values M=%-5d N=%-8d K=%-5d prefix=%-7s %-12s %s"
                       % (m, n, k, prefix, dist, r["why"]))
+        for (m, n, k, prefix, stride) in rowstarts:
+            r = verify_one(m, n, k, dist, ragged_prefix=prefix, row_starts_stride=stride)
+            if not r["ok"]:
+                bad.append(r)
+                print("  FAIL  rowStarts M=%-5d N=%-8d K=%-5d prefix=%-7d stride=%-3d %-12s %s"
+                      % (m, n, k, prefix, stride, dist, r["why"]))
 
     print("\n  passed   %d" % (n_runs - len(bad)))
     print("  failed   %d" % len(bad))
