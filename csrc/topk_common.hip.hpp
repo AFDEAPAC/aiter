@@ -47,6 +47,27 @@ constexpr int MAX_WAVES_PER_BLOCK = 16;
 constexpr int SAMPLE_CHUNK_ELEMS = 64;
 constexpr int SAMPLE_S_MAX = 16384;
 
+// Spacing between the chunk starts, and the one definition of it: the sampler
+// kernels index with it and sampling_geometry_ok() decides servability from it,
+// so a second copy of this expression is a way for the host to accept a shape
+// the kernel then reads out of bounds on.
+//
+// Masked to a multiple of FP32_EPT because a chunk is loaded with dwordx4 from
+// row + chunk * stride, which needs 16 B alignment. Masking rather than
+// rejecting the odd stride is what makes a row width that does not divide by
+// `chunks` servable at all -- every N on the pow2 grid happened to divide
+// evenly, so the rule that rejected them cost nothing there, but aiter's
+// prefill widths are num_prefix + num_rows (131072 + 256 = 131328) and mostly
+// do not. Where N/chunks was already a multiple of FP32_EPT this returns
+// exactly N/chunks, so no shape that already worked changes behaviour.
+//
+// stride >= SAMPLE_CHUNK_ELEMS is then the only bound needed to keep the last
+// chunk in the row: it reads [(chunks-1)*stride, +CHUNK), and
+// (chunks-1)*(N/chunks) + CHUNK <= N - N/chunks + CHUNK <= N once N/chunks >= CHUNK.
+__host__ __device__ inline int sample_chunk_stride(int N, int chunks) {
+  return (N / chunks) & ~(FP32_EPT - 1);
+}
+
 // LDS capacity for the Phase C candidate set (keys + indices).
 constexpr int PHASE_C_CAP = 4096;    // 4096 * (4+4) B = 32 KB LDS
 

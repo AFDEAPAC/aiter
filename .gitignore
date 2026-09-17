@@ -1,5 +1,11 @@
 benchmark_topk
 bw_kernel
+floor_bench
 score.json
 log/rocprof_*/
 *.bin
+
+# Compiler-generated header dependencies (see Makefile: -MMD writes these so a
+# header edit triggers a rebuild).
+.deps/
+__pycache__/

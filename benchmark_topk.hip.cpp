@@ -16,10 +16,11 @@
 // the same code the fallback uses, so both timed paths are separately verifiable.
 
 #include "topk_common.hip.hpp"
+#include "topk_shape.hip.hpp"
 
 // ---- AVO variation surface -------------------------------------------------
 static int g_sample_rank = 0;       // 0 => derive from margin
-static int g_sample_s = 8192;       // Phase A sample count (S=4096 leaves rows short of K)
+static int g_sample_s = 0;          // 0 => derive from shape (R_TARGET law)
 static float g_margin = 0.0f;       // 0 => derive from the estimator's own noise
 
 // The candidate count is the number of row elements above the rank-R value of S
@@ -34,12 +35,7 @@ static float g_margin = 0.0f;       // 0 => derive from the estimator's own nois
 // i.e. a fixed 1.4 is overfitted to K=2048. Requiring mean*(1 - 3/sqrt(R0)) > K
 // with R0 = K*S/N (the margin-free rank) reproduces 1.36 at K=2048 and demands
 // 2.13 at K=512, which is what the data shows.
-static float auto_margin(int K, int S, int N) {
-  const double r0 = (double)K * S / (double)N;
-  if (r0 < 9.0) return 4.0f;   // too few samples for the 3-sigma rule to mean anything
-  const double m = 1.0 / (1.0 - 3.0 / std::sqrt(r0));
-  return (float)std::min(std::max(m, 1.4), 3.0);
-}
+// auto_margin() lives in topk_generalize.hip.hpp
 static int g_cf_block = 512;        // Phase B block size
 static int g_cf_gx = 16;            // Phase B blocks per row (grid.x)
 static int g_use_nt_load = 0;       // non-temporal streaming loads in Phase B
@@ -48,8 +44,8 @@ static int g_use_nt_load = 0;       // non-temporal streaming loads in Phase B
 // Variants 0-2 (per-wave global atomic, block-aggregated atomic, LDS counter)
 // were measured and superseded; see knowledge/known_bad.md and git history.
 static int g_phase_b = 4;
-static int g_phase_c_block = 512;
-static int g_phase_a_block = 512;
+static int g_phase_c_block = 0;     // 0 => derive from occupancy
+static int g_phase_a_block = 0;     // 0 => derive from occupancy
 // 3 passes give bit-identical candidate counts to 4 (the 4th byte never moves the
 // bucket at fp32 precision) and 3 is safer than 2, whose spread ran to max=3919
 // against C_alloc=4096.
@@ -60,6 +56,14 @@ static int g_dump_stats = 0;
 static int g_ablate_store = 0;   // diagnostic only: produces WRONG results
 // Phase C must use all 4 passes to be exact. Fewer is a TIMING ABLATION ONLY.
 static int g_phase_c_passes = RADIX_PASSES;
+static int g_path_override = PATH_AUTO;
+static int g_coop_g = 0;
+static int g_fuse_ab = 0;
+static int g_use_hipgraph = 0;
+static int g_small_n_block = 0;     // 0 => derive from the vec4 load count
+static int g_small_n_passes = RADIX_PASSES;   // < 4 is a TIMING ABLATION (wrong results)
+static int g_verify_sample_rows = 32;
+static int g_verify_oracle_gpu = 1;
 
 // ---------------------------------------------------------------------------
 // Block-wide exact radix select over keys already resident in LDS.
@@ -111,6 +115,12 @@ __device__ __forceinline__ void block_select_lds(const uint32_t* __restrict__ s_
     const bool filter = (p > 0);
     for (int i = threadIdx.x; i < HIST_SLOTS; i += blockDim.x) s_hist[i] = 0;
     __syncthreads();
+    // Do NOT add an active-set min/max here to exit early once the pivot is
+    // pinned. It was tried: accumulating amn/amx in this loop (the reads are
+    // already happening) and breaking when they agree made small_n 21-39%
+    // SLOWER and the anchor 615.5 -> 662.8 us. The two extra barriers per pass
+    // in the reduction, plus the register pressure in this loop, cost far more
+    // than the single pass the exit saves. See knowledge/known_bad.md.
     for (int i = threadIdx.x; i < c; i += blockDim.x) {
       uint32_t k = s_keys[i];
       if (!filter || (k >> hshift) == (pivot >> hshift))
@@ -179,15 +189,56 @@ __device__ __forceinline__ void block_select_stream(const vfloat4* __restrict__ 
   eq_needed = ek;
 }
 
+// Exact full-row select for ONE row, streaming it from global memory. Shared by
+// the fallback branch inside Phase C and by the standalone Phase D oracle, so
+// the two can never drift apart. All threads of the block must call.
+__device__ __forceinline__ void exact_row_select(const float* __restrict__ input, int N, int K,
+                                                 int row, int* __restrict__ out,
+                                                 uint32_t* __restrict__ s_hist,
+                                                 uint32_t* __restrict__ s_red,
+                                                 uint32_t* __restrict__ s_scan,
+                                                 unsigned* __restrict__ s_wgt,
+                                                 unsigned* __restrict__ s_weq) {
+  const vfloat4* ri4 = reinterpret_cast<const vfloat4*>(input + (size_t)row * N);
+  uint32_t pivot;
+  int eq_needed;
+  block_select_stream(ri4, N / FP32_EPT, K, s_hist, s_red, s_scan, pivot, eq_needed);
+  if (threadIdx.x == 0) {
+    *s_wgt = 0;
+    *s_weq = 0;
+  }
+  __syncthreads();
+  const float* rif = reinterpret_cast<const float*>(ri4);
+  block_gather_topk(N, pivot, K - eq_needed, eq_needed, out, s_wgt, s_weq,
+                    [&](int i) { return fp32_to_sortable(rif[i]); }, [](int i) { return i; });
+}
+
+#include "topk_generalize.hip.hpp"
+
 // ---------------------------------------------------------------------------
 // Phase A: per-row sampled threshold, fully in LDS, one kernel, one block/row.
 // ---------------------------------------------------------------------------
+// Also clears the counters the later phases accumulate into. Phase A already
+// runs one block per row and completes before Phase B on the same stream, so
+// this is free, where a hipMemsetAsync per counter was a full dispatch each
+// (~2.6 us) -- 5 of the 9 dispatches on the decode path were memsets.
+// cand_reserved / cand_bad may be null on the paths that do not reserve.
 __global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restrict__ input, int N,
                                                           int rank, int S, int npasses,
+                                                          int chunk_stride,
                                                           uint32_t* __restrict__ threshold,
-                                                          float* __restrict__ threshold_f) {
+                                                          float* __restrict__ threshold_f,
+                                                          unsigned int* __restrict__ cand_reserved,
+                                                          unsigned int* __restrict__ cand_bad,
+                                                          int* __restrict__ fb_count) {
   const int row = blockIdx.x;
   const float* ri = input + (size_t)row * N;
+
+  if (threadIdx.x == 0) {
+    if (cand_reserved) cand_reserved[row] = 0u;
+    if (cand_bad) cand_bad[row] = 0u;
+    if (row == 0) *fb_count = 0;
+  }
 
   // Dynamic LDS so the footprint tracks the runtime S. A static [SAMPLE_S_MAX]
   // array costs 64 KB unconditionally and measurably crushes occupancy
@@ -200,8 +251,11 @@ __global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restric
 
   // dwordx4 per lane. A scalar `ri[chunk*stride+off]` loop moves only 4 B per
   // lane and left this kernel at 7x its own traffic floor.
-  const int chunks = S / SAMPLE_CHUNK_ELEMS;
-  const int chunk_stride = N / chunks;
+  // chunk_stride arrives from the host (sample_chunk_stride), which is also what
+  // decides servability, so the two cannot disagree. Passing it also takes an
+  // integer division and a mask out of device code: computing it here cost 0.8%
+  // on the decode geomean (30.91 -> 31.15 us, A/B'd on this machine) once the
+  // mask was added, for a value the host already knew.
   const int v4_per_chunk = SAMPLE_CHUNK_ELEMS / FP32_EPT;
   const int total_v4 = S / FP32_EPT;
   for (int u = threadIdx.x; u < total_v4; u += blockDim.x) {
@@ -334,9 +388,7 @@ __global__ void phase_b_filter_waveseg(const float* __restrict__ input, int N,
 // The flush drains the WHOLE buffer, so no remainder has to be shifted down and
 // wcnt simply stays unaligned; a 520 B contiguous burst spans 5 lines instead of
 // 4, which is a boundary effect rather than per-element amplification.
-constexpr int WSTAGE_WAVES = 8;   // wg <= 512
-constexpr int WSTAGE_CAP = 320;   // 63 carried over + at most 256 from one iteration
-
+// WSTAGE_* constants live in topk_generalize.hip.hpp
 __global__ __launch_bounds__(512) void phase_b_filter_wavestage(
     const float* __restrict__ input, int N, const float* __restrict__ threshold_f,
     uint64_t* __restrict__ cand_pack, int* __restrict__ cand_seg,
@@ -434,22 +486,32 @@ __global__ __launch_bounds__(512) void phase_b_filter_wavestage(
 
 // Phase C fed by the wave-segmented layout: gathers the variable-length
 // per-wave segments into one contiguous LDS array, then selects exactly.
-__global__ void phase_c_select_waveseg(const uint64_t* __restrict__ cand_pack,
+//
+// STATIC_CAP selects where the candidate staging area lives:
+//   true  -> two __shared__ arrays at PHASE_C_CAP, so both base addresses are
+//            compile-time constants. This is the shape the main config uses.
+//   false -> one dynamic-LDS block split at the runtime `cap`, needed when cap
+//            exceeds PHASE_C_CAP.
+// Sizing the arrays statically at PHASE_C_CAP_MAX instead costs 32 KB of LDS
+// unconditionally and halves occupancy (measured 0.6215 -> 0.6702 ms); making
+// the main config pay the runtime split instead costs the +0.6% that the
+// runtime base offset adds (measured 0.6254 vs 0.6215 ms).
+template <bool STATIC_CAP>
+__global__ void phase_c_select_waveseg(const float* __restrict__ input, int N,
+                                       const uint64_t* __restrict__ cand_pack,
                                        const int* __restrict__ cand_seg,
                                        const unsigned int* __restrict__ cand_count, int seg_stride,
-                                       int nwaves_b, int K, int* __restrict__ out_idx,
+                                       int nwaves_b, int K, int cap, int* __restrict__ out_idx,
                                        int* __restrict__ fb_rows, int* __restrict__ fb_count,
                                        int npasses) {
   const int row = blockIdx.x;
   const unsigned int c_raw = cand_count[row];
-  if (c_raw < (unsigned)K || c_raw > (unsigned)PHASE_C_CAP) {
-    if (threadIdx.x == 0) fb_rows[atomicAdd(fb_count, 1)] = row;
-    return;
-  }
-  const int c = (int)c_raw;
 
-  __shared__ uint32_t s_keys[PHASE_C_CAP];
-  __shared__ int s_idx[PHASE_C_CAP];
+  extern __shared__ uint32_t s_dyn[];
+  __shared__ uint32_t s_keys_st[STATIC_CAP ? PHASE_C_CAP : 1];
+  __shared__ int s_idx_st[STATIC_CAP ? PHASE_C_CAP : 1];
+  uint32_t* s_keys = STATIC_CAP ? s_keys_st : s_dyn;
+  int* s_idx = STATIC_CAP ? s_idx_st : reinterpret_cast<int*>(s_dyn + cap);
   __shared__ uint32_t s_hist[HIST_SLOTS];
   __shared__ uint32_t s_red[256];
   __shared__ uint32_t s_scan[2];
@@ -457,6 +519,20 @@ __global__ void phase_c_select_waveseg(const uint64_t* __restrict__ cand_pack,
   __shared__ int s_cnt[MAX_WAVES_PER_BLOCK];
   __shared__ int s_off[MAX_WAVES_PER_BLOCK];
   __shared__ unsigned s_wgt, s_weq;
+
+  int* out_row = out_idx + (size_t)row * K;
+  if (c_raw < (unsigned)K || c_raw > (unsigned)cap) {
+    // Unusable candidate set: do the exact full-row select HERE rather than in a
+    // separate fallback kernel. This block already owns the row and already has
+    // the histogram scratch, so folding it in removes the 4th dispatch from
+    // every call (4.0 us of the 33 us at M=1 N=1M was an empty phase_d launch).
+    // It is also more parallel in the worst case: when every row falls back, M
+    // blocks share the work instead of FB_GRID=64.
+    if (threadIdx.x == 0) fb_rows[atomicAdd(fb_count, 1)] = row;   // diagnostics only
+    exact_row_select(input, N, K, row, out_row, s_hist, s_red, s_scan, &s_wgt, &s_weq);
+    return;
+  }
+  const int c = (int)c_raw;
 
   if (threadIdx.x < nwaves_b) s_cnt[threadIdx.x] = cand_seg[(size_t)row * MAX_WAVES_PER_BLOCK + threadIdx.x];
   __syncthreads();
@@ -488,14 +564,14 @@ __global__ void phase_c_select_waveseg(const uint64_t* __restrict__ cand_pack,
   block_select_lds(s_keys, c, K, s_hist, s_red, s_scan, s_mm, pivot, eq_needed, npasses,
                    /*prefix_skip=*/true);
 
-  int* out = out_idx + (size_t)row * K;
-  block_gather_topk(c, pivot, K - eq_needed, eq_needed, out, &s_wgt, &s_weq,
+  block_gather_topk(c, pivot, K - eq_needed, eq_needed, out_row, &s_wgt, &s_weq,
                     [&](int i) { return s_keys[i]; }, [&](int i) { return s_idx[i]; });
 }
 
 // ---------------------------------------------------------------------------
-// Phase D: exact full-row select. Fallback for unusable rows, and the
-// independent oracle when --pipeline direct.
+// Phase D: exact full-row select over a compacted row list. Now used only by
+// --pipeline direct as the independent oracle; the fused path folds the same
+// work into Phase C to save a dispatch.
 // ---------------------------------------------------------------------------
 __global__ __launch_bounds__(1024) void phase_d_fallback(const float* __restrict__ input, int N,
                                                          int K, const int* __restrict__ fb_rows,
@@ -512,24 +588,11 @@ __global__ __launch_bounds__(1024) void phase_d_fallback(const float* __restrict
 
   // Grid-stride over the compacted row list: correct for any count, while the
   // dispatch stays at FB_GRID blocks instead of one per matrix row.
+  (void)n4;
   for (int slot = blockIdx.y; slot < count; slot += gridDim.y) {
     const int row = fb_rows[slot];
-    const vfloat4* ri4 = reinterpret_cast<const vfloat4*>(input + (size_t)row * N);
-    int* out = out_idx + (size_t)row * K;
-
-    uint32_t pivot;
-    int eq_needed;
-    block_select_stream(ri4, n4, K, s_hist, s_red, s_scan, pivot, eq_needed);
-
-    if (threadIdx.x == 0) {
-      s_wgt = 0;
-      s_weq = 0;
-    }
-    __syncthreads();
-
-    const float* rif = reinterpret_cast<const float*>(ri4);
-    block_gather_topk(N, pivot, K - eq_needed, eq_needed, out, &s_wgt, &s_weq,
-                      [&](int i) { return fp32_to_sortable(rif[i]); }, [](int i) { return i; });
+    exact_row_select(input, N, K, row, out_idx + (size_t)row * K, s_hist, s_red, s_scan, &s_wgt,
+                     &s_weq);
     __syncthreads();
   }
 }
@@ -577,18 +640,23 @@ struct Bufs {
   uint64_t* cand_pack;
   int* cand_seg;
   unsigned int* cand_count;
+  unsigned int* cand_reserved;
+  unsigned int* cand_bad;
   int* fb_rows;
   int* fb_count;
   int C_alloc;
 };
 
-static void alloc_bufs(Bufs& b, int M, int K) {
-  b.C_alloc = PHASE_C_CAP;
+static void alloc_bufs(Bufs& b, int M, int K, int cap) {
+  b.C_alloc = cap;
+  const int row_slots = std::max(CAND_SLOTS_PER_ROW, cap);
   HIP_CHECK(hipMalloc(&b.threshold, (size_t)M * sizeof(uint32_t)));
   HIP_CHECK(hipMalloc(&b.threshold_f, (size_t)M * sizeof(float)));
-  HIP_CHECK(hipMalloc(&b.cand_pack, (size_t)M * CAND_SLOTS_PER_ROW * sizeof(uint64_t)));
+  HIP_CHECK(hipMalloc(&b.cand_pack, (size_t)M * row_slots * sizeof(uint64_t)));
   HIP_CHECK(hipMalloc(&b.cand_seg, (size_t)M * MAX_WAVES_PER_BLOCK * sizeof(int)));
   HIP_CHECK(hipMalloc(&b.cand_count, (size_t)M * sizeof(unsigned int)));
+  HIP_CHECK(hipMalloc(&b.cand_reserved, (size_t)M * sizeof(unsigned int)));
+  HIP_CHECK(hipMalloc(&b.cand_bad, (size_t)M * sizeof(unsigned int)));
   HIP_CHECK(hipMalloc(&b.fb_rows, (size_t)M * sizeof(int)));
   HIP_CHECK(hipMalloc(&b.fb_count, sizeof(int)));
   (void)K;
@@ -600,50 +668,142 @@ static void free_bufs(Bufs& b) {
   (void)hipFree(b.cand_pack);
   (void)hipFree(b.cand_seg);
   (void)hipFree(b.cand_count);
+  (void)hipFree(b.cand_reserved);
+  (void)hipFree(b.cand_bad);
   (void)hipFree(b.fb_rows);
   (void)hipFree(b.fb_count);
 }
 
-static void topk_fused(const float* d_in, int M, int N, int K, int* d_idx, Bufs& b, int smc,
-                       hipStream_t s) {
-  const int S = g_sample_s;
-  const float margin = (g_margin > 0.f) ? g_margin : auto_margin(K, S, N);
-  // Never ask Phase B for more candidates than Phase C's LDS can hold.
-  const double cap_margin = 0.85 * (double)PHASE_C_CAP / (double)K;
-  const double eff_margin = std::min((double)margin, cap_margin);
-  const int rank =
-      g_sample_rank > 0 ? g_sample_rank : std::max(1, (int)(eff_margin * (double)K * S / (double)N));
+// Block size for the small_n path. Sized from the dwordx4 LOAD count (n4 = N/4),
+// not from N: sizing it from N gave a 16-wave block where only N/4 of the lanes
+// ever issued a load (768 of 1024 idle at N=1024) and all 16 waves still paid
+// the 4-pass x 4-barrier select over just 1024 elements.
+//
+// Lower bound 256 is a correctness constraint, not a tuning choice:
+// block_find_pivot_bucket() indexes the 256 radix buckets by threadIdx.x, so a
+// block under 256 threads silently drops the upper buckets and picks a wrong
+// pivot.
+// Sizing it from the load count (one dwordx4 per lane) is NOT optimal: measured
+// M=4096 N=2048 wants 256 threads (39.7 us) where the load rule picks 512
+// (50.2 us). What actually decides it is how many WAVES end up resident per CU,
+// because a row's cost is dominated by the fixed 4-pass x 4-barrier select, not
+// by its loads. Blocks per CU is capped by the dynamic LDS (the row itself), so
+// at large N only a bigger block can supply enough waves, while at small N the
+// cap is loose and the cheapest block wins.
+//
+// The row itself is the dynamic LDS here, and the load cap matters because a
+// small row cannot occupy many waves: sizing purely from the load count picked a
+// 512-thread block at M=4096 N=2048 (50.2 us) where 256 measures 39.7 us.
+static int small_n_block(int M, int N) {
+  if (g_small_n_block > 0) return std::max(256, std::min(1024, g_small_n_block));
+  const int t = small_n_threads_from_table(M, N);
+  if (t > 0) return t;
+  return occupancy_block_threads(M, SMALL_N_STATIC_LDS + N * (int)sizeof(uint32_t),
+                                 std::max(1, (N / FP32_EPT) / WAVE_SIZE));
+}
+
+static void topk_small_n(const float* d_in, int M, int N, int K, int* d_idx, hipStream_t s) {
+  // g_small_n_passes < RADIX_PASSES is a TIMING ABLATION ONLY: the pivot is then
+  // truncated and the result is WRONG. It exists to price the fixed per-pass
+  // cost (zero 1024 hist slots, 256-bin reduce, scan, 4 barriers), because
+  // passes 2..4 only histogram the elements matching the current prefix and so
+  // carry almost no real work.
+  phase_small_n_topk<<<M, small_n_block(M, N), (size_t)N * sizeof(uint32_t), s>>>(
+      d_in, N, K, d_idx, g_small_n_passes);
+}
+
+static void topk_fused_impl(const float* d_in, int M, int N, int K, int* d_idx, Bufs& b,
+                            const ShapeParams& sp, hipStream_t s) {
+  const int S = sp.S;
+  const float margin = sp.margin;
+  const int rank = g_sample_rank > 0 ? g_sample_rank : sp.rank;
+  const int cap = sp.cap;
   const int n4 = N / FP32_EPT;
   const int gx = std::max(1, std::min(g_cf_gx, n4 / g_cf_block));
-  (void)smc;
-
-  HIP_CHECK(hipMemsetAsync(b.cand_count, 0, (size_t)M * sizeof(unsigned int), s));
-  HIP_CHECK(hipMemsetAsync(b.fb_count, 0, sizeof(int), s));
-
-  phase_a_threshold<<<M, g_phase_a_block, S * sizeof(uint32_t), s>>>(
-      d_in, N, rank, S, g_phase_a_passes, b.threshold, b.threshold_f);
-
   const int nwaves_b = std::max(1, g_cf_block / WAVE_SIZE);
   const int seg_stride = CAND_SLOTS_PER_ROW / nwaves_b;
 
-  if (g_phase_b == 4)
-    phase_b_filter_wavestage<<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_pack,
-                                                      b.cand_seg, b.cand_count, seg_stride);
-  else if (g_ablate_store == 1)
-    phase_b_filter_waveseg<1><<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_pack,
-                                                       b.cand_seg, b.cand_count, seg_stride);
-  else if (g_ablate_store == 2)
-    phase_b_filter_waveseg<2><<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_pack,
-                                                       b.cand_seg, b.cand_count, seg_stride);
-  else
-    phase_b_filter_waveseg<0><<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_pack,
-                                                       b.cand_seg, b.cand_count, seg_stride);
+  // Phase A and Phase C are one block per row and barrier-bound, so their block
+  // size follows LDS-limited residency (S for A, cap for C), not a constant.
+  const int a_block = g_phase_a_block > 0
+                          ? g_phase_a_block
+                          : occupancy_block_threads(M, PHASE_A_STATIC_LDS + S * 4, 0);
+  const int c_block = g_phase_c_block > 0
+                          ? g_phase_c_block
+                          : occupancy_block_threads(M, PHASE_C_STATIC_LDS + cap * 8, 0);
 
-  phase_c_select_waveseg<<<M, g_phase_c_block, 0, s>>>(b.cand_pack, b.cand_seg, b.cand_count,
-                                                       seg_stride, nwaves_b, K, d_idx, b.fb_rows,
-                                                       b.fb_count, g_phase_c_passes);
+  // No hipMemsetAsync here on purpose. cand_count is ASSIGNED (not accumulated)
+  // by every Phase B variant, one block per row with no early return, so zeroing
+  // it was always dead work; the reservation counters and fb_count are cleared
+  // inside Phase A, which runs first on the same stream. This took the decode
+  // path from 9 dispatches to 4 and the prefill path from 6 to 4.
+  const bool coop = sp.coop_g > 1;
 
-  phase_d_fallback<<<dim3(1, FB_GRID), 1024, 0, s>>>(d_in, N, K, b.fb_rows, b.fb_count, d_idx);
+  const int chunk_stride = sample_chunk_stride(N, S / SAMPLE_CHUNK_ELEMS);
+
+  if (g_fuse_ab) {
+    phase_ab_fused<<<M, a_block, (size_t)S * sizeof(uint32_t), s>>>(
+        d_in, N, rank, S, g_phase_a_passes, chunk_stride, seg_stride, b.cand_pack, b.cand_seg,
+        b.cand_count, b.fb_count);
+  } else {
+    phase_a_threshold<<<M, a_block, (size_t)S * sizeof(uint32_t), s>>>(
+        d_in, N, rank, S, g_phase_a_passes, chunk_stride, b.threshold, b.threshold_f,
+        coop ? b.cand_reserved : nullptr, coop ? b.cand_bad : nullptr, b.fb_count);
+
+    if (coop) {
+      phase_b_filter_coop<<<dim3(sp.coop_g, M), g_cf_block, 0, s>>>(
+          d_in, N, n4, b.threshold_f, b.cand_pack, b.cand_reserved, b.cand_bad, cap);
+    } else if (g_phase_b == 4) {
+      phase_b_filter_wavestage<<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_pack,
+                                                        b.cand_seg, b.cand_count, seg_stride);
+    } else {
+      phase_b_filter_waveseg<0><<<M, g_cf_block, 0, s>>>(d_in, N, b.threshold_f, b.cand_pack,
+                                                          b.cand_seg, b.cand_count, seg_stride);
+    }
+  }
+
+  // Phase C stages `cap` keys, and `cap` indices unless the keys-only variant
+  // re-reads them from global. Sized here so the LDS footprint tracks the
+  // runtime cap instead of PHASE_C_CAP_MAX.
+  if (coop) {
+    const size_t lds_c = (size_t)cap * (sp.keys_only_c ? sizeof(uint32_t)
+                                                       : sizeof(uint32_t) + sizeof(int));
+    phase_c_select_contig<<<M, c_block, lds_c, s>>>(
+        d_in, N, b.cand_pack, b.cand_reserved, b.cand_bad, b.cand_count, cap, K, d_idx, b.fb_rows,
+        b.fb_count, g_phase_c_passes, sp.keys_only_c);
+  } else if (cap <= PHASE_C_CAP) {
+    phase_c_select_waveseg<true><<<M, c_block, 0, s>>>(
+        d_in, N, b.cand_pack, b.cand_seg, b.cand_count, seg_stride, nwaves_b, K, cap, d_idx,
+        b.fb_rows, b.fb_count, g_phase_c_passes);
+  } else {
+    const size_t lds_c = (size_t)cap * (sizeof(uint32_t) + sizeof(int));
+    phase_c_select_waveseg<false><<<M, c_block, lds_c, s>>>(
+        d_in, N, b.cand_pack, b.cand_seg, b.cand_count, seg_stride, nwaves_b, K, cap, d_idx,
+        b.fb_rows, b.fb_count, g_phase_c_passes);
+  }
+
+  // No Phase D launch: Phase C handles its own unusable rows inline. Phase D
+  // still exists as the --pipeline direct oracle.
+  (void)margin;
+  (void)gx;
+}
+
+static void topk_indices(const float* d_in, int M, int N, int K, int* d_idx, Bufs& b, int smc,
+                         hipStream_t s) {
+  ShapeParams sp =
+      derive_shape_params(M, N, K, g_margin, g_sample_s, g_coop_g, (TopkPath)g_path_override);
+  g_sample_s = sp.S > 0 ? sp.S : g_sample_s;
+  if (sp.path == PATH_SMALL_N) {
+    topk_small_n(d_in, M, N, K, d_idx, s);
+    return;
+  }
+  topk_fused_impl(d_in, M, N, K, d_idx, b, sp, s);
+  (void)smc;
+}
+
+static void topk_fused(const float* d_in, int M, int N, int K, int* d_idx, Bufs& b, int smc,
+                       hipStream_t s) {
+  topk_indices(d_in, M, N, K, d_idx, b, smc, s);
 }
 
 static void topk_direct(const float* d_in, int M, int N, int K, int* d_idx, Bufs& b,
@@ -660,6 +820,13 @@ static void run_topk(const float* d_in, int M, int N, int K, int* d_idx, Bufs& b
     topk_fused(d_in, M, N, K, d_idx, b, smc, s);
 }
 
+// ---- AITER_EXPORT_END ----
+// Everything above this line is the kernel plus its dispatch and is portable;
+// scripts/export_aiter_op.py copies exactly that region into aiter and appends
+// csrc/topk_aiter_entry.inc.hip. Everything below is harness only (verification
+// oracles, timing, CLI). Moving code across this line changes what ships, so
+// re-run the export and its diff check after doing so.
+
 static bool verify_row_cpu(const float* row, int N, int K, const int* idx) {
   std::vector<uint32_t> sv(N);
   for (int i = 0; i < N; i++) sv[i] = fp32_to_sortable_host(row[i]);
@@ -674,6 +841,68 @@ static bool verify_row_cpu(const float* row, int N, int K, const int* idx) {
   std::partial_sort(ref.begin(), ref.begin() + K, ref.end(), std::greater<uint32_t>());
   ref.resize(K);
   return got == ref;
+}
+
+static bool verify_row_gpu_oracle(const float* d_in, int N, int K, int row, int* d_idx, Bufs& b) {
+  int h_rows[1] = {row};
+  int h_count = 1;
+  HIP_CHECK(hipMemcpy(b.fb_rows, h_rows, sizeof(h_rows), hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(b.fb_count, &h_count, sizeof(int), hipMemcpyHostToDevice));
+  phase_d_fallback<<<dim3(1, 1), 1024>>>(d_in, N, K, b.fb_rows, b.fb_count, d_idx);
+  HIP_CHECK(hipDeviceSynchronize());
+  return true;
+}
+
+static bool row_idx_multiset_match(const float* row, int N, int K, const int* got,
+                                   const int* ref) {
+  std::vector<uint32_t> gv, rv;
+  gv.reserve(K);
+  rv.reserve(K);
+  for (int i = 0; i < K; i++) {
+    if (got[i] < 0 || got[i] >= N || ref[i] < 0 || ref[i] >= N) return false;
+    gv.push_back(fp32_to_sortable_host(row[got[i]]));
+    rv.push_back(fp32_to_sortable_host(row[ref[i]]));
+  }
+  std::sort(gv.begin(), gv.end(), std::greater<uint32_t>());
+  std::sort(rv.begin(), rv.end(), std::greater<uint32_t>());
+  return gv == rv;
+}
+
+static bool verify_rows_sampled(const float* d_in, int M, int N, int K, int* d_idx,
+                                const int* h_idx, Bufs& b, int sample_n) {
+  std::vector<int> rows;
+  for (int i = 0; i < M; i += std::max(1, M / sample_n)) rows.push_back(i);
+  if (rows.empty()) rows.push_back(0);
+
+  std::vector<float> h_row((size_t)N);
+  std::vector<int> oracle((size_t)K);
+  for (int r : rows) {
+    HIP_CHECK(hipMemcpy(h_row.data(), d_in + (size_t)r * N, (size_t)N * sizeof(float),
+                        hipMemcpyDeviceToHost));
+    if (g_verify_oracle_gpu) {
+      verify_row_gpu_oracle(d_in, N, K, r, d_idx, b);
+      HIP_CHECK(hipMemcpy(oracle.data(), d_idx + (size_t)r * K, (size_t)K * sizeof(int),
+                          hipMemcpyDeviceToHost));
+    } else {
+      std::vector<uint32_t> sv(N);
+      for (int i = 0; i < N; i++) sv[i] = fp32_to_sortable_host(h_row[i]);
+      std::partial_sort(sv.begin(), sv.begin() + K, sv.end(), std::greater<uint32_t>());
+      for (int i = 0; i < K; i++) {
+        uint32_t want = sv[i];
+        int found = -1;
+        for (int j = 0; j < N; j++)
+          if (fp32_to_sortable_host(h_row[j]) == want) {
+            found = j;
+            break;
+          }
+        if (found < 0) return false;
+        oracle[i] = found;
+      }
+    }
+    if (!row_idx_multiset_match(h_row.data(), N, K, h_idx + (size_t)r * K, oracle.data()))
+      return false;
+  }
+  return true;
 }
 
 static double median(std::vector<double> v) {
@@ -700,7 +929,10 @@ static void usage(const char* prog) {
           "  --pipeline fused|direct\n"
           "  --margin F --sample-rank R --cf-block B --cf-gx G\n"
           "  --nt-load 0|1 --phase-b 0|1|2 --phase-c-block B --phase-a-block B\n"
-          "  --input-bin PATH --dump-indices PATH --inject-fault 0|1\n",
+          "  --input-bin PATH --dump-indices PATH --inject-fault 0|1\n"
+          "  --path auto|small_n|prefill|decode --coop-g G --fuse-ab 0|1 --hipgraph 0|1\n"
+          "  --small-n-block B (256..1024, 0=auto)  --s-rule 0|1 (0=legacy R_TARGET)\n"
+          "  --verify-sample-rows N --verify-oracle gpu|cpu\n",
           prog);
 }
 
@@ -747,32 +979,53 @@ int main(int argc, char** argv) {
     else if (a == "--inject-fault") g_inject_fault = std::stoi(need());
     else if (a == "--dump-stats") g_dump_stats = std::stoi(need());
     else if (a == "--ablate-store") g_ablate_store = std::stoi(need());
+    else if (a == "--path") {
+      std::string p = need();
+      if (p == "small_n") g_path_override = PATH_SMALL_N;
+      else if (p == "prefill") g_path_override = PATH_PREFILL;
+      else if (p == "decode") g_path_override = PATH_DECODE;
+      else g_path_override = PATH_AUTO;
+    } else if (a == "--coop-g") g_coop_g = std::stoi(need());
+    else if (a == "--fuse-ab") g_fuse_ab = std::stoi(need());
+    else if (a == "--hipgraph") g_use_hipgraph = std::stoi(need());
+    else if (a == "--small-n-block") g_small_n_block = std::stoi(need());
+    else if (a == "--s-rule") g_s_rule = std::stoi(need());
+    else if (a == "--small-n-passes") g_small_n_passes = std::stoi(need());
+    else if (a == "--verify-sample-rows") g_verify_sample_rows = std::stoi(need());
+    else if (a == "--verify-oracle") g_verify_oracle_gpu = (need() == "gpu") ? 1 : 0;
     else {
       usage(argv[0]);
       exit(1);
     }
   }
 
-  if (K > PHASE_C_CAP) {
-    fprintf(stderr, "ERROR: topk=%d exceeds PHASE_C_CAP=%d\n", K, PHASE_C_CAP);
+  if (K > N) {
+    fprintf(stderr, "ERROR: topk=%d exceeds N=%d\n", K, N);
     return 2;
   }
-  if (g_sample_s > SAMPLE_S_MAX || g_sample_s % SAMPLE_CHUNK_ELEMS != 0) {
-    fprintf(stderr, "ERROR: sample-s=%d must be a multiple of %d and <= %d\n", g_sample_s,
-            SAMPLE_CHUNK_ELEMS, SAMPLE_S_MAX);
+  if (N % FP32_EPT != 0) {
+    fprintf(stderr, "ERROR: N=%d must be multiple of %d\n", N, FP32_EPT);
     return 2;
   }
-  {
-    const int chunks = g_sample_s / SAMPLE_CHUNK_ELEMS;
-    // chunk_stride must keep every chunk start 16 B aligned for the dwordx4 load.
-    if (N / chunks < SAMPLE_CHUNK_ELEMS || N % FP32_EPT != 0 || (N / chunks) % FP32_EPT != 0) {
-      fprintf(stderr, "ERROR: N=%d incompatible with sampling geometry (chunks=%d)\n", N, chunks);
-      return 2;
-    }
+
+  ShapeParams shape =
+      derive_shape_params(M, N, K, g_margin, g_sample_s, g_coop_g, (TopkPath)g_path_override);
+  if (g_sample_s <= 0 || g_path_override != PATH_SMALL_N) g_sample_s = shape.S > 0 ? shape.S : g_sample_s;
+  if (!shape.geom_ok) {
+    fprintf(stderr, "ERROR: shape M=%d N=%d K=%d incompatible (path=%d S=%d cap=%d)\n", M, N, K,
+            (int)shape.path, shape.S, shape.cap);
+    return 2;
+  }
+  if (K > shape.cap && shape.path != PATH_SMALL_N) {
+    fprintf(stderr, "ERROR: topk=%d exceeds derived cap=%d\n", K, shape.cap);
+    return 2;
   }
 
   GPUInfo info = get_gpu_info();
-  printf("GPU: %s CUs=%d\n", info.name, info.sm_count);
+  const char* path_name =
+      shape.path == PATH_SMALL_N ? "small_n" : (shape.path == PATH_DECODE ? "decode" : "prefill");
+  printf("GPU: %s CUs=%d path=%s S=%d margin=%.3f cap=%d coop_g=%d fuse_ab=%d\n", info.name,
+         info.sm_count, path_name, shape.S, shape.margin, shape.cap, shape.coop_g, g_fuse_ab);
   HIP_CHECK(hipMemcpyToSymbol(d_use_nt_load, &g_use_nt_load, sizeof(int)));
 
   int dist_mode = 0;
@@ -809,16 +1062,32 @@ int main(int argc, char** argv) {
   }
 
   Bufs bufs{};
-  alloc_bufs(bufs, M, K);
+  alloc_bufs(bufs, M, K, shape.cap);
 
   HIP_CHECK(hipMemset(d_idx, 0xFF, out_elems * sizeof(int)));
   run_topk(d_in, M, N, K, d_idx, bufs, info.sm_count, 0);
+  // A launch that never started is not slow, it is instant and wrong: an
+  // over-large dynamic LDS request reported 4.40 us with garbage output before
+  // this check existed.
+  {
+    hipError_t le = hipGetLastError();
+    if (le != hipSuccess) {
+      fprintf(stderr, "ERROR: kernel launch failed (%d: %s) for M=%d N=%d K=%d path=%s\n",
+              (int)le, hipGetErrorString(le), M, N, K, path_name);
+      return 2;
+    }
+  }
   HIP_CHECK(hipDeviceSynchronize());
 
   int fb = 0;
   HIP_CHECK(hipMemcpy(&fb, bufs.fb_count, sizeof(int), hipMemcpyDeviceToHost));
 
-  if (g_dump_stats) {
+  // The small_n path never runs a candidate stage, so cand_count is untouched
+  // and reading it reports under_K=M from uninitialised memory -- a false alarm
+  // that made every small_n shape look like it was falling back.
+  if (g_dump_stats && shape.path == PATH_SMALL_N) {
+    printf("CANDSTATS path=small_n n/a (no candidate stage)\n");
+  } else if (g_dump_stats) {
     std::vector<unsigned> cc(M);
     HIP_CHECK(hipMemcpy(cc.data(), bufs.cand_count, (size_t)M * sizeof(unsigned),
                         hipMemcpyDeviceToHost));
@@ -843,14 +1112,20 @@ int main(int argc, char** argv) {
 
   if (do_verify) {
     if (g_inject_fault) h_idx[0] ^= 1;
-    std::vector<float> h_in(in_elems);
-    HIP_CHECK(hipMemcpy(h_in.data(), d_in, in_elems * sizeof(float), hipMemcpyDeviceToHost));
     int bad_rows = 0;
-    for (int r = 0; r < M; r++)
-      if (!verify_row_cpu(h_in.data() + (size_t)r * N, N, K, h_idx.data() + (size_t)r * K))
-        bad_rows++;
-    printf("VERIFY rows_fail=%d fallback_rows=%d pipeline=%s inject_fault=%d\n", bad_rows, fb,
-           g_pipeline_direct ? "direct" : "fused", g_inject_fault);
+    const size_t full_elems = (size_t)M * N;
+    if (full_elems <= 64 * 1024 * 1024 && M <= 256) {
+      std::vector<float> h_in(full_elems);
+      HIP_CHECK(hipMemcpy(h_in.data(), d_in, full_elems * sizeof(float), hipMemcpyDeviceToHost));
+      for (int r = 0; r < M; r++)
+        if (!verify_row_cpu(h_in.data() + (size_t)r * N, N, K, h_idx.data() + (size_t)r * K))
+          bad_rows++;
+    } else if (!verify_rows_sampled(d_in, M, N, K, d_idx, h_idx.data(), bufs,
+                                      g_verify_sample_rows)) {
+      bad_rows = 1;
+    }
+    printf("VERIFY rows_fail=%d fallback_rows=%d pipeline=%s inject_fault=%d path=%s\n", bad_rows,
+           fb, g_pipeline_direct ? "direct" : "fused", g_inject_fault, path_name);
     if (bad_rows != 0) return 2;
     if (!dump_path.empty()) {
       FILE* f = fopen(dump_path.c_str(), "wb");
@@ -867,24 +1142,61 @@ int main(int argc, char** argv) {
   if (do_time) {
     HipTimer timer;
     std::vector<double> run_medians;
+    hipGraph_t graph = nullptr;
+    hipGraphExec_t graph_exec = nullptr;
+    hipStream_t gs = nullptr;
+    if (g_use_hipgraph && !g_pipeline_direct) {
+      // Capture must run on a real stream: hipStreamBeginCapture on the legacy
+      // default stream returns 900 "operation not permitted when stream is
+      // capturing" regardless of what is being captured.
+      HIP_CHECK(hipStreamCreateWithFlags(&gs, hipStreamNonBlocking));
+      for (int w = 0; w < warmup; w++) run_topk(d_in, M, N, K, d_idx, bufs, info.sm_count, gs);
+      HIP_CHECK(hipStreamSynchronize(gs));
+      hipError_t cap_err = hipStreamBeginCapture(gs, hipStreamCaptureModeGlobal);
+      if (cap_err == hipSuccess) {
+        run_topk(d_in, M, N, K, d_idx, bufs, info.sm_count, gs);
+        cap_err = hipStreamEndCapture(gs, &graph);
+      }
+      if (cap_err == hipSuccess && graph != nullptr) {
+        HIP_CHECK(hipGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0));
+      } else {
+        if (graph) {
+          (void)hipGraphDestroy(graph);
+          graph = nullptr;
+        }
+        fprintf(stderr, "WARN: hipGraph capture failed (%d: %s); timing without graph\n",
+                (int)cap_err, hipGetErrorString(cap_err));
+      }
+    }
     for (int rep = 0; rep < repeats; rep++) {
-      for (int w = 0; w < warmup; w++) run_topk(d_in, M, N, K, d_idx, bufs, info.sm_count, 0);
-      HIP_CHECK(hipDeviceSynchronize());
+      if (!g_use_hipgraph || g_pipeline_direct) {
+        for (int w = 0; w < warmup; w++) run_topk(d_in, M, N, K, d_idx, bufs, info.sm_count, 0);
+        HIP_CHECK(hipDeviceSynchronize());
+      }
       std::vector<double> samples;
       samples.reserve(iters);
       for (int it = 0; it < iters; it++) {
-        timer.begin();
-        run_topk(d_in, M, N, K, d_idx, bufs, info.sm_count, 0);
-        samples.push_back(timer.end());
+        if (g_use_hipgraph && graph_exec) {
+          timer.begin(gs);
+          HIP_CHECK(hipGraphLaunch(graph_exec, gs));
+          samples.push_back(timer.end(gs));
+        } else {
+          timer.begin();
+          run_topk(d_in, M, N, K, d_idx, bufs, info.sm_count, 0);
+          samples.push_back(timer.end());
+        }
       }
       run_medians.push_back(median(samples));
     }
+    if (graph_exec) HIP_CHECK(hipGraphExecDestroy(graph_exec));
+    if (graph) HIP_CHECK(hipGraphDestroy(graph));
+    if (gs) HIP_CHECK(hipStreamDestroy(gs));
     const double med = median(run_medians);
     const double sd = stddev_pct(run_medians, med);
     printf("TIMING wall_ms_median=%.4f stddev_pct=%.3f repeats=%d iters=%d warmup=%d\n", med, sd,
            repeats, iters, warmup);
-    printf("RESULT pipeline=%s wall_ms=%.4f fallback_rows=%d\n",
-           g_pipeline_direct ? "direct" : "fused", med, fb);
+    printf("RESULT pipeline=%s wall_ms=%.4f fallback_rows=%d hipgraph=%d\n",
+           g_pipeline_direct ? "direct" : "fused", med, fb, g_use_hipgraph);
   }
 
   free_bufs(bufs);
