@@ -675,6 +675,65 @@ Still true after the revert: the block-size sweep (256..1024 for phase_a/c),
 `--fuse-ab 1` on prefill, and phase-a 2-pass do not beat the occupancy default,
 and S=8192 remains optimal vs 4096/16384 on the anchor.
 
+### Folding the HIST_REP reduction into the pivot scan: one barrier fewer per pass
+**Accepted, g_13.** A radix pass in `block_select_lds` held 5 block barriers:
+clear `s_hist`, histogram, reduce the HIST_REP replicas into `s_red`, and two
+inside `block_find_pivot_bucket`. The reduction exists only because the scan
+reads one value per bucket, so `block_find_pivot_bucket_rep` folds the replica
+sum in as it reads, and the separate loop plus its barrier disappear -- 5
+barriers to 4, no extra LDS, no arithmetic added (the same 256xHIST_REP adds
+happen either way, just in the 256 threads that need them).
+
+Won on every shape tried, largest where the select is the biggest share of the
+kernel, which is what a barrier-bound select predicts:
+
+| shape | before | after | delta |
+|---|---|---|---|
+| M=4096 N=131072 (anchor) | 0.6132 ms | 0.6090 ms | -0.68% |
+| M=4096 N=1048576 | 3.1741 ms | 3.1680 ms | -0.19% |
+| M=1 N=1048576 | 0.0316 ms | 0.0309 ms | -2.2% |
+| M=1024 N=65536 | 0.0793 ms | 0.0781 ms | -1.5% |
+| M=4096 N=8192 (small_n) | 0.0995 ms | 0.0947 ms | **-4.8%** |
+| M=2048 N=4096 (small_n) | 0.0372 ms | 0.0355 ms | **-4.6%** |
+
+Per-kernel at the anchor: `phase_a` 65.7 -> 62.2 us, `phase_c` 69.8 -> 68.1 us,
+`phase_b` unchanged (476-478 us). Inner geomean 64.72 -> 62.89 us (-2.83%),
+small_n regime -5.1%. `verify_grid --dist all` 2140/2140 with the same 409
+warnings, and the gate was proven failable on the shipped fused path first
+(`--inject-fault 1` -> rows_fail=1, `--inject-fault 2` -> values ok=0).
+
+`s_red` is now dead for `block_select_lds` callers but is still declared
+`__shared__` in those kernels and still used by `block_select_stream`. Removing
+those declarations would return ~1 KB of LDS per block, which changes
+occupancy and so needs `PHASE_A_STATIC_LDS` / `PHASE_C_STATIC_LDS` re-read off
+`.group_segment_fixed_size`. Deliberately left as a separate change.
+
+### Compacting the radix select's active set between passes buys nothing
+**Falsified, kept as `--phase-a-compact 1` so the measurement reproduces.**
+The filter-rescan select reads all `c` keys every pass and discards the ~255/256
+that miss the pivot prefix, and those later passes were measured at 30-34% of
+`phase_small_n_topk`. Compaction attacks exactly that: wave-private, in-place,
+zero extra LDS and zero extra barriers (wave w compacts its own segment, a
+survivor lands at or below the index it came from, so in place is safe), taking
+three passes from ~3c key reads to ~2c.
+
+It is correct -- identical `under_K` / `over_Calloc` / `rows_fail` to the
+baseline on all five distributions at the anchor, i.e. the same pivot -- and it
+is worth **nothing**: `phase_a` 65.7 -> 65.4 us (-0.5%), and wall time got
+WORSE on three of four shapes (M=4096 N=1M +0.30%, M=1024 N=65536 +1.0%,
+M=1 N=1M +2.2%; anchor -0.08%, inside noise).
+
+Why, and this is the reusable part: **the discarded reads were never the cost.**
+`phase_a`'s cost is the serial depth of one row -- passes x barriers over the
+keys in LDS -- as already recorded under "Early-exiting the radix select once
+the pivot is pinned". Compaction removes read volume and leaves the barrier
+count untouched, so it cannot move a barrier-bound kernel; the extra
+ballot/popcount in the critical path is what makes it net negative at small M.
+The 30-34% ablation figure measures what those passes COST, not what mechanism
+can reclaim it -- the same trap that section already warns about. The barrier
+fusion entry above is the version of this idea that works, because it removes a
+barrier instead of a read.
+
 ### decode large-N full-op BW is launch-bound, not filter-bound
 rocprof at M=128 N=65536: phase_a+b+c sum ~27.6 us vs 32.5 us wall; 3x launch
 floor dominates. coop_g table re-sweep (G=4/8/16/32) confirms G=8 at N=65536;
