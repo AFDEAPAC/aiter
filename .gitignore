@@ -3,6 +3,9 @@ bw_kernel
 floor_bench
 score.json
 log/rocprof_*/
+# Raw rocprofv3 kernel_trace output from bench/profile_large_n.sh; the parsed
+# breakdown it prints is committed as log/large_n_profile/summary.txt.
+log/large_n_profile/*/
 *.bin
 
 # Compiler-generated header dependencies (see Makefile: -MMD writes these so a
