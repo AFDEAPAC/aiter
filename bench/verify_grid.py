@@ -25,14 +25,22 @@ import grid  # noqa: E402
 ROOT = grid.ROOT
 
 
-def verify_one(m, n, k, dist, extra=()):
+def verify_one(m, n, k, dist, extra=(), ragged_prefix=None):
     cmd = [str(grid.BENCH), "--mode", "verify", "--m", str(m), "--n", str(n), "--topk", str(k),
            "--dist", dist, "--dump-stats", "1"]
+    if ragged_prefix is not None:
+        # CPU oracle, not the GPU one: phase_d_fallback shares exact_row_select
+        # with the kernel under test, so on a ragged row both would use the same
+        # row_len and agree even if row_len itself were wrong. The CPU side
+        # recomputes the extent independently from the host row_ends.
+        cmd += ["--ragged", "1", "--ragged-prefix", str(ragged_prefix),
+                "--verify-oracle", "cpu"]
     cmd += list(extra)
     p = subprocess.run(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                        universal_newlines=True)
     out = p.stdout
-    res = {"m": m, "n": n, "topk": k, "dist": dist, "ok": False, "why": ""}
+    res = {"m": m, "n": n, "topk": k, "dist": dist, "ok": False, "why": "",
+           "ragged_prefix": ragged_prefix}
     if p.returncode != 0 or "VERDICT PASS" not in out:
         res["why"] = (p.stderr.strip() or out.strip() or "no verdict")[:160]
         return res
@@ -46,7 +54,12 @@ def verify_one(m, n, k, dist, extra=()):
     st = re.search(r"under_K=(\d+) over_Calloc=(\d+)", out)
     if st:
         res["under_K"], res["over_cap"] = int(st.group(1)), int(st.group(2))
-        if res["under_K"] or res["over_cap"]:
+        # On a ragged launch a short row is ROUTED to the exact path on purpose,
+        # which shows up as under_K by construction. Flagging it would make the
+        # intended path look like a sampling miss on every ragged point.
+        if ragged_prefix is not None:
+            pass
+        elif res["under_K"] or res["over_cap"]:
             # Not a wrong answer -- the exact fallback caught it -- but it is the
             # signal that the sampling parameters are off for this shape, and it
             # is what turns a fast shape slow.
@@ -65,6 +78,8 @@ def main():
     ap.add_argument("--inner", action="store_true", help="only the 24 inner-loop points")
     ap.add_argument("--strict-stats", action="store_true",
                     help="treat under_K/over_Calloc > 0 as a failure, not a warning")
+    ap.add_argument("--no-ragged", action="store_true",
+                    help="skip the ragged points (grid.RAGGED)")
     args = ap.parse_args()
 
     if not grid.BENCH.exists():
@@ -75,7 +90,10 @@ def main():
     dists = ("uniform", "gaussian", "equal", "inf", "adversarial") if args.dist == "all" \
         else (args.dist,)
 
-    print("=== correctness gate: %d shapes x %d distribution(s) ===" % (len(shapes), len(dists)))
+    ragged = [] if (args.inner or args.no_ragged) else grid.ragged_shapes()
+    n_runs = (len(shapes) + len(ragged)) * len(dists)
+    print("=== correctness gate: %d uniform + %d ragged shapes x %d distribution(s) ==="
+          % (len(shapes), len(ragged), len(dists)))
     bad, warned = [], []
     for dist in dists:
         for (m, n, k) in shapes:
@@ -87,8 +105,14 @@ def main():
                 if r.get("warn"):
                     warned.append(r)
                     print("  warn  M=%-5d N=%-8d %-12s %s" % (m, n, dist, r["warn"]))
+        for (m, n, k, prefix) in ragged:
+            r = verify_one(m, n, k, dist, ragged_prefix=prefix)
+            if not r["ok"]:
+                bad.append(r)
+                print("  FAIL  ragged M=%-5d N=%-8d K=%-5d prefix=%-7d %-12s %s"
+                      % (m, n, k, prefix, dist, r["why"]))
 
-    print("\n  passed   %d" % (len(shapes) * len(dists) - len(bad)))
+    print("\n  passed   %d" % (n_runs - len(bad)))
     print("  failed   %d" % len(bad))
     print("  warnings %d (sampling off, exact fallback covered it)" % len(warned))
 

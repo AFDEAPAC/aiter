@@ -110,6 +110,44 @@ INNER = [
     (4096, 16384), (4096, 262144), (1024, 1048576), (2048, 262144),
 ]
 
+# ---------------------------------------------------------------------------
+# Ragged shapes, as (m, pitch, topk, ragged_prefix). Row r has extent
+# prefix + r + 1 clamped to the pitch, which is aiter's create_row_boundaries.
+#
+# The prefix is the axis that matters and the two values are disjoint paths, so
+# testing one is testing half the kernel:
+#   prefix 0        -> every extent is <= M, so every row is under max(S, K) and
+#                      takes the identity/exact route (fallback_rows == M).
+#   prefix 131072   -> every extent is long and ragged, so every row goes
+#                      through the SAMPLER (fallback_rows == 0). This is aiter's
+#                      real prefill config and it was untested until the
+#                      prefix knob existed.
+# k > pitch is included deliberately: it is the all-identity case aiter serves
+# and this op used to refuse.
+# ---------------------------------------------------------------------------
+RAGGED = [
+    # prefix 0: short rows. k > pitch on the first two.
+    (64, 64, 2048, 0),
+    (1024, 1024, 2048, 0),
+    (256, 2048, 2048, 0),
+    (4096, 512, 2048, 0),
+    (4096, 8192, 512, 0),
+    (512, 131072, 2048, 0),
+    (4096, 131072, 2048, 0),
+    # prefix 131072: long ragged rows, the sampler path, aiter's own widths.
+    (64, 131136, 2048, 131072),
+    (64, 131136, 512, 131072),
+    (256, 131328, 2048, 131072),
+    (1024, 132096, 2048, 131072),
+    (1024, 132096, 1024, 131072),
+    (4096, 135168, 2048, 131072),
+]
+
+
+def ragged_shapes():
+    return list(RAGGED)
+
+
 ANCHOR = (4096, 131072, TOPK)
 ANCHOR_LIMIT_US = 620.0     # v1 best measured here is 615.5-616.1 us
 POINT_REGRESS_PCT = 5.0     # no single point may be slower than this

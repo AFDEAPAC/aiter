@@ -65,6 +65,14 @@ static int g_small_n_passes = RADIX_PASSES;   // < 4 is a TIMING ABLATION (wrong
 static int g_verify_sample_rows = 32;
 static int g_verify_oracle_gpu = 1;
 static int g_ragged = 0;
+// Mirrors aiter's create_row_boundaries(num_rows, num_prefix): row r has extent
+// num_prefix + r + 1. The prefix is what decides WHICH ragged path is exercised
+// and the two are disjoint, so a gate that only runs prefix 0 tests half the
+// code: at prefix 0 every extent is <= M, so with S=8192 every row is routed to
+// the identity/exact path and the SAMPLER never sees a ragged row at all
+// (M=512 N=131072 reported fallback_rows for all 512 rows). aiter's real
+// prefill config uses prefix 131072, where every extent is long and ragged.
+static int g_ragged_prefix = 0;
 
 // ---------------------------------------------------------------------------
 // Block-wide exact radix select over keys already resident in LDS.
@@ -246,8 +254,7 @@ __global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restric
                                                           float* __restrict__ threshold_f,
                                                           unsigned int* __restrict__ cand_reserved,
                                                           unsigned int* __restrict__ cand_bad,
-                                                          int* __restrict__ fb_rows, int* __restrict__ fb_count,
-                                                          int K) {
+                                                          int* __restrict__ fb_count, int K) {
   const int row = blockIdx.x;
   const int len = row_len_dev(row, pitch, row_ends);
   const float* ri = input + (size_t)row * pitch;
@@ -264,10 +271,15 @@ __global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restric
   // past the row. Either way Phase B must collect nothing for this row, so the
   // threshold is +inf and Phase C takes it through the exact/identity path.
   if (RAGGED && (len <= K || len < S)) {
+    // +inf is the whole routing signal: Phase B keeps nothing below it, so
+    // cand_count lands under k_out and Phase C takes the row through the
+    // exact/identity path. Deliberately NOT appended to fb_rows here -- Phase C
+    // appends every row it routes, and doing it in both places counted a short
+    // row twice, overflowing the M-entry fb_rows (M=512 triangular reported
+    // fallback_rows=1024 and wrote 512 ints past the end of the buffer).
     if (threadIdx.x == 0) {
       threshold[row] = 0u;
       threshold_f[row] = __builtin_inff();
-      fb_rows[atomicAdd(fb_count, 1)] = row;
     }
     return;
   }
@@ -555,7 +567,12 @@ __global__ void phase_c_select_waveseg(const float* __restrict__ input, int pitc
   __shared__ unsigned s_wgt, s_weq;
 
   int* out_row = out_idx + (size_t)row * K;
-  if (c_raw < (unsigned)k_out || c_raw > (unsigned)cap) {
+  // `len <= K` is routed unconditionally rather than via cand_count, so the
+  // identity emit does not depend on how many candidates Phase B happened to
+  // keep: under the `inf` distribution a row of +inf values passes the +inf
+  // threshold and can push cand_count above k_out, which would otherwise send
+  // an identity row down the candidate path and order it differently to aiter.
+  if ((RAGGED && len <= K) || c_raw < (unsigned)k_out || c_raw > (unsigned)cap) {
     if (threadIdx.x == 0) fb_rows[atomicAdd(fb_count, 1)] = row;
     exact_row_select<RAGGED>(input, pitch, len, K, row, out_row, s_hist, s_red, s_scan, &s_wgt,
                              &s_weq);
@@ -771,7 +788,7 @@ static void topk_fused_impl(const float* d_in, int M, int pitch, const int* d_ro
   } else {
     phase_a_threshold<RAGGED><<<M, a_block, (size_t)S * sizeof(uint32_t), s>>>(
         d_in, pitch, d_row_ends, rank, S, g_phase_a_passes, chunk_stride, b.threshold, b.threshold_f,
-        coop ? b.cand_reserved : nullptr, coop ? b.cand_bad : nullptr, b.fb_rows, b.fb_count, K);
+        coop ? b.cand_reserved : nullptr, coop ? b.cand_bad : nullptr, b.fb_count, K);
 
     if (coop) {
       phase_b_filter_coop<RAGGED><<<dim3(sp.coop_g, M), g_cf_block, 0, s>>>(
@@ -979,7 +996,8 @@ static void usage(const char* prog) {
           "  --input-bin PATH --dump-indices PATH --inject-fault 0|1\n"
           "  --path auto|small_n|prefill|decode --coop-g G --fuse-ab 0|1 --hipgraph 0|1\n"
           "  --small-n-block B (256..1024, 0=auto)  --s-rule 0|1 (0=legacy R_TARGET)\n"
-          "  --verify-sample-rows N --verify-oracle gpu|cpu --ragged 0|1\n",
+          "  --verify-sample-rows N --verify-oracle gpu|cpu\n"
+          "  --ragged 0|1 --ragged-prefix P (row r extent = P+r+1, clamped to N)\n",
           prog);
 }
 
@@ -1041,6 +1059,7 @@ int main(int argc, char** argv) {
     else if (a == "--verify-sample-rows") g_verify_sample_rows = std::stoi(need());
     else if (a == "--verify-oracle") g_verify_oracle_gpu = (need() == "gpu") ? 1 : 0;
     else if (a == "--ragged") g_ragged = std::stoi(need());
+    else if (a == "--ragged-prefix") g_ragged_prefix = std::stoi(need());
     else {
       usage(argv[0]);
       exit(1);
@@ -1097,7 +1116,7 @@ int main(int argc, char** argv) {
     // at M > N the raw r+1 runs off the end of the allocation (M=4096 N=512
     // faulted with HIP 700 on row 512 onward).
     h_row_ends.resize(M);
-    for (int r = 0; r < M; r++) h_row_ends[r] = std::min(r + 1, N);
+    for (int r = 0; r < M; r++) h_row_ends[r] = std::min(g_ragged_prefix + r + 1, N);
     HIP_CHECK(hipMalloc(&d_row_ends, (size_t)M * sizeof(int)));
     HIP_CHECK(hipMemcpy(d_row_ends, h_row_ends.data(), (size_t)M * sizeof(int),
                         hipMemcpyHostToDevice));

@@ -482,6 +482,44 @@ because the sampler only ever has to serve `min(K, row_len) <= min(K, N)`.
 Passing the raw K instead asked `derive_shape_params` for a candidate capacity
 that cannot exist, which is what produced the refusal.
 
+### the ragged prefix decides WHICH path runs, so prefix 0 tests half the kernel
+`row_ends[r] = r + 1` bounds every extent by M, so at the S the prefill path
+derives (8192) every row is under `max(S, K)` and takes the identity/exact
+route: `M=512 N=131072` reported `fallback_rows` for all 512 rows, meaning the
+SAMPLER never saw a ragged row. The ragged gate was green while the ragged
+sampler path was entirely unexercised.
+
+aiter's real prefill config is `num_prefix=131072`, where every extent is long
+(131073..131328) and ragged by up to num_rows. Those are two disjoint paths, so
+`bench/grid.py` `RAGGED` carries the prefix per shape and runs both; with
+prefix 131072 `fallback_rows == 0`, which is the check that the sampler is the
+thing being tested.
+
+Verified failable before trusting a pass: `--inject-fault 1` gives
+`rows_fail=1` on all three regimes (prefix-0 identity, prefix-131072 non-pow2
+sampler, prefix-131072 large sampler).
+
+### the GPU oracle is not independent on a ragged row
+`phase_d_fallback` shares `exact_row_select` -- including the `row_len <= K`
+identity emit -- with the kernel under test, so both sides use the same
+`row_len`. If `row_len_dev` itself were wrong they would agree and the check
+would pass. Ragged points therefore run `--verify-oracle cpu`, which recomputes
+the extent on the host from its own `row_ends`.
+
+### fb_rows overflowed when two phases both appended the same row
+Phase A's ragged routing appended the row to `fb_rows` AND Phase C appended
+every row it routed, so a short row was counted twice against an M-entry
+buffer: `M=512` triangular reported `fallback_rows=1024` and wrote 512 ints past
+the end (at `M=4096` the count came back 3269, i.e. already corrupted). Silent,
+because `fb_rows` is diagnostics-only and the clobbered region gets rewritten.
+Fix: Phase A marks the row with `threshold_f = +inf` and nothing else -- that
+alone starves Phase B, drops cand_count under k_out and makes Phase C route it.
+
+Related: Phase C now routes `len <= K` unconditionally instead of relying on
+`cand_count < k_out`, because under the `inf` distribution a row of +inf values
+passes the +inf threshold and can push cand_count above k_out, which would send
+an identity row down the candidate path and order it differently to aiter.
+
 ### triangular test data must clamp row_ends to the pitch
 `row_ends[r] = r + 1` faults with HIP 700 as soon as `M > N` (M=4096 N=512: row
 512 onward claims an extent past the allocation). aiter's
