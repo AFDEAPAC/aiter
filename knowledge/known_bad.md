@@ -708,6 +708,98 @@ those declarations would return ~1 KB of LDS per block, which changes
 occupancy and so needs `PHASE_A_STATIC_LDS` / `PHASE_C_STATIC_LDS` re-read off
 `.group_segment_fixed_size`. Deliberately left as a separate change.
 
+### 2 barriers per radix pass is reachable, but only by confining the scan to one wave
+**Accepted, g_15.** After g_13 and g_14 a pass held 3 block barriers: one after
+the histogram, and two inside `block_find_pivot_bucket_rep`. Those two exist for
+different reasons, and only one of them is structural:
+- the first publishes `s_wavetot`, the cross-wave partial sums, which exist
+  ONLY because 256 buckets span 4 waves at 64 lanes;
+- the second publishes `s_scan` to the block, and since g_14 also publishes the
+  histogram clear.
+
+`block_find_pivot_bucket_wave0` gives the whole scan to wave 0 -- 256 buckets at
+4 per lane fit one wave, so the suffix scan is shuffles only -- and the first
+barrier disappears with the partials. The second stays, and CLEAR still rides on
+it for free, because wave 0 is now the histogram's only reader and zeroes each
+slot as it reads. Zero extra LDS, no slot read twice.
+
+Measured as a near-mirror of g_14's trade -- that one bought the anchor and cost
+small_n, this one buys small_n and the latency-bound small-M shapes and costs the
+anchor: small_n M=4096 N=8192 -2.2%, M=1 N=1M -1.6%, M=2048 N=4096 -1.4%,
+M=4096 N=1M neutral, M=1024 N=65536 neutral, **anchor +0.4%** (607.2 -> 609.4
+us). Inner geomean 62.66 -> 61.96 us (-1.1%) with small_n -2.3%, decode -1.3%
+and prefill neutral, so the aggregate is a clear win and the single regressing
+point sits far inside POINT_REGRESS_PCT.
+
+Two routes to 2 barriers that do NOT work, so they do not need re-measuring:
+- **Every wave scans redundantly.** Removes both of find_pivot's barriers, but
+  with all waves reading all slots no wave may zero anything until all have
+  finished, so the clear needs its own before-and-after pair and the pass is back
+  to 3 -- now at 4x the LDS reads.
+- **Double-buffer the histogram.** Genuinely reaches 2 (clear the idle buffer
+  during the scan), but costs +4 KB, which takes phase_a from 4 to 3 blocks/CU at
+  S=8192 (163840/42008 against 163840/37912) to buy a barrier that g_14 measured
+  at -0.35% on the anchor. This is the max-sized-static-LDS trap in a new
+  costume.
+
+Barrier count per pass across this session: 5 (pre-g_13) -> 4 (g_13) -> 3 (g_14)
+-> 2 (g_15), and the per-step gains are diminishing and increasingly
+regime-split, which is the signal that this lever is close to spent.
+
+### Wave-aggregating the LDS histogram atomic costs 6-38x what it saves
+**Falsified, kept as `-DHIST_AGG_ROUNDS=n` so it reproduces.** The per-element
+`atomicAdd` into `s_hist` is the one atomic in these kernels that is NOT
+aggregated, and it serialises: a sortable fp32's top byte is sign+exponent, so
+~half of uniform[-1,1] lands in one of the 256 buckets. `hist_add_aggregated`
+elects the lowest outstanding lane each round, groups the lanes sharing its
+bucket, has the leader add the group count, and lets the remainder fall back to
+individual atomics, so it is exact regardless of how well it groups (verified
+PASS on all five distributions at the anchor for rounds 1, 2 and 3).
+
+Priced the ceiling first with `-DABLATE_HIST_ATOMIC=1` (drops atomicity, same
+addresses, wrong results): `phase_a` 61.7 -> 53.0 us at the anchor, **-14.1%**,
+i.e. about 8.7 us or 1.4% of the 607 us wall. Then measured the mechanism:
+
+| shape | rounds=0 | rounds=1 | rounds=3 |
+|---|---|---|---|
+| M=4096 N=131072 | 0.6074 ms | 0.6476 (+6.6%) | 0.7297 (+20%) |
+| M=4096 N=8192 | 0.0965 ms | 0.1329 (+37.7%) | 0.1954 (+102%) |
+| M=2048 N=4096 | 0.0353 ms | 0.0445 (+26%) | 0.0559 (+58%) |
+| M=1 N=1048576 | 0.0305 ms | 0.0382 (+25%) | 0.0537 (+76%) |
+| M=1024 N=65536 | 0.0777 ms | 0.0868 (+11.7%) | 0.1028 (+32%) |
+
+Monotone in rounds, so it is the aggregation machinery itself: one `__ballot` +
+`__shfl` + `__ballot` + `popcount` per element, on the innermost loop, against a
+single LDS atomic that the LDS unit resolves in hardware. **LDS atomics on
+gfx950 are cheap enough that no cross-lane scheme pays for itself here**, which
+retro-explains the older "one LDS atomic per wave for s_wgt: 102.1 -> 104.2 us,
+no effect" note as the same result rather than a coincidence.
+
+Do NOT reach for aiter's LDS-histogram-then-global-flush
+(`topk_per_row_kernels.cu:490`) as a model either. That exists because aiter's
+multi-block path puts several blocks on one row and must combine histograms in
+GLOBAL memory; these kernels are one block per row, so the histogram never
+leaves LDS and the global stage it aggregates does not exist. The global atomics
+that DO remain here (`cand_reserved`, `s_wgt`/`s_weq`) are already bulk
+per-wave, and the Phase B filter has no atomic of any kind.
+
+### Third instance: an ablation prices the COST, never the MECHANISM
+Three separate attempts this session found a real, measured inefficiency and
+then failed to reclaim any of it, because what the ablation prices is the work
+you want to remove, not the machinery that removes it:
+
+| measured waste | mechanism tried | outcome |
+|---|---|---|
+| passes 2-4 are 30-34% of small_n and carry almost no work | block-wide active-set min/max early exit | 21-39% SLOWER |
+| same | wave-private in-place compaction | phase_a -0.5%, wall worse on 3 of 4 shapes |
+| histogram atomic is 14.1% of phase_a | wave-level leader-election aggregation | +6.6% to +37.7% |
+
+The two changes that DID work this session removed a **barrier** instead
+(g_13 fold-the-reduction, g_14 clear-on-read), which is the resource this select
+is actually short of. Before costing out another idea here, ask which of the
+three it removes -- reads, atomics, or barriers -- and only the third has a
+track record.
+
 ### Clearing the histogram on read removes a second barrier, but it is a regime trade
 **Accepted, g_14.** With the reduction already folded in (g_13), the remaining
 per-pass clear loop only exists to zero buckets the scan has just finished
