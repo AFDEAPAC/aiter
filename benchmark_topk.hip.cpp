@@ -1468,9 +1468,16 @@ int main(int argc, char** argv) {
     fprintf(stderr, "ERROR: topk=%d exceeds N=%d\n", K, N);
     return 2;
   }
-  if (N % FP32_EPT != 0) {
-    fprintf(stderr, "ERROR: N=%d must be multiple of %d\n", N, FP32_EPT);
-    return 2;
+  // An odd pitch is served through the RAGGED instantiation with full-row
+  // extents, which is what the aiter entry always uses anyway. RAGGED=false
+  // truncates its vector count (`pitch / FP32_EPT`) and applies no per-lane
+  // bound, so it would drop the row's last 1-3 elements; giving it a bound would
+  // cost the scored pow2 grid a compare per element for a case it never sees.
+  // Routing instead keeps that path byte-identical and reuses a tested one.
+  if (N % FP32_EPT != 0 && !g_ragged) {
+    g_ragged = 1;
+    g_ragged_prefix = N;      // every extent clamps to N, i.e. the whole row
+    g_row_starts_stride = 0;  // every row starts at 0
   }
 
   ShapeParams shape =
