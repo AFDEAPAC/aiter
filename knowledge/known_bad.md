@@ -1341,6 +1341,50 @@ warm every arm before timing any of them; (3) use the project's own perf
 harness, not a freshly written loop, or the number is not comparable to anything
 else in the tree.
 
+### The dispatch threshold is one octave too low: AVO is slower than aiter at N=32K
+**Measured 2026-09-18**, aiter `op_tests/test_topk_per_row.py` with
+`--prefill_backend aiter avo` and `AITER_DISABLE_TOPK_AVO=1`, so both backends
+go through one `@perftest` on one dataset, k=2048, fp32, 79 shapes.
+`reports/avo_vs_aiter_sweep.tsv`.
+
+`aiter_us / avo_us`, below 1.00 meaning AVO is the slower one:
+
+```
+ M \ N     2K    4K    8K   16K   32K   64K  128K  256K  512K 1024K
+     1   1.01  0.62  0.76  0.62  0.87  1.20  1.41  1.81  1.82  1.48
+     2   0.90  0.62  0.73  0.73  0.92  1.24  2.00  2.32  2.24  1.31
+     4   0.76  0.87  0.76  0.75  0.90  1.34  1.99  2.37  2.20  1.95
+     8   0.90  0.87  0.93  0.77  0.88  1.25  1.76  1.97  1.93  1.85
+    64   1.08  0.87  0.87  0.86  0.97  1.28  1.79  1.85  2.24  2.54
+   256   1.09  0.84  0.93  0.99  0.85  1.27  1.58  1.90  2.62  2.90
+  1024   1.17  1.23  0.92  0.99  1.27  1.52  1.77  2.28  2.70  3.08
+  4096      -  1.12  1.07  0.92  1.02  1.32  1.58  2.31  2.54  2.93
+dispatch  aiter aiter aiter aiter  AVO   AVO   AVO   AVO   AVO   AVO
+```
+
+**The N <= 16K columns do not matter**: `aiter/ops/topk.py:418` requires
+`stride0 >= 32768`, so production never sends those to AVO.
+
+**The N=32K column does matter, and AVO loses it for M <= 256** -- 0.85x to
+0.97x, i.e. 3% to 15% slower than the path it replaced. Only M=1024 (1.27x) and
+M=4096 (1.02x) win there. At N >= 64K AVO wins every cell, 1.20x to 3.08x.
+
+**Why no gate caught it:** the evolution log and `bench/score_grid.py` compare
+AVO against ITS OWN earlier baseline, never against aiter. A cell where AVO is
+correct, is not regressing, and is simply worse than the op it replaced is
+invisible to every gate in this repo. `bench/aiter_contract_audit.py` compares
+against aiter but only for CORRECTNESS. N=32768 is in the scored grid and has
+been green the whole time.
+
+**Fix is in the dispatch condition, not the kernel.** A flat `stride0 >= 65536`
+fixes M <= 256 but gives up the M=1024 and M=4096 wins at 32K, so it wants to be
+shape-aware -- something like `stride0 >= 65536 or numRows >= 1024`. Not applied
+here: it changes production routing and deserves its own measured commit.
+
+**Generalises:** a no-regression gate measured against your own history cannot
+see "worse than the thing you replaced". If an op is dispatched in place of
+another, the comparison against that other op has to be a gate, not a one-off.
+
 ## Structural facts worth keeping (2026-09-18 additions)
 
 - `RowExtents` (`csrc/topk_common.hip.hpp`) is the ONLY place `rowStarts[]` and

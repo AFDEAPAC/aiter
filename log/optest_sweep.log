@@ -1,0 +1,321 @@
+=== M=1 prefixes: 2047 4095 8191 16383 32767 65535 131071 262143 524287 1048575 ===
+  exit=0 lines=517
+|          1 |         2047 |    2048 | random            | aiter     | False          |          2048 |        |          2048 | True        |  1.97715 |
+|          1 |         2047 |    2048 | random            | aiter     | True           |          2048 |        |          2048 | True        |  2.00821 |
+|          1 |         2047 |    2048 | random            | avo       | False          |          2048 |        |          2048 | True        |  1.95045 |
+|          1 |         2047 |    2048 | random            | avo       | True           |          2048 |        |          2048 | True        |  2.32187 |
+|          1 |         4095 |    2048 | random            | aiter     | False          |          4096 |        |          4096 | True        |  5.46211 |
+|          1 |         4095 |    2048 | random            | aiter     | True           |          4096 |        |          4096 | True        |  5.46664 |
+|          1 |         4095 |    2048 | random            | avo       | False          |          4096 |        |          4096 | True        |  8.79064 |
+|          1 |         4095 |    2048 | random            | avo       | True           |          4096 |        |          4096 | True        |  9.00348 |
+|          1 |         8191 |    2048 | random            | aiter     | False          |          8192 |        |          8192 | True        |  9.45948 |
+|          1 |         8191 |    2048 | random            | aiter     | True           |          8192 |        |          8192 | True        |  9.56235 |
+|          1 |         8191 |    2048 | random            | avo       | False          |          8192 |        |          8192 | True        | 12.4068  |
+|          1 |         8191 |    2048 | random            | avo       | True           |          8192 |        |          8192 | True        | 12.7957  |
+|          1 |        16383 |    2048 | random            | aiter     | False          |         16384 |        |         16384 | True        | 11.9879  |
+|          1 |        16383 |    2048 | random            | aiter     | True           |         16384 |        |         16384 | True        | 12.4239  |
+|          1 |        16383 |    2048 | random            | avo       | False          |         16384 |        |         16384 | True        | 19.4473  |
+|          1 |        16383 |    2048 | random            | avo       | True           |         16384 |        |         16384 | True        | 20.1103  |
+|          1 |        32767 |    2048 | random            | aiter     | False          |         32768 |        |         32768 | True        | 17.5859  |
+|          1 |        32767 |    2048 | random            | aiter     | True           |         32768 |        |         32768 | True        | 18.2643  |
+|          1 |        32767 |    2048 | random            | avo       | False          |         32768 |        |         32768 | True        | 20.2896  |
+|          1 |        32767 |    2048 | random            | avo       | True           |         32768 |        |         32768 | True        | 20.6407  |
+|          1 |        65535 |    2048 | random            | aiter     | False          |         65536 |        |         65536 | True        | 25.8155  |
+|          1 |        65535 |    2048 | random            | aiter     | True           |         65536 |        |         65536 | True        | 26.0852  |
+|          1 |        65535 |    2048 | random            | avo       | False          |         65536 |        |         65536 | True        | 21.4659  |
+|          1 |        65535 |    2048 | random            | avo       | True           |         65536 |        |         65536 | True        | 21.4219  |
+|          1 |       131071 |    2048 | random            | aiter     | False          |        131072 |        |        131072 | True        | 31.0489  |
+|          1 |       131071 |    2048 | random            | aiter     | True           |        131072 |        |        131072 | True        | 31.1916  |
+|          1 |       131071 |    2048 | random            | avo       | False          |        131072 |        |        131072 | True        | 21.9796  |
+|          1 |       131071 |    2048 | random            | avo       | True           |        131072 |        |        131072 | True        | 21.7659  |
+|          1 |       262143 |    2048 | random            | aiter     | False          |        262144 |        |        262144 | True        | 40.12    |
+|          1 |       262143 |    2048 | random            | aiter     | True           |        262144 |        |        262144 | True        | 40.2793  |
+|          1 |       262143 |    2048 | random            | avo       | False          |        262144 |        |        262144 | True        | 22.1321  |
+|          1 |       262143 |    2048 | random            | avo       | True           |        262144 |        |        262144 | True        | 22.1763  |
+|          1 |       524287 |    2048 | random            | aiter     | False          |        524288 |        |        524288 | True        | 46.1381  |
+|          1 |       524287 |    2048 | random            | aiter     | True           |        524288 |        |        524288 | True        | 46.2884  |
+|          1 |       524287 |    2048 | random            | avo       | False          |        524288 |        |        524288 | True        | 25.3656  |
+|          1 |       524287 |    2048 | random            | avo       | True           |        524288 |        |        524288 | True        | 25.2351  |
+|          1 |      1048575 |    2048 | random            | aiter     | False          |       1048576 |        |       1048576 | True        | 47.3371  |
+|          1 |      1048575 |    2048 | random            | aiter     | True           |       1048576 |        |       1048576 | True        | 47.5838  |
+=== M=2 prefixes: 2046 4094 8190 16382 32766 65534 131070 262142 524286 1048574 ===
+  exit=0 lines=517
+|          2 |         2046 |    2048 | random            | aiter     | False          |          2047 |             |          2048 | True        |  1.97436 |
+|          2 |         2046 |    2048 | random            | aiter     | True           |          2047 |             |          2048 | True        |  2.29179 |
+|          2 |         2046 |    2048 | random            | avo       | False          |          2047 | ragged rows |          2048 | True        |  2.2052  |
+|          2 |         2046 |    2048 | random            | avo       | True           |          2047 | ragged rows |          2048 | True        |  2.71175 |
+|          2 |         4094 |    2048 | random            | aiter     | False          |          4095 |             |          4096 | True        |  5.92722 |
+|          2 |         4094 |    2048 | random            | aiter     | True           |          4095 |             |          4096 | True        |  5.99619 |
+|          2 |         4094 |    2048 | random            | avo       | False          |          4095 |             |          4096 | True        |  9.56505 |
+|          2 |         4094 |    2048 | random            | avo       | True           |          4095 |             |          4096 | True        |  9.79341 |
+|          2 |         8190 |    2048 | random            | aiter     | False          |          8191 |             |          8192 | True        |  9.51402 |
+|          2 |         8190 |    2048 | random            | aiter     | True           |          8191 |             |          8192 | True        |  9.63304 |
+|          2 |         8190 |    2048 | random            | avo       | False          |          8191 |             |          8192 | True        | 12.9655  |
+|          2 |         8190 |    2048 | random            | avo       | True           |          8191 |             |          8192 | True        | 13.3442  |
+|          2 |        16382 |    2048 | random            | aiter     | False          |         16383 |             |         16384 | True        | 14.5044  |
+|          2 |        16382 |    2048 | random            | aiter     | True           |         16383 |             |         16384 | True        | 14.9047  |
+|          2 |        16382 |    2048 | random            | avo       | False          |         16383 |             |         16384 | True        | 19.8088  |
+|          2 |        16382 |    2048 | random            | avo       | True           |         16383 |             |         16384 | True        | 20.4693  |
+|          2 |        32766 |    2048 | random            | aiter     | False          |         32767 |             |         32768 | True        | 19.8416  |
+|          2 |        32766 |    2048 | random            | aiter     | True           |         32767 |             |         32768 | True        | 20.4171  |
+|          2 |        32766 |    2048 | random            | avo       | False          |         32767 |             |         32768 | True        | 21.6731  |
+|          2 |        32766 |    2048 | random            | avo       | True           |         32767 |             |         32768 | True        | 21.5057  |
+|          2 |        65534 |    2048 | random            | aiter     | False          |         65535 |             |         65536 | True        | 26.1555  |
+|          2 |        65534 |    2048 | random            | aiter     | True           |         65535 |             |         65536 | True        | 26.3678  |
+|          2 |        65534 |    2048 | random            | avo       | False          |         65535 |             |         65536 | True        | 21.0792  |
+|          2 |        65534 |    2048 | random            | avo       | True           |         65535 |             |         65536 | True        | 21.1389  |
+|          2 |       131070 |    2048 | random            | aiter     | False          |        131071 |             |        131072 | True        | 44.6978  |
+|          2 |       131070 |    2048 | random            | aiter     | True           |        131071 |             |        131072 | True        | 42.7481  |
+|          2 |       131070 |    2048 | random            | avo       | False          |        131071 |             |        131072 | True        | 22.3976  |
+|          2 |       131070 |    2048 | random            | avo       | True           |        131071 |             |        131072 | True        | 22.6468  |
+|          2 |       262142 |    2048 | random            | aiter     | False          |        262143 |             |        262144 | True        | 52.3045  |
+|          2 |       262142 |    2048 | random            | aiter     | True           |        262143 |             |        262144 | True        | 51.6308  |
+|          2 |       262142 |    2048 | random            | avo       | False          |        262143 |             |        262144 | True        | 22.5155  |
+|          2 |       262142 |    2048 | random            | avo       | True           |        262143 |             |        262144 | True        | 22.5529  |
+|          2 |       524286 |    2048 | random            | aiter     | False          |        524287 |             |        524288 | True        | 64.467   |
+|          2 |       524286 |    2048 | random            | aiter     | True           |        524287 |             |        524288 | True        | 62.9686  |
+|          2 |       524286 |    2048 | random            | avo       | False          |        524287 |             |        524288 | True        | 28.7164  |
+|          2 |       524286 |    2048 | random            | avo       | True           |        524287 |             |        524288 | True        | 28.8736  |
+|          2 |      1048574 |    2048 | random            | aiter     | False          |       1048575 |             |       1048576 | True        | 45.0494  |
+|          2 |      1048574 |    2048 | random            | aiter     | True           |       1048575 |             |       1048576 | True        | 45.6078  |
+=== M=4 prefixes: 2044 4092 8188 16380 32764 65532 131068 262140 524284 1048572 ===
+  exit=0 lines=517
+|          4 |         2044 |    2048 | random            | aiter     | False          |          2045 |             |          2048 | True        |  1.94817 |
+|          4 |         2044 |    2048 | random            | aiter     | True           |          2045 |             |          2048 | True        |  2.41598 |
+|          4 |         2044 |    2048 | random            | avo       | False          |          2045 | ragged rows |          2048 | True        |  2.55068 |
+|          4 |         2044 |    2048 | random            | avo       | True           |          2045 | ragged rows |          2048 | True        |  3.04515 |
+|          4 |         4092 |    2048 | random            | aiter     | False          |          4093 |             |          4096 | True        |  8.67947 |
+|          4 |         4092 |    2048 | random            | aiter     | True           |          4093 |             |          4096 | True        |  8.73822 |
+|          4 |         4092 |    2048 | random            | avo       | False          |          4093 |             |          4096 | True        |  9.96109 |
+|          4 |         4092 |    2048 | random            | avo       | True           |          4093 |             |          4096 | True        | 10.2007  |
+|          4 |         8188 |    2048 | random            | aiter     | False          |          8189 |             |          8192 | True        | 10.2734  |
+|          4 |         8188 |    2048 | random            | aiter     | True           |          8189 |             |          8192 | True        | 10.395   |
+|          4 |         8188 |    2048 | random            | avo       | False          |          8189 |             |          8192 | True        | 13.4965  |
+|          4 |         8188 |    2048 | random            | avo       | True           |          8189 |             |          8192 | True        | 13.8674  |
+|          4 |        16380 |    2048 | random            | aiter     | False          |         16381 |             |         16384 | True        | 15.0572  |
+|          4 |        16380 |    2048 | random            | aiter     | True           |         16381 |             |         16384 | True        | 15.3305  |
+|          4 |        16380 |    2048 | random            | avo       | False          |         16381 |             |         16384 | True        | 20.1636  |
+|          4 |        16380 |    2048 | random            | avo       | True           |         16381 |             |         16384 | True        | 20.8483  |
+|          4 |        32764 |    2048 | random            | aiter     | False          |         32765 |             |         32768 | True        | 20.3543  |
+|          4 |        32764 |    2048 | random            | aiter     | True           |         32765 |             |         32768 | True        | 20.9128  |
+|          4 |        32764 |    2048 | random            | avo       | False          |         32765 |             |         32768 | True        | 22.5608  |
+|          4 |        32764 |    2048 | random            | avo       | True           |         32765 |             |         32768 | True        | 22.568   |
+|          4 |        65532 |    2048 | random            | aiter     | False          |         65533 |             |         65536 | True        | 30.7324  |
+|          4 |        65532 |    2048 | random            | aiter     | True           |         65533 |             |         65536 | True        | 31.6958  |
+|          4 |        65532 |    2048 | random            | avo       | False          |         65533 |             |         65536 | True        | 22.9335  |
+|          4 |        65532 |    2048 | random            | avo       | True           |         65533 |             |         65536 | True        | 22.8824  |
+|          4 |       131068 |    2048 | random            | aiter     | False          |        131069 |             |        131072 | True        | 46.3997  |
+|          4 |       131068 |    2048 | random            | aiter     | True           |        131069 |             |        131072 | True        | 44.4937  |
+|          4 |       131068 |    2048 | random            | avo       | False          |        131069 |             |        131072 | True        | 23.3434  |
+|          4 |       131068 |    2048 | random            | avo       | True           |        131069 |             |        131072 | True        | 23.4404  |
+|          4 |       262140 |    2048 | random            | aiter     | False          |        262141 |             |        262144 | True        | 62.5966  |
+|          4 |       262140 |    2048 | random            | aiter     | True           |        262141 |             |        262144 | True        | 60.105   |
+|          4 |       262140 |    2048 | random            | avo       | False          |        262141 |             |        262144 | True        | 26.4251  |
+|          4 |       262140 |    2048 | random            | avo       | True           |        262141 |             |        262144 | True        | 26.3904  |
+|          4 |       524284 |    2048 | random            | aiter     | False          |        524285 |             |        524288 | True        | 65.0174  |
+|          4 |       524284 |    2048 | random            | aiter     | True           |        524285 |             |        524288 | True        | 62.6998  |
+|          4 |       524284 |    2048 | random            | avo       | False          |        524285 |             |        524288 | True        | 29.5324  |
+|          4 |       524284 |    2048 | random            | avo       | True           |        524285 |             |        524288 | True        | 29.0452  |
+|          4 |      1048572 |    2048 | random            | aiter     | False          |       1048573 |             |       1048576 | True        | 71.0403  |
+|          4 |      1048572 |    2048 | random            | aiter     | True           |       1048573 |             |       1048576 | True        | 69.1537  |
+=== M=8 prefixes: 2040 4088 8184 16376 32760 65528 131064 262136 524280 1048568 ===
+  exit=0 lines=517
+|          8 |         2040 |    2048 | random            | aiter     | False          |          2041 |             |          2048 | True        |  2.92183 |
+|          8 |         2040 |    2048 | random            | aiter     | True           |          2041 |             |          2048 | True        |  3.4374  |
+|          8 |         2040 |    2048 | random            | avo       | False          |          2041 | ragged rows |          2048 | True        |  3.23981 |
+|          8 |         2040 |    2048 | random            | avo       | True           |          2041 | ragged rows |          2048 | True        |  3.84841 |
+|          8 |         4088 |    2048 | random            | aiter     | False          |          4089 |             |          4096 | True        |  9.37864 |
+|          8 |         4088 |    2048 | random            | aiter     | True           |          4089 |             |          4096 | True        |  9.44668 |
+|          8 |         4088 |    2048 | random            | avo       | False          |          4089 |             |          4096 | True        | 10.7622  |
+|          8 |         4088 |    2048 | random            | avo       | True           |          4089 |             |          4096 | True        | 10.9415  |
+|          8 |         8184 |    2048 | random            | aiter     | False          |          8185 |             |          8192 | True        | 13.2383  |
+|          8 |         8184 |    2048 | random            | aiter     | True           |          8185 |             |          8192 | True        | 13.3252  |
+|          8 |         8184 |    2048 | random            | avo       | False          |          8185 |             |          8192 | True        | 14.2431  |
+|          8 |         8184 |    2048 | random            | avo       | True           |          8185 |             |          8192 | True        | 14.5922  |
+|          8 |        16376 |    2048 | random            | aiter     | False          |         16377 |             |         16384 | True        | 16.3456  |
+|          8 |        16376 |    2048 | random            | aiter     | True           |         16377 |             |         16384 | True        | 16.6383  |
+|          8 |        16376 |    2048 | random            | avo       | False          |         16377 |             |         16384 | True        | 21.1251  |
+|          8 |        16376 |    2048 | random            | avo       | True           |         16377 |             |         16384 | True        | 21.7971  |
+|          8 |        32760 |    2048 | random            | aiter     | False          |         32761 |             |         32768 | True        | 21.5583  |
+|          8 |        32760 |    2048 | random            | aiter     | True           |         32761 |             |         32768 | True        | 22.1009  |
+|          8 |        32760 |    2048 | random            | avo       | False          |         32761 |             |         32768 | True        | 24.6052  |
+|          8 |        32760 |    2048 | random            | avo       | True           |         32761 |             |         32768 | True        | 24.9368  |
+|          8 |        65528 |    2048 | random            | aiter     | False          |         65529 |             |         65536 | True        | 31.9742  |
+|          8 |        65528 |    2048 | random            | aiter     | True           |         65529 |             |         65536 | True        | 32.686   |
+|          8 |        65528 |    2048 | random            | avo       | False          |         65529 |             |         65536 | True        | 25.5292  |
+|          8 |        65528 |    2048 | random            | avo       | True           |         65529 |             |         65536 | True        | 25.7512  |
+|          8 |       131064 |    2048 | random            | aiter     | False          |        131065 |             |        131072 | True        | 52.464   |
+|          8 |       131064 |    2048 | random            | aiter     | True           |        131065 |             |        131072 | True        | 48.0825  |
+|          8 |       131064 |    2048 | random            | avo       | False          |        131065 |             |        131072 | True        | 29.8376  |
+|          8 |       131064 |    2048 | random            | avo       | True           |        131065 |             |        131072 | True        | 29.6137  |
+|          8 |       262136 |    2048 | random            | aiter     | False          |        262137 |             |        262144 | True        | 60.4426  |
+|          8 |       262136 |    2048 | random            | aiter     | True           |        262137 |             |        262144 | True        | 56.5258  |
+|          8 |       262136 |    2048 | random            | avo       | False          |        262137 |             |        262144 | True        | 30.7547  |
+|          8 |       262136 |    2048 | random            | avo       | True           |        262137 |             |        262144 | True        | 30.5548  |
+|          8 |       524280 |    2048 | random            | aiter     | False          |        524281 |             |        524288 | True        | 67.9041  |
+|          8 |       524280 |    2048 | random            | aiter     | True           |        524281 |             |        524288 | True        | 63.1546  |
+|          8 |       524280 |    2048 | random            | avo       | False          |        524281 |             |        524288 | True        | 35.1795  |
+|          8 |       524280 |    2048 | random            | avo       | True           |        524281 |             |        524288 | True        | 34.9158  |
+|          8 |      1048568 |    2048 | random            | aiter     | False          |       1048569 |             |       1048576 | True        | 73.9338  |
+|          8 |      1048568 |    2048 | random            | aiter     | True           |       1048569 |             |       1048576 | True        | 69.659   |
+=== M=64 prefixes: 1984 4032 8128 16320 32704 65472 131008 262080 524224 1048512 ===
+  exit=0 lines=517
+|         64 |         1984 |    2048 | random            | aiter     | False          |          1985 |             |          2048 | True        |   2.96954 |
+|         64 |         1984 |    2048 | random            | aiter     | True           |          1985 |             |          2048 | True        |   3.54623 |
+|         64 |         1984 |    2048 | random            | avo       | False          |          1985 | ragged rows |          2048 | True        |   2.75737 |
+|         64 |         1984 |    2048 | random            | avo       | True           |          1985 | ragged rows |          2048 | True        |   3.42461 |
+|         64 |         4032 |    2048 | random            | aiter     | False          |          4033 |             |          4096 | True        |   9.11305 |
+|         64 |         4032 |    2048 | random            | aiter     | True           |          4033 |             |          4096 | True        |   9.20784 |
+|         64 |         4032 |    2048 | random            | avo       | False          |          4033 |             |          4096 | True        |  10.5231  |
+|         64 |         4032 |    2048 | random            | avo       | True           |          4033 |             |          4096 | True        |  10.829   |
+|         64 |         8128 |    2048 | random            | aiter     | False          |          8129 |             |          8192 | True        |  12.7411  |
+|         64 |         8128 |    2048 | random            | aiter     | True           |          8129 |             |          8192 | True        |  13.0359  |
+|         64 |         8128 |    2048 | random            | avo       | False          |          8129 |             |          8192 | True        |  14.6244  |
+|         64 |         8128 |    2048 | random            | avo       | True           |          8129 |             |          8192 | True        |  15.2096  |
+|         64 |        16320 |    2048 | random            | aiter     | False          |         16321 |             |         16384 | True        |  19.2314  |
+|         64 |        16320 |    2048 | random            | aiter     | True           |         16321 |             |         16384 | True        |  19.6163  |
+|         64 |        16320 |    2048 | random            | avo       | False          |         16321 |             |         16384 | True        |  22.4231  |
+|         64 |        16320 |    2048 | random            | avo       | True           |         16321 |             |         16384 | True        |  23.1999  |
+|         64 |        32704 |    2048 | random            | aiter     | False          |         32705 |             |         32768 | True        |  27.7428  |
+|         64 |        32704 |    2048 | random            | aiter     | True           |         32705 |             |         32768 | True        |  28.3875  |
+|         64 |        32704 |    2048 | random            | avo       | False          |         32705 |             |         32768 | True        |  28.5352  |
+|         64 |        32704 |    2048 | random            | avo       | True           |         32705 |             |         32768 | True        |  28.8504  |
+|         64 |        65472 |    2048 | random            | aiter     | False          |         65473 |             |         65536 | True        |  39.3334  |
+|         64 |        65472 |    2048 | random            | aiter     | True           |         65473 |             |         65536 | True        |  40.3739  |
+|         64 |        65472 |    2048 | random            | avo       | False          |         65473 |             |         65536 | True        |  30.8339  |
+|         64 |        65472 |    2048 | random            | avo       | True           |         65473 |             |         65536 | True        |  31.3326  |
+|         64 |       131008 |    2048 | random            | aiter     | False          |        131009 |             |        131072 | True        |  63.3208  |
+|         64 |       131008 |    2048 | random            | aiter     | True           |        131009 |             |        131072 | True        |  67.0731  |
+|         64 |       131008 |    2048 | random            | avo       | False          |        131009 |             |        131072 | True        |  35.4707  |
+|         64 |       131008 |    2048 | random            | avo       | True           |        131009 |             |        131072 | True        |  35.3842  |
+|         64 |       262080 |    2048 | random            | aiter     | False          |        262081 |             |        262144 | True        |  83.4217  |
+|         64 |       262080 |    2048 | random            | aiter     | True           |        262081 |             |        262144 | True        |  89.4213  |
+|         64 |       262080 |    2048 | random            | avo       | False          |        262081 |             |        262144 | True        |  45.1348  |
+|         64 |       262080 |    2048 | random            | avo       | True           |        262081 |             |        262144 | True        |  45.5773  |
+|         64 |       524224 |    2048 | random            | aiter     | False          |        524225 |             |        524288 | True        | 120.941   |
+|         64 |       524224 |    2048 | random            | aiter     | True           |        524225 |             |        524288 | True        | 127.814   |
+|         64 |       524224 |    2048 | random            | avo       | False          |        524225 |             |        524288 | True        |  53.9088  |
+|         64 |       524224 |    2048 | random            | avo       | True           |        524225 |             |        524288 | True        |  54.2609  |
+|         64 |      1048512 |    2048 | random            | aiter     | False          |       1048513 |             |       1048576 | True        | 200.74    |
+|         64 |      1048512 |    2048 | random            | aiter     | True           |       1048513 |             |       1048576 | True        | 209.424   |
+=== M=256 prefixes: 1792 3840 7936 16128 32512 65280 130816 261888 524032 1048320 ===
+  exit=0 lines=517
+|        256 |         1792 |    2048 | random            | aiter     | False          |          1793 |             |          2048 | True        |   3.42514 |
+|        256 |         1792 |    2048 | random            | aiter     | True           |          1793 |             |          2048 | True        |   5.01942 |
+|        256 |         1792 |    2048 | random            | avo       | False          |          1793 | ragged rows |          2048 | True        |   3.14002 |
+|        256 |         1792 |    2048 | random            | avo       | True           |          1793 | ragged rows |          2048 | True        |   4.75222 |
+|        256 |         3840 |    2048 | random            | aiter     | False          |          3841 |             |          4096 | True        |  10.2299  |
+|        256 |         3840 |    2048 | random            | aiter     | True           |          3841 |             |          4096 | True        |  10.4614  |
+|        256 |         3840 |    2048 | random            | avo       | False          |          3841 |             |          4096 | True        |  12.1417  |
+|        256 |         3840 |    2048 | random            | avo       | True           |          3841 |             |          4096 | True        |  12.5255  |
+|        256 |         7936 |    2048 | random            | aiter     | False          |          7937 |             |          8192 | True        |  14.818   |
+|        256 |         7936 |    2048 | random            | aiter     | True           |          7937 |             |          8192 | True        |  15.1255  |
+|        256 |         7936 |    2048 | random            | avo       | False          |          7937 |             |          8192 | True        |  16.0149  |
+|        256 |         7936 |    2048 | random            | avo       | True           |          7937 |             |          8192 | True        |  16.6555  |
+|        256 |        16128 |    2048 | random            | aiter     | False          |         16129 |             |         16384 | True        |  23.4708  |
+|        256 |        16128 |    2048 | random            | aiter     | True           |         16129 |             |         16384 | True        |  24.2513  |
+|        256 |        16128 |    2048 | random            | avo       | False          |         16129 |             |         16384 | True        |  23.6146  |
+|        256 |        16128 |    2048 | random            | avo       | True           |         16129 |             |         16384 | True        |  24.6069  |
+|        256 |        32512 |    2048 | random            | aiter     | False          |         32513 |             |         32768 | True        |  30.352   |
+|        256 |        32512 |    2048 | random            | aiter     | True           |         32513 |             |         32768 | True        |  31.7243  |
+|        256 |        32512 |    2048 | random            | avo       | False          |         32513 |             |         32768 | True        |  35.9144  |
+|        256 |        32512 |    2048 | random            | avo       | True           |         32513 |             |         32768 | True        |  36.5912  |
+|        256 |        65280 |    2048 | random            | aiter     | False          |         65281 |             |         65536 | True        |  51.6702  |
+|        256 |        65280 |    2048 | random            | aiter     | True           |         65281 |             |         65536 | True        |  52.9552  |
+|        256 |        65280 |    2048 | random            | avo       | False          |         65281 |             |         65536 | True        |  40.6193  |
+|        256 |        65280 |    2048 | random            | avo       | True           |         65281 |             |         65536 | True        |  41.8798  |
+|        256 |       130816 |    2048 | random            | aiter     | False          |        130817 |             |        131072 | True        |  85.7135  |
+|        256 |       130816 |    2048 | random            | aiter     | True           |        130817 |             |        131072 | True        |  88.758   |
+|        256 |       130816 |    2048 | random            | avo       | False          |        130817 |             |        131072 | True        |  54.1336  |
+|        256 |       130816 |    2048 | random            | avo       | True           |        130817 |             |        131072 | True        |  54.7031  |
+|        256 |       261888 |    2048 | random            | aiter     | False          |        261889 |             |        262144 | True        | 152.653   |
+|        256 |       261888 |    2048 | random            | aiter     | True           |        261889 |             |        262144 | True        | 157.88    |
+|        256 |       261888 |    2048 | random            | avo       | False          |        261889 |             |        262144 | True        |  80.4953  |
+|        256 |       261888 |    2048 | random            | avo       | True           |        261889 |             |        262144 | True        |  79.8459  |
+|        256 |       524032 |    2048 | random            | aiter     | False          |        524033 |             |        524288 | True        | 337.124   |
+|        256 |       524032 |    2048 | random            | aiter     | True           |        524033 |             |        524288 | True        | 353.866   |
+|        256 |       524032 |    2048 | random            | avo       | False          |        524033 |             |        524288 | True        | 128.87    |
+|        256 |       524032 |    2048 | random            | avo       | True           |        524033 |             |        524288 | True        | 129.374   |
+|        256 |      1048320 |    2048 | random            | aiter     | False          |       1048321 |             |       1048576 | True        | 658.521   |
+|        256 |      1048320 |    2048 | random            | aiter     | True           |       1048321 |             |       1048576 | True        | 685.857   |
+=== M=1024 prefixes: 1024 3072 7168 15360 31744 64512 130048 261120 523264 1047552 ===
+  exit=0 lines=517
+|       1024 |         1024 |    2048 | random            | aiter     | False          |          1025 |             |          2048 | True        |    4.92963 |
+|       1024 |         1024 |    2048 | random            | aiter     | True           |          1025 |             |          2048 | True        |    8.92188 |
+|       1024 |         1024 |    2048 | random            | avo       | False          |          1025 | ragged rows |          2048 | True        |    4.22719 |
+|       1024 |         1024 |    2048 | random            | avo       | True           |          1025 | ragged rows |          2048 | True        |    9.50306 |
+|       1024 |         3072 |    2048 | random            | aiter     | False          |          3073 |             |          4096 | True        |   26.1765  |
+|       1024 |         3072 |    2048 | random            | aiter     | True           |          3073 |             |          4096 | True        |   26.9452  |
+|       1024 |         3072 |    2048 | random            | avo       | False          |          3073 |             |          4096 | True        |   21.2869  |
+|       1024 |         3072 |    2048 | random            | avo       | True           |          3073 |             |          4096 | True        |   23.5229  |
+|       1024 |         7168 |    2048 | random            | aiter     | False          |          7169 |             |          8192 | True        |   29.9671  |
+|       1024 |         7168 |    2048 | random            | aiter     | True           |          7169 |             |          8192 | True        |   31.0642  |
+|       1024 |         7168 |    2048 | random            | avo       | False          |          7169 |             |          8192 | True        |   32.4537  |
+|       1024 |         7168 |    2048 | random            | avo       | True           |          7169 |             |          8192 | True        |   35.4462  |
+|       1024 |        15360 |    2048 | random            | aiter     | False          |         15361 |             |         16384 | True        |   53.4189  |
+|       1024 |        15360 |    2048 | random            | aiter     | True           |         15361 |             |         16384 | True        |   54.167   |
+|       1024 |        15360 |    2048 | random            | avo       | False          |         15361 |             |         16384 | True        |   53.7456  |
+|       1024 |        15360 |    2048 | random            | avo       | True           |         15361 |             |         16384 | True        |   55.4305  |
+|       1024 |        31744 |    2048 | random            | aiter     | False          |         31745 |             |         32768 | True        |   87.7859  |
+|       1024 |        31744 |    2048 | random            | aiter     | True           |         31745 |             |         32768 | True        |   90.0817  |
+|       1024 |        31744 |    2048 | random            | avo       | False          |         31745 |             |         32768 | True        |   69.366   |
+|       1024 |        31744 |    2048 | random            | avo       | True           |         31745 |             |         32768 | True        |   67.6213  |
+|       1024 |        64512 |    2048 | random            | aiter     | False          |         64513 |             |         65536 | True        |  143.372   |
+|       1024 |        64512 |    2048 | random            | aiter     | True           |         64513 |             |         65536 | True        |  145.915   |
+|       1024 |        64512 |    2048 | random            | avo       | False          |         64513 |             |         65536 | True        |   94.2312  |
+|       1024 |        64512 |    2048 | random            | avo       | True           |         64513 |             |         65536 | True        |   95.0081  |
+|       1024 |       130048 |    2048 | random            | aiter     | False          |        130049 |             |        131072 | True        |  274.014   |
+|       1024 |       130048 |    2048 | random            | aiter     | True           |        130049 |             |        131072 | True        |  275.722   |
+|       1024 |       130048 |    2048 | random            | avo       | False          |        130049 |             |        131072 | True        |  154.859   |
+|       1024 |       130048 |    2048 | random            | avo       | True           |        130049 |             |        131072 | True        |  155.14    |
+|       1024 |       261120 |    2048 | random            | aiter     | False          |        261121 |             |        262144 | True        |  619.676   |
+|       1024 |       261120 |    2048 | random            | aiter     | True           |        261121 |             |        262144 | True        |  641.401   |
+|       1024 |       261120 |    2048 | random            | avo       | False          |        261121 |             |        262144 | True        |  271.64    |
+|       1024 |       261120 |    2048 | random            | avo       | True           |        261121 |             |        262144 | True        |  273.753   |
+|       1024 |       523264 |    2048 | random            | aiter     | False          |        523265 |             |        524288 | True        | 1236.14    |
+|       1024 |       523264 |    2048 | random            | aiter     | True           |        523265 |             |        524288 | True        | 1299.78    |
+|       1024 |       523264 |    2048 | random            | avo       | False          |        523265 |             |        524288 | True        |  457.142   |
+|       1024 |       523264 |    2048 | random            | avo       | True           |        523265 |             |        524288 | True        |  452.914   |
+|       1024 |      1047552 |    2048 | random            | aiter     | False          |       1047553 |             |       1048576 | True        | 2431.72    |
+|       1024 |      1047552 |    2048 | random            | aiter     | True           |       1047553 |             |       1048576 | True        | 2573.13    |
+=== M=4096 prefixes: 0 4096 12288 28672 61440 126976 258048 520192 1044480 ===
+  exit=0 lines=477
+|       4096 |            0 |    2048 | random            | aiter     | False          |             1 |             |          4096 | True        |   46.7221 |
+|       4096 |            0 |    2048 | random            | aiter     | True           |             1 |             |          4096 | True        |   53.4055 |
+|       4096 |            0 |    2048 | random            | avo       | False          |             1 | ragged rows |          4096 | True        |   41.7694 |
+|       4096 |            0 |    2048 | random            | avo       | True           |             1 | ragged rows |          4096 | True        |   51.0943 |
+|       4096 |         4096 |    2048 | random            | aiter     | False          |          4097 |             |          8192 | True        |   92.3147 |
+|       4096 |         4096 |    2048 | random            | aiter     | True           |          4097 |             |          8192 | True        |   95.6727 |
+|       4096 |         4096 |    2048 | random            | avo       | False          |          4097 |             |          8192 | True        |   86.4276 |
+|       4096 |         4096 |    2048 | random            | avo       | True           |          4097 |             |          8192 | True        |   90.812  |
+|       4096 |        12288 |    2048 | random            | aiter     | False          |         12289 |             |         16384 | True        |  163.234  |
+|       4096 |        12288 |    2048 | random            | aiter     | True           |         12289 |             |         16384 | True        |  166.76   |
+|       4096 |        12288 |    2048 | random            | avo       | False          |         12289 |             |         16384 | True        |  177.208  |
+|       4096 |        12288 |    2048 | random            | avo       | True           |         12289 |             |         16384 | True        |  181.917  |
+|       4096 |        28672 |    2048 | random            | aiter     | False          |         28673 |             |         32768 | True        |  256.149  |
+|       4096 |        28672 |    2048 | random            | aiter     | True           |         28673 |             |         32768 | True        |  262.882  |
+|       4096 |        28672 |    2048 | random            | avo       | False          |         28673 |             |         32768 | True        |  250.882  |
+|       4096 |        28672 |    2048 | random            | avo       | True           |         28673 |             |         32768 | True        |  255.436  |
+|       4096 |        61440 |    2048 | random            | aiter     | False          |         61441 |             |         65536 | True        |  454.669  |
+|       4096 |        61440 |    2048 | random            | aiter     | True           |         61441 |             |         65536 | True        |  460.613  |
+|       4096 |        61440 |    2048 | random            | avo       | False          |         61441 |             |         65536 | True        |  343.968  |
+|       4096 |        61440 |    2048 | random            | avo       | True           |         61441 |             |         65536 | True        |  349.711  |
+|       4096 |       126976 |    2048 | random            | aiter     | False          |        126977 |             |        131072 | True        |  910.282  |
+|       4096 |       126976 |    2048 | random            | aiter     | True           |        126977 |             |        131072 | True        |  918.653  |
+|       4096 |       126976 |    2048 | random            | avo       | False          |        126977 |             |        131072 | True        |  574.907  |
+|       4096 |       126976 |    2048 | random            | avo       | True           |        126977 |             |        131072 | True        |  605.393  |
+|       4096 |       258048 |    2048 | random            | aiter     | False          |        258049 |             |        262144 | True        | 2183.62   |
+|       4096 |       258048 |    2048 | random            | aiter     | True           |        258049 |             |        262144 | True        | 2181.74   |
+|       4096 |       258048 |    2048 | random            | avo       | False          |        258049 |             |        262144 | True        |  943.385  |
+|       4096 |       258048 |    2048 | random            | avo       | True           |        258049 |             |        262144 | True        |  945.915  |
+|       4096 |       520192 |    2048 | random            | aiter     | False          |        520193 |             |        524288 | True        | 4488.63   |
+|       4096 |       520192 |    2048 | random            | aiter     | True           |        520193 |             |        524288 | True        | 4593.74   |
+|       4096 |       520192 |    2048 | random            | avo       | False          |        520193 |             |        524288 | True        | 1763.73   |
+|       4096 |       520192 |    2048 | random            | avo       | True           |        520193 |             |        524288 | True        | 1641.82   |
+|       4096 |      1044480 |    2048 | random            | aiter     | False          |       1044481 |             |       1048576 | True        | 8929.91   |
+|       4096 |      1044480 |    2048 | random            | aiter     | True           |       1044481 |             |       1048576 | True        | 8998.65   |
+|       4096 |      1044480 |    2048 | random            | avo       | False          |       1044481 |             |       1048576 | True        | 3051.31   |
+|       4096 |      1044480 |    2048 | random            | avo       | True           |       1044481 |             |       1048576 | True        | 3054.88   |
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+ALLDONE
