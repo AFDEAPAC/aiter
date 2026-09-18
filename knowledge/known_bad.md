@@ -1303,6 +1303,27 @@ translation unit, which also contains kernels.
 **What caught it:** the patch script re-read the files afterwards and failed if
 any unclamped accessor remained. Write the read-back check, not just the edit.
 
+### Pairing a width with `width + 1` does not measure parity when the width is a power of two
+**Symptom:** a first even/odd sweep compared stride0 = B against B+1 for
+B in {65536 ... 1048576} and reported odd widths costing up to **+5.71%**
+(M=256 B=1048576), with per-shape spreads under 1.1% -- i.e. not noise.
+**Cause:** B is a power of two and B+1 is not, so the pair moves TWO things at
+once. Leaving the power of two changes the sampling stride from exact to masked
+and moves the `kCoopLog2G` and phase_a S lookups; all of that was being charged
+to parity.
+**Fix:** add B+2 -- even, and also not a power of two -- to the SAME pass, and
+read two comparisons instead of one:
+`(B+1) vs (B+2)` is parity, `(B+2) vs B` is power-of-two-ness.
+**Result over 30 (M, B) cells:** parity **mean -0.07%** (-1.16% to +0.42%),
+power-of-two-ness **mean +0.82%** (max +5.60%). The entire effect was the pow2
+boundary; an odd pitch costs nothing. `bench/parity_sweep.py`,
+`reports/parity_sweep.json`.
+**Generalises:** when a one-unit step also crosses a structural boundary, the
+step is not a controlled comparison. Add the third point that crosses the
+boundary without the property under test, and put all of them in one pass --
+the effect being resolved here was a few percent, which is the same size as
+cross-run drift.
+
 ## Structural facts worth keeping (2026-09-18 additions)
 
 - `RowExtents` (`csrc/topk_common.hip.hpp`) is the ONLY place `rowStarts[]` and
