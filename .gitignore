@@ -12,3 +12,4 @@ log/large_n_profile/*/
 # header edit triggers a rebuild).
 .deps/
 __pycache__/
+select_grid

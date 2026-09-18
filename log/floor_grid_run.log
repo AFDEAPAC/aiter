@@ -1,0 +1,6 @@
+spec lines: 1412
+parsed 1412 rows
+reference cell: read 333.32 us (-0.7%)  select 325.88 us (-4.8%)  d -7.44 us
+hit_rate mismatches: 0 of 1412
+dispatch floor (m=1 n=4 probe): 6.20 us
+cells: 390   WROTE /home/mh/topk-prefill-avo/reports/floor_grid.json
