@@ -1,0 +1,9 @@
+M=1 exit=0
+M=8 exit=0
+M=64 exit=0
+M=256 exit=0
+M=512 exit=0
+M=1024 exit=0
+M=2048 exit=0
+M=4096 exit=0
+ALLDONE

@@ -1376,10 +1376,30 @@ invisible to every gate in this repo. `bench/aiter_contract_audit.py` compares
 against aiter but only for CORRECTNESS. N=32768 is in the scored grid and has
 been green the whole time.
 
-**Fix is in the dispatch condition, not the kernel.** A flat `stride0 >= 65536`
-fixes M <= 256 but gives up the M=1024 and M=4096 wins at 32K, so it wants to be
-shape-aware -- something like `stride0 >= 65536 or numRows >= 1024`. Not applied
-here: it changes production routing and deserves its own measured commit.
+**FIXED** in `aiter/ops/topk.py`: the floor is now `AVO_MIN_STRIDE0_WIDE = 32768`
+when `numRows >= 1024` and `AVO_MIN_STRIDE0_NARROW = 49152` below that.
+
+49152, not the 65536 that first looked right. The original grid jumps an octave
+between 32K and 64K, so the crossover had to be filled in before picking a
+number (`log/crossover/`, aiter_us / avo_us, below 1.00 meaning AVO is slower):
+
+```
+ M \ N     32K   40K   48K   56K   64K
+ 1        0.87  1.05  1.15  1.31  1.22
+ 8        0.88  1.05  1.22  1.09  1.27
+ 64       0.94  0.95  1.15  1.11  1.28
+ 256      0.81  0.84  1.04  1.04  1.23
+ 512      0.91  0.92  1.03  1.02  1.19
+ 1024     1.25  1.26  1.40  1.45  1.52
+ 2048     1.14  1.17  1.28  1.30  1.38
+ 4096     1.02  1.04  1.19  1.24  1.34
+```
+
+A flat 65536 would have thrown away the 1.15-1.22x that `numRows <= 64` earns at
+48K. Verified through the dispatcher with both backends under one @perftest:
+M=256 N=32768 now routes to mb/ob at 30.47 us instead of AVO at 36.92 (a 22%
+loss avoided), M=256 N=49152 routes to AVO at 39.55 against mb/ob's 42.22, and
+M=1024 N=32768 keeps AVO at 66.63 against mb/ob's 88.23.
 
 **Generalises:** a no-regression gate measured against your own history cannot
 see "worse than the thing you replaced". If an op is dispatched in place of
