@@ -277,22 +277,38 @@ Ours: aiter <code>@perftest</code> via <code>bench/ceiling_sweep.py</code>.</div
  <div class="s">of %d measured</div></div>
 </div>
 
-<div class="gate"><b>Build gate.</b> The vendored file records its own reference for
-m=4096 n=131072 k=2048 g=1 mlp=4 tb=1024: read 335.8 us, select 342.4 us, d 6.6 us.
-This build gives read <b>%.2f us (%+.1f%%)</b> and select <b>%.2f us (%+.1f%%)</b>,
-with d = %+.2f us. Read, <code>hit_rate</code> and <code>drop_pct</code> all reproduce;
-select is slightly faster than the reference and d is negative. The read control is a
-read plus one float add per element &mdash; the cheapest thing a kernel can do with
-every value it touches &mdash; so a negative d means selection costs nothing on top of
-that minimum, not that anything is broken. Codegen does differ from the machine those
-reference numbers came from: <code>read_kern&lt;1024,4&gt;</code> is 30 VGPRs here
-against the 42 the file cites. Floor values are stable regardless: re-running the whole
-grid moves the median cell 1.86%% and no cell more than 3.82%%.</div>
+<div class="gate"><b>One ruler on both sides.</b> select_grid brackets every launch
+with a hipEvent pair (its lines 462&ndash;475), so its own number is kernel time plus the
+command-processor bubble around a single dispatch &mdash; about 3 us here. That is
+invisible on a 300 us cell and is the <i>entire</i> measurement on a 3 us one: it is why
+an empty kernel reads "about 6 us" in the file's notes, and it turned the small-M half of
+this grid into a flat 6.2 us plateau that did not move with N. Measured head to head at
+m=128 n=16384 g=4 mlp=4 tb=1024: event timing says read 5.96 / select 6.16 us, a
+rocprofv3 kernel trace says 3.44 / 3.64. Our own side comes from aiter
+<code>@perftest</code>, which reads kernel duration out of a trace, so comparing the two
+made our kernel look faster than the floor exactly where the floor was mostly launch.
+<b>Both sides here are kernel duration from a profiler trace.</b> Across the grid the
+event ruler sits a median 2.99 us above the trace (p10 2.16, p90 4.06), and 3.66 us on
+the cells that made up that plateau.
 
-<div class="note"><b>Two timers.</b> Tables 1 and 2 use select_grid's own hipEvent
-timing; tables 3 and 4 use aiter <code>@perftest</code> (rotated arguments to defeat
-L2, GPU time from a profiler trace). Measured 3&ndash;7%% apart on the same shape.
-Ratios within one table are clean; the floor-to-ours ratio carries that systematic.</div>
+<br><br><b>Build gate.</b> The vendored file records read 335.8 us, select 342.4 us,
+d 6.6 us for m=4096 n=131072 k=2048 g=1 mlp=4 tb=1024. Traced, this build gives read
+<b>%.2f us (%+.1f%%)</b> and select <b>%.2f us (%+.1f%%)</b>, d = %+.2f us, with
+<code>hit_rate</code> and <code>drop_pct</code> exact. Codegen does differ from the
+machine those numbers came from &mdash; <code>read_kern&lt;1024,4&gt;</code> is 30 VGPRs
+here against the 42 the file cites &mdash; which is the likeliest reason d lands
+differently. Reproducibility, re-running the whole grid: cells over 20 us move a median
+0.29%% (max 2.19%%), 5&ndash;20 us cells 1.77%%, and cells under 5 us 5.06%% &mdash; but that
+last figure is 0.14 us of absolute jitter divided by a very small number, not a
+measurement that wanders.</div>
+
+<div class="note"><b>What still differs between the two sides.</b> The floor is one
+kernel; ours is three dispatches whose durations the profiler sums. And the floor
+depends on the allocation its spec forces: all 390 cells share one 17.2 GB buffer, which
+is what makes them comparable to each other, but re-running six cells alone moves them
+&minus;13.6%% to +12.7%% against the batch (the largest cell agrees to 0.1%%). Treat
+cross-cell shape as solid and single absolute values as carrying that much
+uncertainty.</div>
 
 <h2>Zones &mdash; why the floor is where it is</h2>
 <div class="legend" style="flex-wrap:wrap">%s</div>
@@ -303,12 +319,11 @@ tables 3 and 4 leave them grey rather than colour a ratio that means nothing.</b
 select_grid degenerates to a copy, reading every value and writing every index,
 while our kernel takes aiter's documented short-circuit and emits the identity
 with a -1 tail without ranking anything. We come out 2&ndash;4x "faster than the
-floor" because the two are not doing the same work. <i>launch-bound</i> is the
-vendored file's own warning, verbatim: an empty kernel costs about 6 us here,
-below roughly m=128 the floor IS that launch cost, and those cells tell you
-nothing about a selector. Our dispatch is cheaper than select_grid's &mdash;
-1.48 us against 6.20 us at M=1 N=2K &mdash; so a ratio there measures the two
-harnesses' launch overhead, not the kernel.</div>
+floor" because the two are not doing the same work. <i>launch-bound</i> is the vendored
+file's own warning: below roughly m=128 the floor IS the dispatch cost and those cells
+tell you nothing about a selector. On kernel time that probe is %.2f us rather than the
+6.2 us the event ruler showed, so this zone is now 101 cells instead of 206 &mdash;
+switching rulers moved 105 cells out of "meaningless" and into the comparison.</div>
 
 <h2>Distance to floor &mdash; tables 3 and 4</h2>
 <div class="legend">at floor %s far from floor &nbsp;&mdash;&nbsp; 1.0x green to 5.0x red</div>
@@ -344,6 +359,7 @@ document.querySelectorAll('.tab').forEach(function(t){
        g.get("sel_pct", 0), g.get("d_us", 0),
        legend,
        ", ".join("%s %d" % (ZONE_LABEL[z[0]], zcount[z[0]]) for z in ZONES),
+       dispatch,
        ramp, "".join(tabs), "".join(panes),
        par_f, pw2_f, par_m, pw2_m)
 

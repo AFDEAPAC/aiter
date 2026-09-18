@@ -1385,6 +1385,61 @@ here: it changes production routing and deserves its own measured commit.
 see "worse than the thing you replaced". If an op is dispatched in place of
 another, the comparison against that other op has to be a gate, not a one-off.
 
+### hipEvent-per-launch timing is not kernel time, and it faked a whole plateau
+**Symptom:** the ideal-selector floor (scripts/select_grid.hip) came out as a flat
+6.2 us across the entire small-M half of the grid, unchanged whether N was 2K or
+1024K, and our own kernel measured *faster* than that "floor" in 13 cells.
+**Cause:** select_grid brackets every launch with a hipEvent pair (its lines
+462-475), so its number is kernel time plus the command-processor bubble around a
+single dispatch. Our side comes from aiter `@perftest`, which reads kernel
+duration out of a profiler trace. Two different rulers, and the difference is a
+roughly constant 3 us that is invisible at 300 us and is the entire measurement
+at 3 us.
+**Measured head to head** at m=128 n=16384 g=4 mlp=4 tb=1024: event timing says
+read 5.96 / select 6.16 us, a rocprofv3 kernel trace of the same run says
+3.44 / 3.64. Across the 390-cell grid the event ruler sits a median 2.99 us above
+the trace (p10 2.16, p90 4.06) and 3.66 us on the cells that formed the plateau.
+**Fix:** `bench/floor_grid.py --trace` (now the default) runs select_grid under
+rocprofv3 and attributes dispatches to spec lines by order. The pattern is fixed
+by select_grid's own loop -- one select for the hit counts, then 3 passes of 5
+warm-up (read, select) pairs and `iters` timed pairs -- and the driver aborts if
+the trace does not match it, because a drift there would silently mis-assign
+every later cell. On kernel time the floor scales with N properly: M=4096 goes
+11.26 us at N=2K to 2517.62 us at N=1024K, and the dispatch probe is 1.92 us
+rather than 6.20.
+**Generalises:** before comparing two numbers, check they are the same
+measurement. A per-launch event pair includes dispatch; a profiler trace does
+not. Whoever reads the report will notice a kernel that beats its own lower
+bound.
+
+### More samples, not fewer, even when the profiler times every dispatch
+**Symptom:** cutting `iters` from 50 to 5 in traced mode -- reasoning that a
+profiler timestamps every launch so a handful is enough -- made the floor
+irreproducible: re-running moved the median cell 12.27% and put 258 of 390 cells
+over 5%, against 1.86% median in event mode. The dispatch probe swung 3.76 -> 1.80 us.
+**Fix:** same sample count in both modes. Re-running then moves cells over 20 us
+by a median 0.29%, 5-20 us cells by 1.77%, and cells under 5 us by 5.06% -- and
+that last number is 0.14 us of absolute jitter over a very small value, not drift.
+**Generalises:** short kernels need the samples whichever instrument you point at
+them. A better timer does not replace repetition.
+
+### FALSIFIED: the small-M gap to the floor is not coop_g being too low
+**The lead looked good.** select_grid picks g so that m*g is exactly 512
+workgroups -- its stated rule, 256 CUs at 2 blocks/CU -- while our `coop_g` at
+M=16 N=32K is 8, i.e. 128 blocks. That cell is 9.6x the floor, and the 7-10x band
+in the report sits exactly where select_grid splits rows hardest (g=32 at M=16,
+g=16 at M=32, down to g=2 at M=256).
+**Killed by:** `./benchmark_topk --mode time --m 16 --n 32768 --topk 2048
+--coop-g G`, wall_ms by G: 4 -> 0.0284, **8 -> 0.0230**, 16 -> 0.0239,
+32 -> 0.0240, 64 -> 0.0240. The auto choice of 8 is already the best available,
+more splitting is slightly worse, and asking for 32 or 64 still reports
+coop_g=16 -- the shipped `kCoopLog2G` table (csrc/topk_shape.hip.hpp:392) tops
+out there for these shapes. So block count is not what costs us 9.6x.
+**What is left:** the floor is one kernel doing one pass; we run three dispatches
+(sample, filter, select) whose durations the profiler sums. At a 2.64 us floor
+the per-phase fixed cost is the whole story. That is a structural difference, not
+a tuning knob, and it wants a profile before anyone guesses further.
+
 ## Structural facts worth keeping (2026-09-18 additions)
 
 - `RowExtents` (`csrc/topk_common.hip.hpp`) is the ONLY place `rowStarts[]` and
