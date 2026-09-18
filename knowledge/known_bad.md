@@ -1522,6 +1522,50 @@ process failure worth remembering -- read this file before probing, not after.
 - **Block sizes**: `--phase-c-block` 256/512/1024 gives 14.92 / 10.28 / 8.56 us
   and `--phase-a-block` shows no win either. The occupancy default is best.
 
+### FALSIFIED: fusing phase A into phase B, even done properly
+Chased because reducing the kernel count is the only route below ~5x the floor at
+small M (see the phase A/C characterisation above). It does not pay, and the
+reason is not the one the existing `--fuse-ab 1` failure suggests.
+
+**The existing failure is a launch-config artefact, not a verdict on fusion.**
+`phase_ab_fused` launches `<<<M, a_block>>>`, so the streaming half loses the
+row splitting that `phase_b_filter_coop` gets from its `dim3(coop_g, M)` grid.
+The penalty tracks `coop_g`, not the LDS footprint as first assumed:
+
+```
+M=1024 N=65536   S=4096  coop_g=1   78.1 -> 98.1 us    +26%
+M=4096 N=65536   S=4096  coop_g=2  317.3 -> 1113.5     +251%
+M=4096 N=131072  S=8192  coop_g=8  580.0 -> 2764.0     +377%
+M=2048 N=131072  S=8192  coop_g=8  270.8 -> 1355.7     +401%
+```
+
+At `coop_g == 1` the fused grid is the grid phase B would have used anyway and
+the cost is +26%; every `coop_g > 1` shape pays four times over for the lost
+split. So a fused kernel has to keep the `dim3(G, M)` grid and let each of the G
+blocks recompute the threshold redundantly -- which is affordable only at small M
+where the machine is idle, i.e. exactly the red zone.
+
+**What kills it is the zeroing, not the fusion.** `phase_a_threshold` also clears
+`cand_reserved[row]`, `cand_bad[row]` and `fb_count`
+(`benchmark_topk.hip.cpp:497-501`). Under a `dim3(G, M)` grid those G blocks run
+concurrently, so block 0 zeroing the counter while block 3 is already
+`atomicAdd`-ing it is a race. Removing phase A therefore means replacing that
+clear, and both ways cost more than the kernel they remove:
+
+- **A memset.** Measured in the same trace as the phases themselves:
+  `__amd_rocclr_fillBufferAligned` is 1.84-3.16 us, against phase A's 5.68 us at
+  M=16 N=32768, of which about 1.9 us is the bare-kernel floor and 3.8 us is
+  work that the fused kernel still has to do. So 3.16 + (3.8 + 6.3) = 13.3 us
+  against today's A + B = 11.98 us. A net loss before any of the fusion risk.
+- **Per-block private candidate regions**, so no shared counter needs clearing.
+  The shared atomic reservation exists precisely because candidates cluster
+  unevenly across a row's chunks; partitioning the buffer G ways would turn that
+  clustering into spurious `cand_bad` overflows and push rows into the exact
+  fallback, which costs far more than the kernel saved.
+
+**Generalises:** a kernel that also initialises shared state is not just its own
+cost. Before costing a fusion, find what else the kernel being removed was doing.
+
 ## Structural facts worth keeping (2026-09-18 additions)
 
 - `RowExtents` (`csrc/topk_common.hip.hpp`) is the ONLY place `rowStarts[]` and
