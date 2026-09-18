@@ -1,0 +1,565 @@
+[aiter] WARNING: NUMA balancing is enabled, which may cause errors. It is recommended to disable NUMA balancing by running "sudo sh -c 'echo 0 > /proc/sys/kernel/numa_balancing'" for more details: https://rocm.docs.amd.com/en/latest/how-to/system-optimization/mi300x.html#disable-numa-auto-balancing
+[aiter] import [module_aiter_core] under /aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_top_k_per_row] under /aiter/aiter/jit/module_top_k_per_row.so
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 28672,
+                                   top_k                        = 512,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = False)
+/usr/local/lib/python3.13/dist-packages/torch/profiler/profiler.py:272: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+USDT:2026-09-18 09:14:11 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:11 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[W918 09:14:11.553796119 collection.cpp:1182] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 28672,
+                                   top_k                        = 512,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = True)
+USDT:2026-09-18 09:14:12 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:12 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 61440,
+                                   top_k                        = 512,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = False)
+USDT:2026-09-18 09:14:13 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:13 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 61440,
+                                   top_k                        = 512,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = True)
+USDT:2026-09-18 09:14:14 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:14 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 126976,
+                                   top_k                        = 512,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = False)
+USDT:2026-09-18 09:14:14 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:14 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 126976,
+                                   top_k                        = 512,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = True)
+USDT:2026-09-18 09:14:15 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:15 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 258048,
+                                   top_k                        = 512,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = False)
+USDT:2026-09-18 09:14:16 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:16 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 258048,
+                                   top_k                        = 512,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = True)
+USDT:2026-09-18 09:14:17 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:17 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 28672,
+                                   top_k                        = 1024,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = False)
+USDT:2026-09-18 09:14:18 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:18 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 28672,
+                                   top_k                        = 1024,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = True)
+USDT:2026-09-18 09:14:19 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:19 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 61440,
+                                   top_k                        = 1024,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = False)
+USDT:2026-09-18 09:14:20 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:20 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 61440,
+                                   top_k                        = 1024,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = True)
+USDT:2026-09-18 09:14:20 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:21 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 126976,
+                                   top_k                        = 1024,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = False)
+USDT:2026-09-18 09:14:21 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:21 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 126976,
+                                   top_k                        = 1024,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = True)
+USDT:2026-09-18 09:14:23 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:23 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 258048,
+                                   top_k                        = 1024,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = False)
+USDT:2026-09-18 09:14:24 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:24 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 258048,
+                                   top_k                        = 1024,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = True)
+USDT:2026-09-18 09:14:25 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:25 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 28672,
+                                   top_k                        = 2048,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = False)
+USDT:2026-09-18 09:14:26 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:26 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 28672,
+                                   top_k                        = 2048,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = True)
+USDT:2026-09-18 09:14:27 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:27 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 61440,
+                                   top_k                        = 2048,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = False)
+USDT:2026-09-18 09:14:29 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:29 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 61440,
+                                   top_k                        = 2048,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = True)
+USDT:2026-09-18 09:14:30 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:30 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 126976,
+                                   top_k                        = 2048,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = False)
+USDT:2026-09-18 09:14:31 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:31 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 126976,
+                                   top_k                        = 2048,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = True)
+USDT:2026-09-18 09:14:33 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:33 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 258048,
+                                   top_k                        = 2048,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = False)
+USDT:2026-09-18 09:14:34 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:34 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_prefill(num_rows                     = 4096,
+                                   num_prefix                   = 258048,
+                                   top_k                        = 2048,
+                                   data_generation              = random,
+                                   backend                      = avo,
+                                   write_values                 = True)
+USDT:2026-09-18 09:14:36 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:36 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] topk_per_row_prefill summary (markdown):
+|   num_rows |   num_prefix |   top_k | data_generation   | backend   | write_values   |   min_row_len | note   |   context_len | all_close   |      us |
+|-----------:|-------------:|--------:|:------------------|:----------|:---------------|--------------:|:-------|--------------:|:------------|--------:|
+|       4096 |        28672 |     512 | random            | avo       | False          |         28673 |        |         32768 | True        | 217.188 |
+|       4096 |        28672 |     512 | random            | avo       | True           |         28673 |        |         32768 | True        | 218.669 |
+|       4096 |        61440 |     512 | random            | avo       | False          |         61441 |        |         65536 | True        | 367.385 |
+|       4096 |        61440 |     512 | random            | avo       | True           |         61441 |        |         65536 | True        | 359.709 |
+|       4096 |       126976 |     512 | random            | avo       | False          |        126977 |        |        131072 | True        | 571.446 |
+|       4096 |       126976 |     512 | random            | avo       | True           |        126977 |        |        131072 | True        | 609.39  |
+|       4096 |       258048 |     512 | random            | avo       | False          |        258049 |        |        262144 | True        | 921.81  |
+|       4096 |       258048 |     512 | random            | avo       | True           |        258049 |        |        262144 | True        | 921.677 |
+|       4096 |        28672 |    1024 | random            | avo       | False          |         28673 |        |         32768 | True        | 213.205 |
+|       4096 |        28672 |    1024 | random            | avo       | True           |         28673 |        |         32768 | True        | 217.051 |
+|       4096 |        61440 |    1024 | random            | avo       | False          |         61441 |        |         65536 | True        | 333.197 |
+|       4096 |        61440 |    1024 | random            | avo       | True           |         61441 |        |         65536 | True        | 332.763 |
+|       4096 |       126976 |    1024 | random            | avo       | False          |        126977 |        |        131072 | True        | 610.398 |
+|       4096 |       126976 |    1024 | random            | avo       | True           |        126977 |        |        131072 | True        | 607.078 |
+|       4096 |       258048 |    1024 | random            | avo       | False          |        258049 |        |        262144 | True        | 954.329 |
+|       4096 |       258048 |    1024 | random            | avo       | True           |        258049 |        |        262144 | True        | 909.326 |
+|       4096 |        28672 |    2048 | random            | avo       | False          |         28673 |        |         32768 | True        | 250.117 |
+|       4096 |        28672 |    2048 | random            | avo       | True           |         28673 |        |         32768 | True        | 254.31  |
+|       4096 |        61440 |    2048 | random            | avo       | False          |         61441 |        |         65536 | True        | 342.431 |
+|       4096 |        61440 |    2048 | random            | avo       | True           |         61441 |        |         65536 | True        | 348.056 |
+|       4096 |       126976 |    2048 | random            | avo       | False          |        126977 |        |        131072 | True        | 598.831 |
+|       4096 |       126976 |    2048 | random            | avo       | True           |        126977 |        |        131072 | True        | 577.912 |
+|       4096 |       258048 |    2048 | random            | avo       | False          |        258049 |        |        262144 | True        | 981.813 |
+|       4096 |       258048 |    2048 | random            | avo       | True           |        258049 |        |        262144 | True        | 948.304 |
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 512,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  stable                       = False,
+                                  write_values                 = False,
+                                  fast                         = False,
+                                  flydsl                       = False)
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 512,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  flydsl                       = True,
+                                  stable                       = False,
+                                  write_values                 = False,
+                                  fast                         = False)
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 512,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  stable                       = False,
+                                  write_values                 = True,
+                                  fast                         = False,
+                                  flydsl                       = False)
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 512,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  flydsl                       = True,
+                                  stable                       = False,
+                                  write_values                 = True,
+                                  fast                         = False)
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 512,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  stable                       = True,
+                                  write_values                 = False,
+                                  fast                         = False,
+                                  flydsl                       = False)
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 512,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  flydsl                       = True,
+                                  stable                       = True,
+                                  write_values                 = False,
+                                  fast                         = False)
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 512,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  stable                       = True,
+                                  write_values                 = True,
+                                  fast                         = False,
+                                  flydsl                       = False)
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 512,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  flydsl                       = True,
+                                  stable                       = True,
+                                  write_values                 = True,
+                                  fast                         = False)
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 1024,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  stable                       = False,
+                                  write_values                 = False,
+                                  fast                         = False,
+                                  flydsl                       = False)
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:37 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 1024,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  flydsl                       = True,
+                                  stable                       = False,
+                                  write_values                 = False,
+                                  fast                         = False)
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 1024,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  stable                       = False,
+                                  write_values                 = True,
+                                  fast                         = False,
+                                  flydsl                       = False)
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 1024,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  flydsl                       = True,
+                                  stable                       = False,
+                                  write_values                 = True,
+                                  fast                         = False)
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 1024,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  stable                       = True,
+                                  write_values                 = False,
+                                  fast                         = False,
+                                  flydsl                       = False)
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 1024,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  flydsl                       = True,
+                                  stable                       = True,
+                                  write_values                 = False,
+                                  fast                         = False)
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 1024,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  stable                       = True,
+                                  write_values                 = True,
+                                  fast                         = False,
+                                  flydsl                       = False)
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 1024,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  flydsl                       = True,
+                                  stable                       = True,
+                                  write_values                 = True,
+                                  fast                         = False)
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 2048,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  stable                       = False,
+                                  write_values                 = False,
+                                  fast                         = False,
+                                  flydsl                       = False)
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 2048,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  flydsl                       = True,
+                                  stable                       = False,
+                                  write_values                 = False,
+                                  fast                         = False)
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 2048,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  stable                       = False,
+                                  write_values                 = True,
+                                  fast                         = False,
+                                  flydsl                       = False)
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 2048,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  flydsl                       = True,
+                                  stable                       = False,
+                                  write_values                 = True,
+                                  fast                         = False)
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 2048,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  stable                       = True,
+                                  write_values                 = False,
+                                  fast                         = False,
+                                  flydsl                       = False)
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 2048,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  flydsl                       = True,
+                                  stable                       = True,
+                                  write_values                 = False,
+                                  fast                         = False)
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 2048,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  stable                       = True,
+                                  write_values                 = True,
+                                  fast                         = False,
+                                  flydsl                       = False)
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] 
+calling test_top_k_per_row_decode(batch_size                   = 4,
+                                  context_len                  = 4096,
+                                  top_k                        = 2048,
+                                  next_n                       = 1,
+                                  data_generation              = random,
+                                  flydsl                       = True,
+                                  stable                       = True,
+                                  write_values                 = True,
+                                  fast                         = False)
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-18 09:14:38 702:702 ActivityProfilerController.cpp:455] profiler_stop
+[aiter] topk_per_row_decode summary (markdown):
+|   batch_size |   context_len |   top_k |   next_n | data_generation   | stable   | write_values   | fast   | flydsl   |   width | all_close   |      us |
+|-------------:|--------------:|--------:|---------:|:------------------|:---------|:---------------|:-------|:---------|--------:|:------------|--------:|
+|            4 |          4096 |     512 |        1 | random            | False    | False          | False  | False    |    4096 | True        | 8.85471 |
+|            4 |          4096 |     512 |        1 | random            | False    | False          | False  | True     |    4096 | True        | 7.86087 |
+|            4 |          4096 |     512 |        1 | random            | False    | True           | False  | False    |    4096 | True        | 8.96107 |
+|            4 |          4096 |     512 |        1 | random            | False    | True           | False  | True     |    4096 | True        | 8.17604 |
+|            4 |          4096 |     512 |        1 | random            | True     | False          | False  | False    |    4096 | True        | 7.79096 |
+|            4 |          4096 |     512 |        1 | random            | True     | False          | False  | True     |    4096 | True        | 7.76597 |
+|            4 |          4096 |     512 |        1 | random            | True     | True           | False  | False    |    4096 | True        | 8.12637 |
+|            4 |          4096 |     512 |        1 | random            | True     | True           | False  | True     |    4096 | True        | 8.09867 |
+|            4 |          4096 |    1024 |        1 | random            | False    | False          | False  | False    |    4096 | True        | 8.81385 |
+|            4 |          4096 |    1024 |        1 | random            | False    | False          | False  | True     |    4096 | True        | 7.79905 |
+|            4 |          4096 |    1024 |        1 | random            | False    | True           | False  | False    |    4096 | True        | 8.89601 |
+|            4 |          4096 |    1024 |        1 | random            | False    | True           | False  | True     |    4096 | True        | 8.10045 |
+|            4 |          4096 |    1024 |        1 | random            | True     | False          | False  | False    |    4096 | True        | 7.73511 |
+|            4 |          4096 |    1024 |        1 | random            | True     | False          | False  | True     |    4096 | True        | 7.71826 |
+|            4 |          4096 |    1024 |        1 | random            | True     | True           | False  | False    |    4096 | True        | 8.03381 |
+|            4 |          4096 |    1024 |        1 | random            | True     | True           | False  | True     |    4096 | True        | 8.00473 |
+|            4 |          4096 |    2048 |        1 | random            | False    | False          | False  | False    |    4096 | True        | 8.73253 |
+|            4 |          4096 |    2048 |        1 | random            | False    | False          | False  | True     |    4096 | True        | 7.86087 |
+|            4 |          4096 |    2048 |        1 | random            | False    | True           | False  | False    |    4096 | True        | 8.81547 |
+|            4 |          4096 |    2048 |        1 | random            | False    | True           | False  | True     |    4096 | True        | 8.46776 |
+|            4 |          4096 |    2048 |        1 | random            | True     | False          | False  | False    |    4096 | True        | 7.77782 |
+|            4 |          4096 |    2048 |        1 | random            | True     | False          | False  | True     |    4096 | True        | 7.77885 |
+|            4 |          4096 |    2048 |        1 | random            | True     | True           | False  | False    |    4096 | True        | 8.36874 |
+|            4 |          4096 |    2048 |        1 | random            | True     | True           | False  | True     |    4096 | True        | 8.36628 |
+[mb_workspace_reuse] PASS: 3 reused-buffer mb calls matched torch.topk
