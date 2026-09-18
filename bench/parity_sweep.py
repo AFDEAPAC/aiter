@@ -1,38 +1,59 @@
 #!/usr/bin/env python3
-"""Even/odd row-pitch parity sweep for the AVO prefill op.
+"""Even/odd row-pitch parity sweep for the AVO prefill op, on aiter's @perftest.
 
 The question: now that an odd stride0 is served (g_25) and hostile extents are
 clamped (g_26), does an odd pitch cost anything against an even one?
 
-The triple design is the whole point. Each base B is a power of two, and each M
-is measured at B, B+1 and B+2 in the SAME pass:
+Three design decisions, and the sweep is worthless without any of them.
 
-    B     even, power of two
-    B+1   odd,  not a power of two
-    B+2   even, not a power of two
+1. aiter's own @perftest(), not a hand-written timing loop. It sizes an argument
+   rotation from the measured input size so the working set defeats L2, and it
+   reads GPU kernel time out of a torch profiler trace rather than wall clock.
+   A loop that reuses one input measures a warm cache. The two harnesses do not
+   agree -- at M=256 stride0=1048577 a plain loop gives 234.42 us for AVO and
+   666.61/690 us for the reference where @perftest gives 217.56 and 666.61 --
+   so numbers from the two must never be mixed in one table.
 
-Three widths within two columns of each other, so they differ by under 0.0031%
-of the work and any real gap is structural, not size. Two comparisons fall out,
-and keeping them apart matters:
+   The two runners below are inlined from op_tests/test_topk_per_row.py rather
+   than imported, because that module runs its whole benchmark sweep at import
+   time. Same reason bench/aiter_ab.py inlines its helpers.
 
-    B+1 vs B+2   odd vs even, both off the power of two  -> PARITY
-    B+2 vs B     non-pow2 vs pow2, both even             -> POWER-OF-TWO-NESS
+2. THREE widths, not two. Each base B is a power of two, and each M is measured
+   at B, B+1 and B+2:
 
-A first version of this sweep compared only B against B+1 and reported odd
-widths costing up to +5.7%. That number conflated the two effects: B is a power
-of two and B+1 is not, so leaving the power of two (which changes the sampling
-stride from exact to masked, and moves the kCoopLog2G and phase_a S lookups)
-was being charged to parity. All three widths must be in one pass, because the
-effect being resolved is a few percent and cross-run drift is the same size.
+       B     even, power of two
+       B+1   odd,  not a power of two
+       B+2   even, not a power of two
 
-Both sides are timed in one process on one dataset with one timer, reusing
-bench/aiter_ab.py's helpers, because a number measured through a different
-harness is not comparable to one measured here (that file's docstring records
-two harnesses disagreeing by 18% at M=256).
+   Three widths within two columns of each other, under 0.0031% of the work
+   apart. Two comparisons fall out:
 
-AITER_DISABLE_TOPK_AVO=1 is required so that `top_k_per_row_prefill` takes the
-original mb/ob path; the AVO side calls `top_k_per_row_prefill_avo` directly.
-Without it both sides would be AVO and every ratio would be 1.00x.
+       (B+1) vs (B+2)   odd vs even, both off the power of two  -> PARITY
+       (B+2) vs B       non-pow2 vs pow2, both even             -> POW2 BOUNDARY
+
+   Comparing only B against B+1 is not a parity measurement: B is a power of two
+   and B+1 is not, so leaving the power of two rides along and gets charged to
+   parity.
+
+3. INTERLEAVED, all three warmed first. Measuring the widths one after another
+   -- build, warm, time, free, next -- does not work here. Run that way, an
+   earlier version of this sweep reported the pow2 boundary costing +5.60% at
+   M=256 B=1048576; interleaved, the same cell was +0.34%. The tell was that
+   B+1 and B+2 came out nearly equal to each other (513.08 and 513.08 at M=1024
+   B=524288; 1956.29 and 1956.25 at M=4096 B=524288) while both sat the same
+   distance above the B timed before them. That is drift between positions in
+   the run order, not a property of the width. Parity survived only by luck:
+   B+1 and B+2 are adjacent, so the drift between them cancels; the pow2
+   comparison spans the whole triple and does not. Same trap
+   .evo/config-v5.yaml records as baseline_decay_warning.
+
+AITER_DISABLE_TOPK_AVO=1 is required, and it does NOT disable the op under test.
+It appears at exactly one executable site, aiter/ops/topk.py:419, inside the
+dispatch condition of top_k_per_row_prefill, so it only forces the REFERENCE
+side onto the original mb/ob path; top_k_per_row_prefill_avo never reads it.
+Confirmed by construction: with the variable set, top_k_per_row_prefill is
+666.61 us at M=256 stride0=1048577 while top_k_per_row_prefill_avo is 217.56,
+and with it unset top_k_per_row_prefill returns to the AVO number.
 
 Run inside the correctness image:
 
@@ -54,55 +75,79 @@ import torch  # noqa: E402
 
 import aiter  # noqa: E402
 from aiter.ops.topk import topk_avo_supports  # noqa: E402
-from aiter_ab import bench, boundaries, logits_for  # noqa: E402
+from aiter.test_common import perftest  # noqa: E402
+from aiter_ab import boundaries, logits_for  # noqa: E402
 
 MS = [1, 8, 64, 256, 1024, 4096]
 BASES = [65536, 131072, 262144, 524288, 1048576]
 TOPK = 2048
+ROUNDS = 4
 
 
-def argv_for(m, width):
-    """Fewer iterations once a shape is big enough that 100 of them is minutes."""
-    return (10, 30, 3) if m * width > (1 << 28) else (20, 100, 3)
+@perftest()
+def run_avo(logits, row_starts, row_ends, indices, values,
+            num_rows, stride_row, stride_col, k):
+    return aiter.top_k_per_row_prefill_avo(
+        logits, row_starts, row_ends, indices, values,
+        num_rows, stride_row, stride_col, k=k)
 
 
-def one(m, width, topk):
-    """Median-of-run-medians for both ops at stride0 = width."""
-    num_prefix = width - m
-    row_starts, row_ends = boundaries(m, num_prefix)
-    logits = logits_for(row_starts, row_ends)
-    stride0 = logits.stride(0)
-    assert stride0 == width, (stride0, width)
-    rec = {"m": m, "width": width, "topk": topk, "odd": bool(width & 1),
-           "supports": bool(topk_avo_supports(m, stride0, topk))}
-    if not rec["supports"]:
-        rec["note"] = "declined by topk_avo_supports"
-        return rec
-    indices = torch.empty((m, topk), dtype=torch.int32, device="cuda")
-    warmup, iters, repeats = argv_for(m, width)
-    rec["argv"] = [warmup, iters, repeats]
+@perftest()
+def run_ref(logits, row_starts, row_ends, indices, values,
+            num_rows, stride_row, stride_col, k):
+    return aiter.top_k_per_row_prefill(
+        logits, row_starts, row_ends, indices, values,
+        num_rows, stride_row, stride_col, k=k)
 
-    def avo():
-        aiter.top_k_per_row_prefill_avo(
-            logits, row_starts, row_ends, indices, None, m, stride0, 1, topk)
 
-    def mbob():
-        aiter.top_k_per_row_prefill(
-            logits, row_starts, row_ends, indices, None, m, stride0, 1, topk)
+RUNNERS = {"avo": run_avo, "mbob": run_ref}
 
-    for name, fn in (("avo", avo), ("mbob", mbob)):
-        runs = [bench(fn, warmup, iters) for _ in range(repeats)]
-        rec[name + "_us"] = st.median(runs)
-        rec[name + "_spread_pct"] = (max(runs) - min(runs)) / st.median(runs) * 100
-    rec["speedup"] = rec["mbob_us"] / rec["avo_us"]
-    del logits, indices, row_starts, row_ends
+
+def triple(m, base, topk, rounds=ROUNDS):
+    """Time B, B+1, B+2 interleaved. Returns one record per width."""
+    widths = (base, base + 1, base + 2)
+    args = {}
+    for w in widths:
+        rs, re = boundaries(m, w - m)
+        lg = logits_for(rs, re)
+        assert lg.stride(0) == w, (lg.stride(0), w)
+        idx = torch.empty((m, topk), dtype=torch.int32, device="cuda")
+        args[w] = (lg, rs, re, idx, None, m, w, 1, topk)
+
+    # Warm every width and both ops before timing any of them, so that no width
+    # is measured in a state the others were not. @perftest warms internally
+    # too, but only for the call it is in.
+    for w in widths:
+        for op in RUNNERS:
+            RUNNERS[op](*args[w])
+
+    samples = {w: {op: [] for op in RUNNERS} for w in widths}
+    for _ in range(rounds):
+        for op in RUNNERS:
+            for w in widths:
+                samples[w][op].append(RUNNERS[op](*args[w])[1])
+
+    out = []
+    for w in widths:
+        r = {"m": m, "base": base, "width": w, "topk": topk, "odd": bool(w & 1),
+             "pow2": w == base, "rounds": rounds, "harness": "aiter.perftest",
+             "supports": bool(topk_avo_supports(m, w, topk))}
+        for op in RUNNERS:
+            v = samples[w][op]
+            r[op + "_us"] = st.median(v)
+            r[op + "_spread_pct"] = (max(v) - min(v)) / st.median(v) * 100
+            r[op + "_runs"] = [round(x, 2) for x in v]
+        r["speedup"] = r["mbob_us"] / r["avo_us"]
+        out.append(r)
+    del args
     torch.cuda.empty_cache()
-    return rec
+    return out
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--topk", type=int, default=TOPK)
+    ap.add_argument("--rounds", type=int, default=ROUNDS)
     ap.add_argument("--out", default="/home/mh/topk-prefill-avo/reports/parity_sweep.json")
     args = ap.parse_args()
 
@@ -112,35 +157,31 @@ def main():
         return 2
 
     out = []
-    print("%6s %9s %4s | %10s %6s | %10s %6s | %8s"
-          % ("M", "stride0", "par", "avo_us", "sd%", "mbob_us", "sd%", "speedup"))
+    print("harness: aiter.test_common.perftest (rotated args, GPU time from trace)")
+    print("%6s %9s %9s | %10s %6s | %10s %6s | %8s"
+          % ("M", "stride0", "kind", "avo_us", "sd%", "mbob_us", "sd%", "speedup"))
     for m in MS:
         for base in BASES:
-            for width in (base, base + 1, base + 2):
-                try:
-                    r = one(m, width, args.topk)
-                except Exception as e:  # keep the sweep alive, record the shape
-                    r = {"m": m, "width": width, "odd": bool(width & 1),
-                         "error": str(e).strip().splitlines()[-1][:120]}
-                out.append(r)
-                if "error" in r:
-                    print("%6d %9d %4s | %s" % (m, width, "odd" if width & 1 else "even",
-                                                r["error"]))
-                elif "avo_us" not in r:
-                    print("%6d %9d %4s | %s" % (m, width, "odd" if width & 1 else "even",
-                                                r.get("note", "skipped")))
-                else:
-                    print("%6d %9d %4s | %10.2f %6.2f | %10.2f %6.2f | %7.2fx"
-                          % (m, width, "odd" if width & 1 else "even",
-                             r["avo_us"], r["avo_spread_pct"],
-                             r["mbob_us"], r["mbob_spread_pct"], r["speedup"]))
+            try:
+                recs = triple(m, base, args.topk, args.rounds)
+            except Exception as e:
+                msg = str(e).strip().splitlines()[-1][:110]
+                print("%6d %9d | FAILED: %s" % (m, base, msg))
+                out.append({"m": m, "base": base, "error": msg})
+                torch.cuda.empty_cache()
                 sys.stdout.flush()
+                continue
+            for r in recs:
+                kind = "pow2 even" if r["pow2"] else ("odd" if r["odd"] else "even")
+                print("%6d %9d %9s | %10.2f %6.2f | %10.2f %6.2f | %7.2fx"
+                      % (r["m"], r["width"], kind, r["avo_us"], r["avo_spread_pct"],
+                         r["mbob_us"], r["mbob_spread_pct"], r["speedup"]))
+            out.extend(recs)
+            sys.stdout.flush()
 
-    # Two comparisons per (M, base). Keeping them apart is the point: see the
-    # module docstring on why B vs B+1 alone is not a parity measurement.
     by = {(r["m"], r["width"]): r for r in out if "avo_us" in r}
-    print("\nAVO side. B = power of two. parity = (B+1) vs (B+2), both off the pow2;")
-    print("pow2 = (B+2) vs B, both even. Speedups are AVO over the mb/ob path.")
+    print("\nAVO side, aiter @perftest. parity = (B+1) vs (B+2), both off the")
+    print("power of two; pow2 = (B+2) vs B, both even. x = AVO over mb/ob.")
     print("\n%6s %9s | %9s %9s %9s | %8s %8s | %7s %7s"
           % ("M", "B", "B(pow2)", "B+1 odd", "B+2 even",
              "parity", "pow2", "x@B+1", "x@B+2"))
@@ -158,11 +199,11 @@ def main():
                   % (m, base, a["avo_us"], o["avo_us"], e["avo_us"], dp, d2,
                      o["speedup"], e["speedup"]))
     if par:
-        print("\nparity  (odd vs even, both non-pow2): mean %+.2f%%  max %+.2f%%  min %+.2f%%"
+        print("\nparity (odd vs even, both non-pow2): mean %+.2f%%  max %+.2f%%  min %+.2f%%"
               % (st.mean(par), max(par), min(par)))
-        print("pow2    (non-pow2 vs pow2, both even): mean %+.2f%%  max %+.2f%%  min %+.2f%%"
+        print("pow2   (non-pow2 vs pow2, both even): mean %+.2f%%  max %+.2f%%  min %+.2f%%"
               % (st.mean(pw2), max(pw2), min(pw2)))
-        print("cells   %d" % len(par))
+        print("cells  %d, %d interleaved rounds each" % (len(par), args.rounds))
     json.dump(out, open(args.out, "w"), indent=1)
     print("WROTE %s" % args.out)
     return 0

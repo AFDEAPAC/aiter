@@ -1314,15 +1314,32 @@ to parity.
 **Fix:** add B+2 -- even, and also not a power of two -- to the SAME pass, and
 read two comparisons instead of one:
 `(B+1) vs (B+2)` is parity, `(B+2) vs B` is power-of-two-ness.
-**Result over 30 (M, B) cells:** parity **mean -0.07%** (-1.16% to +0.42%),
-power-of-two-ness **mean +0.82%** (max +5.60%). The entire effect was the pow2
-boundary; an odd pitch costs nothing. `bench/parity_sweep.py`,
-`reports/parity_sweep.json`.
-**Generalises:** when a one-unit step also crosses a structural boundary, the
-step is not a controlled comparison. Add the third point that crosses the
-boundary without the property under test, and put all of them in one pass --
-the effect being resolved here was a few percent, which is the same size as
-cross-run drift.
+**And then the control itself was wrong, twice over.** The three widths were
+still timed one after another -- build, warm, time, free, next -- which charged
+run-order drift to whichever width came first. That reported the pow2 boundary
+at **+0.82% mean, max +5.60%**. The tell: in the loud cells B+1 and B+2 came out
+nearly equal to each other (513.08 and 513.08 at M=1024 B=524288; 1956.29 and
+1956.25 at M=4096 B=524288) while both sat the same distance above the B timed
+before them. Parity survived only by luck -- B+1 and B+2 are adjacent, so the
+drift between them cancels, while the pow2 comparison spans the whole triple.
+Separately, the hand-written timing loop reused one input and therefore measured
+a warm L2, where aiter's own @perftest rotates arguments to defeat it (234.42 us
+against 217.56 us for AVO at M=256 stride0=1048577).
+**Final method:** aiter @perftest, all three widths built and warmed before any
+of them is timed, then 4 interleaved rounds.
+**Result over 30 (M, B) cells:** parity **mean +0.29%** (-0.76% to +2.17%),
+pow2 **mean +0.13%** (-6.93% to +2.72%). Judged against each cell's own 4-round
+spread, **exactly one of the 12 cells with a delta over 1% survives**: M=4096
+B=524288, where the POWER OF TWO is 7.4% SLOWER than either neighbour (1766.99
+against 1645.20 and 1644.58 us, spreads 0.09-0.13%). Every parity cell is inside
+its own noise. An odd pitch costs nothing anywhere in the sweep.
+`bench/parity_sweep.py`, `reports/parity_sweep.json`.
+**Generalises, three ways:** (1) when a one-unit step also crosses a structural
+boundary, add the third point that crosses the boundary without the property
+under test; (2) sequential timing charges drift to run order -- interleave, and
+warm every arm before timing any of them; (3) use the project's own perf
+harness, not a freshly written loop, or the number is not comparable to anything
+else in the tree.
 
 ## Structural facts worth keeping (2026-09-18 additions)
 
