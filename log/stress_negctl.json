@@ -1,0 +1,9 @@
+[
+ {
+  "case": "start_neg",
+  "outcome": "crashed",
+  "rc": -6,
+  "error": "Falling back to file-based dump. Set HSA_COREDUMP_PATTERN to override.",
+  "verdict": "CRASH"
+ }
+]

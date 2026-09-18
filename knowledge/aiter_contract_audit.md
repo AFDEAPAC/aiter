@@ -170,9 +170,35 @@ aiter's own mb/ob path:
 Both are aiter's semantics, which is the contract we are held to, so neither is
 an AVO bug. Recorded because a caller migrating from `torch.topk` would see it.
 
-### Out of contract for both: `rowEnds > stride0`
+### AVO serves it, aiter faults: `rowEnds > stride0`
 
-Faults on both implementations. Not an AVO regression; nothing to fix.
+This term used to read "faults on both implementations, nothing to fix". It is
+now the one place AVO is deliberately MORE robust than the op it replaces.
+
+`RowExtents<true>` (`csrc/topk_common.hip.hpp`) clamps both accessors into
+`[0, pitch]`, so `rowEnds > stride0`, `rowEnds = INT32_MAX`, `rowStarts < 0` and
+`rowStarts > stride0` all produce the answer for the clamped window instead of a
+memory fault. In this audit run AVO returns a correct clamped result while aiter
+still takes a GPU core dump on the same input.
+
+Why the clamp is in the kernel and not anywhere cheaper: `rowStarts`/`rowEnds`
+are device pointers, so a host check costs a D2H sync on every call; and
+`topk_avo_supports(numRows, stride0, k)` cannot see them, so declining the shape
+would only hand the same arguments to aiter's mb/ob path -- which faults on them.
+
+The worst case was not the fault. `rowEnds = pitch + 64` did NOT fault: it
+returned indices past the pitch with no error at all (131134 and 131126 at
+pitch 131072), because the caching allocator had the over-read backed by mapped
+memory. A fault is a bug that announces itself; that one did not. Found by
+`bench/stress_topk.py`, which poisons everything outside the row's window with
+`+inf` precisely so an out-of-range read cannot be silent.
+
+Cost, measured: the uniform (`RAGGED=false`) instruction streams are
+byte-identical -- 16 of 16 unchanged, and all 16 changed kernels are
+`RAGGED=true`, at +8 to +11 instructions each, executed once per ROW. The
+587-point outer tier moved 51.35 -> 51.37 us with 0 cells regressed, and on the
+ragged path (`bench/aiter_ab.py`, 12 shapes x 3 passes) the clamp alone is
++0.06% mean, range -0.76% to +1.03%.
 
 ### PASS, identical to aiter
 
@@ -225,9 +251,21 @@ M=64 pitch=512, M=4096 pitch=512).
 3. **`stride1 != 1` aborts instead of declining.** FIXED by adding
    `stride1 == 1` to the dispatch condition in `aiter/ops/topk.py`.
 
-After all three fixes the audit reports **no AVO-only failure**: 21 of 22 terms
-identical to aiter (including four odd-`stride0` cases), 1
-(`rowEnds > stride0`) out of contract for both, and the NaN pair matching aiter
+4. **Out-of-range extents faulted or returned garbage.** FIXED by clamping
+   `RowExtents<true>` into `[0, pitch]`. Found by `bench/stress_topk.py`, not by
+   this audit: the audit's `rowend_past_stride0` term reported "faults on both"
+   and stopped there, which is true and also hid that `rowEnds = pitch + 64`
+   silently returns out-of-range indices rather than faulting.
+5. **A bad argument killed the caller's process.** FIXED in
+   `aiter/ops/topk.py`. `AITER_CHECK` calls `std::abort()` unless
+   `g_aiter_can_throw` is set, and only the `aiter_safe_call` ctypes bridge sets
+   it, which this entry does not use -- so `k` above the Phase C cap,
+   `stride1 != 1`, a short workspace, `stride0 = 0` and `k <= 0` all aborted.
+   The wrapper now validates in Python and raises `ValueError`.
+
+After all five fixes the audit reports **no AVO-only failure**: 21 of 22 terms
+identical to aiter, with `rowEnds > stride0` now served by AVO and still
+faulting on aiter, and the NaN pair matching aiter
 while both differ from `torch.topk`.
 
 The cheapest lesson in the list: fix 2 was scoped as a feature -- port aiter's

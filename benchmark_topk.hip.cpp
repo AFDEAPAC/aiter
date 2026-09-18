@@ -434,7 +434,7 @@ __device__ __forceinline__ void exact_row_select(const float* __restrict__ input
                                                  uint32_t* __restrict__ s_scan,
                                                  unsigned* __restrict__ s_wgt,
                                                  unsigned* __restrict__ s_weq) {
-  const int row_start = RAGGED ? extents.row_start(row) : 0;
+  const int row_start = RAGGED ? extents.row_start(row, pitch) : 0;
   const int len = row_len_of<RAGGED>(row, pitch, extents);
   const float* rif0 = input + (size_t)row * pitch + row_start;
   if (RAGGED && len <= K) {
@@ -492,7 +492,7 @@ __global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restric
                                                           int* __restrict__ fb_count, int K) {
   const int row = blockIdx.x;
   const int len = row_len_of<RAGGED>(row, pitch, extents);
-  const float* ri = input + (size_t)row * pitch + (RAGGED ? extents.row_start(row) : 0);
+  const float* ri = input + (size_t)row * pitch + (RAGGED ? extents.row_start(row, pitch) : 0);
 
   if (threadIdx.x == 0) {
     if (cand_reserved) cand_reserved[row] = 0u;
@@ -575,7 +575,7 @@ __global__ void phase_b_filter_waveseg(const float* __restrict__ input, int pitc
                                        unsigned int* __restrict__ cand_count, int seg_stride) {
   const int row = blockIdx.x;
   const int len = row_len_of<RAGGED>(row, pitch, extents);
-  const float* ri = input + (size_t)row * pitch + (RAGGED ? extents.row_start(row) : 0);
+  const float* ri = input + (size_t)row * pitch + (RAGGED ? extents.row_start(row, pitch) : 0);
   const float th = threshold_f[row];
 
   const int lane = threadIdx.x & (WAVE_SIZE - 1);
@@ -676,7 +676,7 @@ __global__ __launch_bounds__(512) void phase_b_filter_wavestage(
     unsigned int* __restrict__ cand_count, int seg_stride) {
   const int row = blockIdx.x;
   const int len = row_len_of<RAGGED>(row, pitch, extents);
-  const float* ri = input + (size_t)row * pitch + (RAGGED ? extents.row_start(row) : 0);
+  const float* ri = input + (size_t)row * pitch + (RAGGED ? extents.row_start(row, pitch) : 0);
   const float th = threshold_f[row];
 
   const int lane = threadIdx.x & (WAVE_SIZE - 1);
@@ -788,7 +788,7 @@ __global__ void phase_c_select_waveseg(const float* __restrict__ input, int pitc
                                        int* __restrict__ fb_rows, int* __restrict__ fb_count,
                                        int npasses) {
   const int row = blockIdx.x;
-  const int row_start = RAGGED ? extents.row_start(row) : 0;
+  const int row_start = RAGGED ? extents.row_start(row, pitch) : 0;
   const int len = row_len_of<RAGGED>(row, pitch, extents);
   const unsigned int c_raw = cand_count[row];
   const int k_out = RAGGED ? k_take_dev(K, len) : K;

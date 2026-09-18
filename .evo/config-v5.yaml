@@ -68,6 +68,10 @@ correctness:
     - ["python", "bench/correctness.py"]          # in correctness_image
     - ["python3", "bench/verify_grid.py", "--dist", "all"]   # host, 3085 verifies
     - ["python", "bench/aiter_contract_audit.py"] # in correctness_image, vs aiter
+    - ["python", "bench/stress_topk.py", "--smoke"]  # in correctness_image, 25 cases
+    # bench/stress_topk.py --full is 500 cases / ~65 min; run it before a release,
+    # not in the inner loop. A CRASH verdict means the child died without a
+    # verdict line, which is the operational definition of "must not core dump".
   gates:
     - "PROVE THE GATE CAN GO RED ON THE PATH BEING CHANGED, BEFORE TRUSTING ANY
        GREEN. --inject-fault 1 (index) and 2 (value, needs --values 1) on a shape
@@ -96,10 +100,19 @@ correctness:
     uninitialised memory and made every small_n shape look like it was falling
     back.
   known_open_defects:
-    - "none. All three terms the v5 Stage 0 audit found -- unaligned rowStarts
+    - "none. The three terms the v5 Stage 0 audit found -- unaligned rowStarts
        (Stage 2), stride1 != 1 routing (Stage 2), and an odd stride0 being
-       declined (Stage 7) -- are fixed and gated. The audit now reports 21 of 22
-       terms identical to aiter, with rowEnds > stride0 out of contract for both."
+       declined (Stage 7) -- plus the two bench/stress_topk.py found -- hostile
+       row extents faulting or silently returning out-of-range indices, and
+       AITER_CHECK aborting the caller's process on a bad argument -- are all
+       fixed and gated."
+    - "DELIBERATE divergence from aiter, not a defect: rowEnds > stride0,
+       rowEnds = INT32_MAX, rowStarts < 0 and rowStarts > stride0 are CLAMPED
+       into [0, pitch] by RowExtents<true> and served. aiter faults on the same
+       input. 'Matching aiter is the contract' still holds everywhere else; this
+       term is the exception, because matching aiter here means core-dumping the
+       caller. bench/aiter_contract_audit.py will show AVO ran and aiter crashed
+       on rowend_past_stride0 -- that is the expected result, not a regression."
     - "NOT a defect, recorded so it is not rediscovered: +NaN is selected and
        -NaN is dropped, by both AVO and aiter, where torch.topk ranks NaN
        highest. Matching aiter is the contract."

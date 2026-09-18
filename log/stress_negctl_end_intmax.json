@@ -1,0 +1,9 @@
+[
+ {
+  "case": "end_intmax",
+  "outcome": "crashed",
+  "rc": -6,
+  "error": "GPU core dump failed",
+  "verdict": "CRASH"
+ }
+]

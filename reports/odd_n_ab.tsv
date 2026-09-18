@@ -1,0 +1,29 @@
+# AVO vs the mb/ob path an odd width used to fall back to, and the cost of the
+# row-extent clamp + Python argument validation added on 2026-09-18.
+# bench/aiter_ab.py in rocm/ali-private:ubuntu22.04_rocm10.0.0_cp313_torch2.12.0_vllm_dsv4_20260916,
+# AITER_DISABLE_TOPK_AVO=1 so top_k_per_row_prefill takes mb/ob. Both ops timed in
+# one process on one dataset, warmup=20 iters=100, 3 passes per state, GPU idle.
+# width = num_prefix + num_rows, so it is also stride0; res1/2/3 are width mod 4.
+#
+# States, all with the SAME kernel algorithm -- only the guards differ:
+#   pre                 g_25 (5af8af46 at the time): no clamp, no Python validation
+#   clamp               RowExtents<true> clamps into [0, pitch]; no Python validation
+#   clamp_val_uncached  + validation calling topk_avo_supports() every time (4.86 us/call)
+#   shipped             + that call memoised via functools.lru_cache
+#
+# Attribution over the 12 shapes: clamp alone +0.06% mean (-0.76% to +1.03%),
+# shipped +0.45% mean, so the surviving cost is the Python checks, not the kernel.
+# topk-prefill-avo 5af8af46, aiter-topk 66a8c4192.
+group	M	width	mbob_us	avo_pre_us	avo_clamp_us	avo_clamp_val_uncached_us	avo_shipped_us	speedup_shipped	clamp_delta_pct	shipped_delta_pct
+odd	64	65537	64.28	43.40	43.19	48.84	43.67	1.472	-0.49	+0.61
+odd	256	131073	110.56	67.01	66.60	72.00	67.84	1.630	-0.62	+1.23
+odd	1024	131075	290.79	176.15	176.27	181.77	177.05	1.642	+0.07	+0.51
+odd	4096	131073	941.39	655.30	658.40	663.84	658.84	1.429	+0.47	+0.54
+odd	64	196609	99.83	52.21	52.59	57.09	52.57	1.899	+0.72	+0.69
+odd	256	1048573	686.99	233.28	233.09	238.41	232.89	2.950	-0.08	-0.17
+res1	256	131073	109.73	66.01	66.69	71.41	67.08	1.636	+1.03	+1.62
+res2	256	131074	109.61	65.97	66.23	75.15	66.61	1.646	+0.38	+0.97
+res3	256	131075	109.44	66.61	66.77	72.63	67.29	1.626	+0.24	+1.02
+even	64	65536	64.15	44.09	43.76	49.17	43.09	1.489	-0.76	-2.27
+even	256	131072	109.85	65.65	65.33	71.95	65.81	1.669	-0.49	+0.24
+even	4096	131072	938.44	653.90	655.68	661.89	656.45	1.430	+0.27	+0.39

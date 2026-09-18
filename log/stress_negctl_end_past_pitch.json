@@ -1,0 +1,23 @@
+[
+ {
+  "case": "end_past_pitch",
+  "m": 64,
+  "n": 131072,
+  "k": 2048,
+  "starts": "zero",
+  "ends": "past_pitch",
+  "dist": "uniform",
+  "ws": "auto",
+  "expect": "reject",
+  "supports": true,
+  "outcome": "ran",
+  "problems": [
+   "row 0: index outside [0,131072): [131134, 131126]",
+   "row 1: index outside [0,131072): [131078]",
+   "row 32: index outside [0,131072): [131134]",
+   "row 62: index outside [0,131072): [131131, 131084, 131092]",
+   "row 63: index outside [0,131072): [131121, 131125, 131074, 131078]"
+  ],
+  "verdict": "FAIL"
+ }
+]

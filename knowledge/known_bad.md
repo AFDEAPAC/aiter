@@ -1238,3 +1238,78 @@ topk_select FlyDSL instead.
 `top_k_per_row_prefill_avo` when `topk_avo_supports()`; `stable=True` and
 `AITER_DISABLE_TOPK_AVO=1` force the original mb/ob path. Verified by
 `op_tests/test_topk_prefill_dispatch.py`.
+
+## Robustness traps (found by bench/stress_topk.py, 2026-09-18)
+
+### A bounds bug that does NOT fault is the dangerous one
+**Symptom:** `rowEnds = pitch + 64` at M=64 N=131072 returned indices 131134 and
+131126 -- past the pitch -- with no error, no fault and no warning.
+**Cause:** the kernel honoured the caller's unclamped extent, and the caching
+allocator had the over-read backed by mapped memory, so nothing complained.
+**Why it survived until now:** every earlier test relied on a fault to notice an
+over-read. The v5 Stage 2 HIP 700 only faulted because that slice ran to the end
+of the allocation; move it 1000 floats back and the identical bug is silent.
+**Fix:** clamp in `RowExtents<true>`, and stop relying on faults -- poison the
+out-of-window region by VALUE so a bad read shows up in the answer.
+
+### NaN is the wrong poison for this kernel
+**Symptom:** filling everything outside `[rowStart, rowEnd)` with NaN detects
+nothing.
+**Cause:** the ordering key at `csrc/topk_common.hip.hpp:258`,
+`(u & 0x80000000u) ? ~u : (u ^ 0x80000000u)`, sends -NaN below -inf, so a NaN
+poison is read and then discarded -- invisible.
+**Fix:** poison with `+inf`, which that same key ranks above everything, so an
+out-of-range read cannot fail to appear in the output. (vLLM's
+`test_deep_select_topk` can use NaN only because DeepSelect ships
+`abort_when_nan_found=True`. Copy the idea, not the constant.)
+
+### AITER_CHECK aborts the process; it does not raise
+**Symptom:** `k = 8193`, `stride1 = 2`, `stride0 = 0`, `k <= 0` and a short
+workspace each killed the calling Python process outright.
+**Cause:** `csrc/include/aiter_hip_common.h` throws only when
+`g_aiter_can_throw` is set, and only the `aiter_safe_call` ctypes bridge
+(`aiter_ctypes_error.h`, used by exactly one other kernel) sets it. The AVO
+entry does not go through it, so every `AITER_CHECK` is a `std::abort()`.
+**Fix:** validate in `top_k_per_row_prefill_avo` (`aiter/ops/topk.py`) and raise
+`ValueError`. Adopting the `aiter_safe_call` C-ABI instead would mean changing
+the entry's return type and its binding -- disproportionate for argument checks.
+**Generalises:** before assuming a vendor library's check macro raises, read it.
+
+### An unmemoised binding call cost more than the validation it enabled
+**Symptom:** adding `topk_avo_supports()` to the Python wrapper regressed the
+ragged path by +12.5% at M=64 N=65537 and +7.5% mean over 12 shapes.
+**Measured cause:** `topk_avo_supports` is **4.86 us/call** and
+`topk_avo_workspace_size` is **4.80 us/call** through the `@compile_ops`
+binding, against a 43 us kernel. The tell was that the absolute delta was a
+constant ~5 us that did not grow with the work -- host overhead, not kernel cost.
+**Fix:** `functools.lru_cache` on a pure `(numRows, stride0, k)` query. Safe:
+`params_for -> derive_shape_params` reads no device state (`CU_COUNT` is a
+`constexpr`). Residual after memoising: +0.39% mean, which is the price of never
+aborting.
+**Still on the table (measured, not done):** `top_k_per_row_prefill` calls
+`topk_avo_supports` unmemoised on every dispatch and
+`top_k_per_row_prefill_avo` calls `topk_avo_workspace_size` unmemoised, so the
+production path pays ~9.7 us of binding overhead per call -- 22% of the 43 us
+shape. Memoising both is a free win but changes the perf baseline, so it wants
+its own measured commit.
+
+### grep for the accessor, not for the helper
+**Symptom:** patching the extent accessors compiled after 4 call sites were
+updated and still had two unclamped ones: `extents.row_len(row)` in
+`phase_small_n_topk`, and five more in `benchmark_topk.hip.cpp`.
+**Cause:** the first search was `\.row_start(\|row_len_of(\|RowExtents<` over
+`csrc/` only -- it missed the direct `.row_len(` form and the whole benchmark
+translation unit, which also contains kernels.
+**What caught it:** the patch script re-read the files afterwards and failed if
+any unclamped accessor remained. Write the read-back check, not just the edit.
+
+## Structural facts worth keeping (2026-09-18 additions)
+
+- `RowExtents` (`csrc/topk_common.hip.hpp`) is the ONLY place `rowStarts[]` and
+  `rowEnds[]` are dereferenced. `row_len_dev()` just below it has no callers.
+- Kernels live in BOTH `csrc/topk_generalize.hip.hpp` and
+  `benchmark_topk.hip.cpp`; a change to the extent contract has to touch both,
+  and `scripts/export_aiter_op.py` then carries it into aiter.
+- 16 of the 34 device kernels are `RAGGED=false`. Their instruction streams are
+  byte-identical across the clamp, which is why the scored pow2 grid cannot
+  regress and the ragged A/B is the only measurement that can see the cost.
