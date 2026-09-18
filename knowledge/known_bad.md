@@ -1460,6 +1460,68 @@ out there for these shapes. So block count is not what costs us 9.6x.
 the per-phase fixed cost is the whole story. That is a structural difference, not
 a tuning knob, and it wants a profile before anyone guesses further.
 
+### What actually sets phase A and phase C cost: latency per radix pass, not block count
+Measured 2026-09-18 while scoping the red zone of `reports/ceiling_report.html`.
+`rocprofv3 --kernel-trace` per-phase medians, M=16 N=32768 k=2048, floor 2.64 us:
+
+```
+phase_a_threshold    5.68 us   27.8%
+phase_b_filter_coop  6.30 us   30.5%
+phase_c_select_contig 8.52 us  41.7%
+```
+
+**Phase B is the only phase that scales with N**, and it is already at peak:
+17.2 GB in 2802 us at M=4096 N=1M is 6.13 TB/s. A and C are flat in N because
+they touch only `S` samples and `cap` candidates. At M=16 N=64K they are 68% of
+the time; at M=4096 N=1M they are 7.4%. The red zone is exactly where A+C
+dominate B.
+
+**The obvious diagnosis is block count, and it is wrong.** A and C launch
+`<<<M, block>>>`, one workgroup per row, against B's `<<<dim3(coop_g, M)>>>` --
+16 workgroups against 256 CUs at M=16. But phase A costs 6.80 us at M=16 and
+7.06 us at M=256: sixteen times the workgroups for 4% more time. The machine
+absorbs 16x more blocks for free, so blocks are not the constraint.
+
+**Sweeping the passes shows what is:** at M=16 N=32768,
+`--phase-a-passes` 1/2/3/4 gives a_thresh 4.62 / 4.72 / 5.70 / 6.76, and
+`--phase-c-passes` 1/2/3/4 gives c_select 5.40 / 6.84 / 7.74 / 8.52. Both are
+about **4 us of fixed cost plus 1.0 us per radix pass**, and a pass moves 4
+elements per thread at S=4096 with 1024 threads -- so that 1.0 us is barrier and
+LDS-scan latency, not data. Splitting a row across blocks does not remove per-pass
+barrier latency; it adds a cross-block sync to every pass. That is the same
+reason `coop_g` and `--fuse-ab` do not help here.
+
+**Consequence for any "close the gap at small M" plan.** Even if splitting made
+every pass free, M=16 N=32768 would go 20.5 -> ~14.3 us (A to its 3.6 us fixed,
+C to 4.4, B unchanged at 6.3), which is 6.7x the floor rather than today's 9.6x.
+The floor is one kernel; we run three, each with ~4 us of fixed cost. **Below
+roughly 5x at small M needs fewer kernels, not better ones.**
+
+### Re-falsified, and one of them nearly shipped again
+Everything cheap in phases A and C was already tried and recorded in this file;
+these were re-measured on 2026-09-18 before that entry was read, which is the
+process failure worth remembering -- read this file before probing, not after.
+
+- **`--phase-a-passes 2`** wins 1.2-3.6% in the red zone and is catastrophic
+  outside it: M=256 N=1M +320%, M=1024 N=262144 +127%, M=4096 N=1M +29.6%. The
+  coarser threshold lets the candidate count past `cap` and rows drop into the
+  exact fallback. Any use of it needs a measured per-region table, for 3%.
+- **`--phase-c-passes 2`** looked correct on three shapes under
+  `--dist adversarial` and is a 1.7 us win. It is WRONG, and the invariant is
+  written directly above the variable
+  (`benchmark_topk.hip.cpp:57`: "Phase C must use all 4 passes to be exact.
+  Fewer is a TIMING ABLATION ONLY"). The g_11/g_12 entry above records the same
+  mistake with 3 passes: green on `--dist adversarial`, `rows_fail=1` on
+  gaussian and inf. A pass count is a distribution-sensitive knob, so testing it
+  on one distribution proves nothing.
+- **`--fuse-ab 1`**: M=16 N=32K 43.4 us against 23.0 (+89%) with
+  `fallback_rows=8` of 16; M=4096 N=131072 2764 against 581 (+376%).
+- **`coop_g`** at M=16 N=32K: 4 -> 0.0284 ms, 8 -> 0.0230 (the auto pick),
+  16 -> 0.0239, 32 -> 0.0240, 64 -> 0.0240; 32 and 64 report 16 because
+  `kCoopLog2G` tops out there.
+- **Block sizes**: `--phase-c-block` 256/512/1024 gives 14.92 / 10.28 / 8.56 us
+  and `--phase-a-block` shows no win either. The occupancy default is best.
+
 ## Structural facts worth keeping (2026-09-18 additions)
 
 - `RowExtents` (`csrc/topk_common.hip.hpp`) is the ONLY place `rowStarts[]` and
