@@ -1566,6 +1566,36 @@ clear, and both ways cost more than the kernel they remove:
 **Generalises:** a kernel that also initialises shared state is not just its own
 cost. Before costing a fusion, find what else the kernel being removed was doing.
 
+### FALSIFIED: one cooperative kernel with grid.sync instead of three launches
+The last untried structural idea for the red zone, killed by its own gate in
+under an hour. `scripts/gridsync_probe.hip` prices both halves of the trade on
+the same box, same timer, same run: a cooperative kernel whose body is N grid
+syncs, and N back-to-back empty ordinary launches.
+
+```
+blocks   us per grid.sync   coop-launch intercept | us per ordinary launch  intercept
+    64          8.877              20.73          |        2.897              0.85
+   128         17.695              14.10          |        3.017              0.04
+   256         31.991              15.10          |        3.028              0.37
+   512         48.513              19.40          |        3.033              0.42
+```
+
+**A grid sync costs 3x to 16x an ordinary kernel launch, and unlike a launch it
+gets worse with grid size.** At the size this would have used -- 128 blocks, from
+M=16 with coop_g=8 -- one sync is 17.7 us against a 3.0 us launch. The fused
+kernel would have traded two launches (6.0 us) for two syncs (35.4 us) inside a
+pipeline whose entire wall time is about 23 us.
+
+It is dead twice over: `hipLaunchCooperativeKernel` itself has a 14-21 us
+intercept against 0.04-0.85 us for an ordinary launch, so the design loses ~17 us
+before the first sync executes.
+
+**Generalises:** on this hardware a grid-wide barrier is not a cheaper kernel
+boundary, it is a much more expensive one. Any design that reaches for
+`grid.sync()` to avoid a launch should price both first -- it is a twenty-line
+microbenchmark. Note the shape of the cost too: launch cost is flat in grid size
+and sync cost is linear in it, so the bigger the grid the worse the trade.
+
 ## Structural facts worth keeping (2026-09-18 additions)
 
 - `RowExtents` (`csrc/topk_common.hip.hpp`) is the ONLY place `rowStarts[]` and

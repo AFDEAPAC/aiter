@@ -1,0 +1,17 @@
+gfx=gfx950:sramecc+:xnack- CUs=256  blocks/CU at 1024 threads=2  co-resident limit=512 blocks
+
+cooperative kernel, body is N grid syncs, median of 9 runs of 20 iters
+  blocks |   N=0     N=1     N=2     N=4     N=8    N=16    N=32    N=64 |     us/sync   intercept
+      64 |   21.62   27.28   36.19   54.11   90.76  163.44  312.87  583.47 |     8.864    20.498
+     128 |   21.70   30.95   47.83   82.56  153.18  294.50  581.43 1146.41 |    17.687    14.048
+     256 |   21.84   41.02   73.68  138.40  268.63  519.36 1071.87 2049.85 |    32.007    14.975
+     512 |   21.82   61.61  110.93  212.27  412.57  815.59 1561.73 3121.54 |    48.460    20.460
+
+ordinary launches for comparison, N back-to-back empty kernels on one stream
+  blocks |   N=1     N=2     N=4     N=8    N=16    N=32    N=64 |   us/launch   intercept
+      64 |    3.81    6.93   13.09   25.70   49.74   92.91  195.35 |     3.014     0.670
+     128 |    3.41    6.55   12.79   25.31   50.37  100.73  198.77 |     3.105     0.517
+     256 |    3.56    6.74   13.18   25.79   50.83  100.47  199.12 |     3.103     0.796
+     512 |    3.58    6.70   13.24   25.71   50.83  100.89  199.98 |     3.118     0.714
+
+VERDICT: a fused kernel trades 2 launches for 2 syncs and saves 2 intercepts.
