@@ -36,7 +36,10 @@ CASES = [
     ("rowstart_unaligned_1",  "rowStarts = r*1, so most row bases are not 4-aligned"),
     ("rowstart_unaligned_65", "rowStarts = r*65, the aiter-like stride that is not 4-aligned"),
     ("rowstart_aligned_4",    "rowStarts = r*4: aligned, isolates alignment from row length"),
-    ("stride0_odd",           "stride0 not a multiple of 4 (AVO declines, dispatch must route around)"),
+    ("stride0_odd",           "stride0 not a multiple of 4, residue 1 (served since v5 Stage 7)"),
+    ("stride0_odd_2",         "stride0 not a multiple of 4, residue 2: a 2-element clamped tail"),
+    ("stride0_odd_3",         "stride0 not a multiple of 4, residue 3: a 3-element clamped tail"),
+    ("stride0_odd_tail_max",  "odd stride0 with each row's max planted in the clamped tail"),
     ("stride0_nonpow2",       "stride0 = 2^k + num_rows, aiter's real width"),
     ("stride1_not_one",       "stride1 != 1: aiter ignores it, AVO asserts"),
     ("nan_positive",          "+NaN in the data"),
@@ -124,6 +127,12 @@ def build_case(case, torch):
 
     if case == "stride0_odd":
         N = 65537
+    elif case == "stride0_odd_2":
+        N = 65538
+    elif case == "stride0_odd_3":
+        N = 65539
+    elif case == "stride0_odd_tail_max":
+        N = 65539
     elif case == "stride0_nonpow2":
         N = 65536 + 64
     elif case == "k_small":
@@ -147,6 +156,12 @@ def build_case(case, torch):
     elif case == "inf_mixed":
         logits[:, N // 3] = float("inf")
         logits[:, N // 5] = -float("inf")
+    elif case == "stride0_odd_tail_max":
+        # The last element of an odd row is only reachable through the partial
+        # vector that load_row_f4 clamps, so planting each row's maximum there
+        # is a positive control: if the tail were dropped, the top-k would be
+        # missing its largest entry and the multiset check would catch it.
+        logits[:, N - 1] = 1e6
 
     starts = torch.zeros(M, dtype=torch.int32, device=dev)
     ends = torch.full((M,), N, dtype=torch.int32, device=dev)

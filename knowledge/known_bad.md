@@ -823,6 +823,38 @@ measurement and can decay -- this repo has recorded one contention event writing
 a bogus 78.30 us into a baseline -- but a broken comparison looks exactly the
 same and is far cheaper to rule out.
 
+### SHIPPED (v5 Stage 7): an odd row pitch needed four deleted guards, not a port
+`stride0 % FP32_EPT != 0` was refused by `sampling_geometry_ok`,
+`sample_stride_exact`, `topk_avo_supports` and the harness, so aiter silently
+kept such widths on its own mb/ob path. All four guards existed for the
+misalignment Stage 2 proved is a non-issue, and the kernels already handled an
+odd pitch: `sample_chunk_stride` masks the chunk spacing to a multiple of 4 so
+chunk starts stay 4-aligned RELATIVE to the base, the RAGGED instantiation counts
+vectors with `n4_cover(len)`, and `load_row_f4<true>` loads the final partial
+vector element-wise.
+
+So: four relaxed guards, plus the harness routing an odd pitch through RAGGED
+with full-row extents -- what the aiter entry always instantiates anyway.
+`RAGGED=false` stays byte-identical, because it truncates its vector count and
+carries no per-lane bound, and adding one would charge the scored pow2 grid a
+compare per element for a case it never sees.
+
+Worth 1.27x to 2.81x measured through the real Python dispatch against the aiter
+path these widths used to fall back to (M=64 N=65537 73.40 -> 57.63 us;
+M=256 N=1048573 693.48 -> 246.69 us).
+
+The positive control that makes the tail claim checkable: plant each row's
+maximum at index N-1, which is ONLY reachable through the clamped partial vector.
+Found in 8 of 8 rows on small_n (M=8 N=12289) and 8 of 8 on the sampled path
+(M=8 N=131073, coop_g=16, under_K=0). All three residues are in `grid.ODD_NS`
+because the clamped tail is 3, 2 and 1 elements long respectively;
+`verify_grid --dist all` 3085/3085.
+
+**The estimate was wrong because the diagnosis was.** This was scoped as a
+feature -- port aiter's `vectorized_process` head/middle/tail to seven load
+sites -- and it was four deleted `if` statements. A wrong root cause does not
+just produce a wrong fix, it produces a wrong estimate of the work.
+
 ### SHIPPED (v5 Stage 5): occupancy_block_threads truncated twice, so it undershot
 `occupancy_block_threads` computed `TARGET_WAVES_PER_CU / min(lds_blocks, g)`
 with integer division and then rounded the result DOWN to a power of two. Two

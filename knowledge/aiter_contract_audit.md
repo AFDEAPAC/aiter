@@ -93,10 +93,9 @@ Production was not hit only because aiter's `create_row_boundaries` returns
 arbitrary-start path, so "aiter tests this" was never available as an argument;
 our gate now carries it (`grid.ROWSTARTS` strides 1, 3, 7, 65).
 
-`stride0 % 4 != 0` is a **separate** question, now that alignment is known not to
-be the problem: `supports()` still declines it, the dispatch routes to aiter, and
-the caller silently gets the slower path. Enabling it needs the uniform path to
-use `n4_cover(pitch)` and predicate, which is Stage 2's remaining half.
+`stride0 % 4 != 0` was a **separate** question, and once alignment was known not
+to be the problem it turned out to need no kernel change at all -- see the next
+section.
 
 ### FAIL (low severity): `stride1 != 1` -- FIXED by routing, not by semantics
 
@@ -112,6 +111,53 @@ assert stays for direct callers of `top_k_per_row_prefill_avo`. Deliberately
 NOT fixed by ignoring `stride1` the way aiter does: silently computing against
 the wrong layout is worse than declining, and `topk_avo_supports` cannot express
 the condition because it only takes `(numRows, stride0, k)`.
+
+### RESOLVED: `stride0 % 4 != 0` is now served, and it needed no kernel change
+
+Three guards were rejecting it -- `sampling_geometry_ok`, `sample_stride_exact`
+and `topk_avo_supports` -- plus the harness's own `N % FP32_EPT` check. All four
+were there for the alignment that Stage 2 proved is a non-issue. The kernels
+already handled an odd pitch:
+
+- `sample_chunk_stride` masks the chunk spacing to a multiple of 4, so chunk
+  starts stay 4-aligned **relative to the row base** whatever the base is;
+- the RAGGED instantiation counts vectors with `n4_cover(len)` and
+  `load_row_f4<true>` loads the final partial vector element-wise;
+- gfx950 serves the resulting 4-byte-aligned `dwordx4` natively.
+
+So the change is four relaxed guards, and the harness routes an odd pitch through
+RAGGED with full-row extents -- which is what the aiter entry always instantiates
+anyway. `RAGGED=false` is left byte-identical: it truncates its vector count and
+applies no per-lane bound, and giving it one would cost the scored pow2 grid a
+compare per element for a case it never sees.
+
+Evidence, beyond the multiset check against the CPU oracle:
+
+- **Positive control on the tail.** Each row's maximum planted at index `N-1`,
+  which is only reachable through the clamped partial vector: found in 8 of 8
+  rows on the small_n path (M=8 N=12289) and 8 of 8 on the sampled path
+  (M=8 N=131073, coop_g=16, `under_K=0`). If the tail were dropped the top-k
+  would be missing its largest entry.
+- **All three residues** are in the gate (`grid.ODD_NS`), since the clamped tail
+  is 3, 2 and 1 elements long respectively. 40 new points, `verify_grid --dist
+  all` 3085/3085.
+- **Failable first**: `--inject-fault 1` and `2` both fire at N=131073 and
+  N=196609.
+- **Identical to aiter** on all four odd-N audit cases, including the
+  tail-max control.
+
+What it buys, measured through the real Python dispatch in the correctness image
+(`AITER_DISABLE_TOPK_AVO` 1 vs 0), since these shapes previously fell back to
+aiter's own mb/ob path:
+
+| shape | aiter | AVO | speedup |
+|---|---|---|---|
+| M=64 N=65537 | 73.40 us | 57.63 us | 1.27x |
+| M=256 N=131073 | 116.93 us | 80.66 us | 1.45x |
+| M=1024 N=131075 | 290.94 us | 190.29 us | 1.53x |
+| M=4096 N=131073 | 972.14 us | 661.30 us | 1.47x |
+| M=64 N=196609 | 107.39 us | 66.22 us | 1.62x |
+| M=256 N=1048573 | 693.48 us | 246.69 us | 2.81x |
 
 ### Matches aiter, diverges from `torch.topk`: NaN
 
@@ -172,14 +218,23 @@ M=64 pitch=512, M=4096 pitch=512).
    tolerates the misaligned wide load and only the over-read was fatal. The gate
    now carries the repro as a negative control: all four new `ROWSTARTS` entries
    fault on the pre-fix binary and pass on the post-fix one.
-2. **`stride0 % 4 != 0` still declined.** Not a fault, just the slower aiter path.
-   Needs the uniform instantiation to use `n4_cover(pitch)` with predication.
+2. **`stride0 % 4 != 0` declined.** FIXED in v5 Stage 7 by relaxing four guards.
+   No kernel change was needed once Stage 2 had established that the
+   misalignment is not the problem; worth 1.27x to 2.81x against the aiter path
+   these shapes used to fall back to.
 3. **`stride1 != 1` aborts instead of declining.** FIXED by adding
    `stride1 == 1` to the dispatch condition in `aiter/ops/topk.py`.
 
-After both fixes the audit reports **no AVO-only failure**: 17 terms identical to
-aiter, 1 (`rowEnds > stride0`) out of contract for both, and the NaN pair matching
-aiter while both differ from `torch.topk`.
+After all three fixes the audit reports **no AVO-only failure**: 21 of 22 terms
+identical to aiter (including four odd-`stride0` cases), 1
+(`rowEnds > stride0`) out of contract for both, and the NaN pair matching aiter
+while both differ from `torch.topk`.
+
+The cheapest lesson in the list: fix 2 was scoped as a feature -- port aiter's
+head/middle/tail to seven load sites -- and turned out to be four deleted `if`
+statements. What made the difference was Stage 2 correcting the root cause first.
+A wrong diagnosis does not just produce a wrong fix, it produces a wrong estimate
+of the work.
 
 ## What generalises
 

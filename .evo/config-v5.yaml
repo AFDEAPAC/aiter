@@ -40,8 +40,9 @@ grid:
               294912, 327680, 393216, 458752, 491520, 524284, 524544, 655360,
               786432, 917504, 1048572, 1052672]
   n_nonpow2_m: [1, 64, 256, 1024, 4096]
+  n_odd: [12289, 32833, 65537, 131073, 131074, 131075, 196609, 1048573]
   topk: 2048
-  points: 547
+  points: 587
   definition: bench/grid.py    # single source of truth, imported by all harnesses
   nonpow2_rationale: >
     midpoint 1.5x (49152, 98304, 196608, 393216, 786432) and the quarter points
@@ -65,7 +66,7 @@ correctness:
   commands:
     - ["python", "bench/gate_selftest.py"]        # in correctness_image
     - ["python", "bench/correctness.py"]          # in correctness_image
-    - ["python3", "bench/verify_grid.py", "--dist", "all"]   # host, ~2865 verifies
+    - ["python3", "bench/verify_grid.py", "--dist", "all"]   # host, 3085 verifies
     - ["python", "bench/aiter_contract_audit.py"] # in correctness_image, vs aiter
   gates:
     - "PROVE THE GATE CAN GO RED ON THE PATH BEING CHANGED, BEFORE TRUSTING ANY
@@ -79,7 +80,7 @@ correctness:
        optimization round reported PASS having never called torch.topk."
     - "value multiset bitwise-equal to torch.topk; index uniqueness; exactly K
        outputs in range; five distributions"
-    - "every one of the 547 grid points rows_fail=0 across all five
+    - "every one of the 587 grid points rows_fail=0 across all five
        distributions. correctness.py alone covers ~10 matrix cases and does NOT
        cover the grid."
     - "under_K / over_Calloc are read off the CANDSTATS line, never inferred from
@@ -95,10 +96,13 @@ correctness:
     uninitialised memory and made every small_n shape look like it was falling
     back.
   known_open_defects:
-    - "rowStarts[r] % 4 != 0 faults (HIP 700) on the sampled path. aiter serves
-       it. Fix is v5 Stage 2; reproduce with bench/aiter_contract_audit.py."
-    - "stride1 != 1 aborts via AITER_CHECK where aiter ignores the argument, and
-       topk_avo_supports cannot see stride1 so Python cannot route around it."
+    - "none. All three terms the v5 Stage 0 audit found -- unaligned rowStarts
+       (Stage 2), stride1 != 1 routing (Stage 2), and an odd stride0 being
+       declined (Stage 7) -- are fixed and gated. The audit now reports 21 of 22
+       terms identical to aiter, with rowEnds > stride0 out of contract for both."
+    - "NOT a defect, recorded so it is not rediscovered: +NaN is selected and
+       -NaN is dropped, by both AVO and aiter, where torch.topk ranks NaN
+       highest. Matching aiter is the contract."
 
 # ---------------------------------------------------------------------------
 # Performance scoring: two tiers, two rule modes.
@@ -116,8 +120,8 @@ scoring:
       so the tier that drives every decision cannot be blind to this axis.
   outer:
     command: ["python3", "bench/score_grid.py", "--tier", "outer", "--rule", "per-cell"]
-    points: 547
-    purpose: "commit gate, ~7 min"
+    points: 587
+    purpose: "commit gate, ~8 min"
 
   v3_geomean_command: ["python3", "bench/score_grid.py", "--tier", "outer", "--rule", "geomean"]
 
@@ -128,9 +132,13 @@ scoring:
   reject_stddev_pct: 2.0
 
 baseline:
-  measured_on: "2026-09-18, MI355X, ROCm 10.0, g_24, machine verified quiet"
-  inner: {points: 28, geomean_us: 64.54}
-  outer: {points: 547, geomean_us: 49.83}
+  measured_on: "2026-09-18, MI355X, ROCm 10.0, g_25, machine verified quiet"
+  inner: {points: 28, geomean_us: 64.57}
+  outer: {points: 587, geomean_us: 51.35}
+  outer_scope_note: >
+    Not comparable to the 547-point number: g_25 added 40 odd-pitch points, which
+    enter the geomean without a prior record to be compared against. Per-cell on
+    the 547 common points is the verdict that counts, and it was 0 regressed.
   anchor_us: 581.0
   run_summary: >
     From the Stage 1 fork (g_19, outer 51.09 us) to g_24, over the 547 common
@@ -181,7 +189,8 @@ shipped_config:
   sample_s: auto            # R_TARGET=179 law, then the exact-stride repair
   margin: auto
   cap: auto
-  coop_g: auto              # per-(M,N) table, extended to M=4096 in v4 (g_16)
+  coop_g: auto              # per-(M, half-octave N) table, minimax-fitted (g_22)
+  odd_pitch: served         # stride0 need not be a multiple of 4 (g_25)
   scan_form: wave0          # compile-time; a per-region table was FALSIFIED (g_17/g_18)
   phase_a_passes: 3
   hist_replicas: 4

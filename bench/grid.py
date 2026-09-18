@@ -59,6 +59,19 @@ NPOW2_NS = [
 # 131328 / 132096 / 135168 already arrive via AITER_PREFIX + AITER_M.
 NPOW2_MS = [1, 64, 256, 1024, 4096]
 
+# ---------------------------------------------------------------------------
+# Widths that are not a multiple of 4 (v5 Stage 7). Served through the RAGGED
+# instantiation with full-row extents, which is what the aiter entry always
+# uses: the vector count is n4_cover(len) and load_row_f4 loads the final
+# partial vector element-wise, so an odd pitch only leaves the row base
+# unaligned, and gfx950 serves a 4-byte-aligned dwordx4 natively.
+#
+# All three residues are covered, because the tail that the clamp has to handle
+# is 3, 2 and 1 elements long respectively, and 12289 puts one in the small_n
+# path as well as the sampled one.
+# ---------------------------------------------------------------------------
+ODD_NS = [12289, 32833, 65537, 131073, 131074, 131075, 196609, 1048573]
+
 # Largest shape is M=4096 N=1048576 = 16 GB of input against 309 GB of VRAM
 # (measured with rocm-smi). An earlier 14 GB guard was arbitrary and wrongly
 # marked that point oom_skip; the real limit is the device, so query it.
@@ -120,6 +133,9 @@ def all_shapes():
         for k in TOPK_VALUES:
             add(m, n, k)
     for n in NPOW2_NS:
+        for m in NPOW2_MS:
+            add(m, n, TOPK)
+    for n in ODD_NS:
         for m in NPOW2_MS:
             add(m, n, TOPK)
     return out
