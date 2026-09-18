@@ -1590,6 +1590,25 @@ It is dead twice over: `hipLaunchCooperativeKernel` itself has a 14-21 us
 intercept against 0.04-0.85 us for an ordinary launch, so the design loses ~17 us
 before the first sync executes.
 
+**And the launches were never costing what the microbenchmark says.** Back to
+back with nothing else running, a launch is 3.0 us. Inside the real pipeline the
+CPU enqueues ahead of a busy GPU and the cost mostly disappears -- wall time minus
+the summed kernel durations, on a quiet box:
+
+```
+M=16  N=32768   wall 23.00 us  kernels 21.60  gap 1.40 us over 3 launches, 0.47 each
+M=64  N=131072  wall 30.20 us  kernels 27.88  gap 2.32 us                   0.77 each
+M=256 N=65536   wall 36.80 us  kernels 34.56  gap 2.24 us                   0.75 each
+```
+
+So the entire launch overhead of the three-kernel pipeline is 1.4 us of 23.0 at
+M=16, six percent. Fusing to three-into-one could recover that plus two kernel
+prologues, about 4.7 us of 23 at the very best, against a zeroing replacement
+that costs 3.16 us (`fillBufferAligned`) or a CAS loop under 128-way contention.
+**That is the ceiling on the whole reduce-the-kernel-count direction, and it is
+small.** Price a launch inside the pipeline that will actually run, not in a loop
+that does nothing else.
+
 **Generalises:** on this hardware a grid-wide barrier is not a cheaper kernel
 boundary, it is a much more expensive one. Any design that reaches for
 `grid.sync()` to avoid a launch should price both first -- it is a twenty-line
