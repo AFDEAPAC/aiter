@@ -1615,6 +1615,53 @@ boundary, it is a much more expensive one. Any design that reaches for
 microbenchmark. Note the shape of the cost too: launch cost is flat in grid size
 and sync cost is linear in it, so the bigger the grid the worse the trade.
 
+### At small M this op is host-bound, and no gate or report could see it
+Measured 2026-09-18 after the red-zone kernel work ran out of directions. The
+enqueue cost of one `top_k_per_row_prefill` call -- the caller's CPU time before
+it can do anything else -- against the same call's end-to-end time, 200 calls
+with one synchronise at the end:
+
+```
+                  BEFORE memoising          AFTER
+shape           enqueue   e2e   host%    enqueue   e2e
+M=16  N=32768    25.29   25.43  99.4%     25.61   25.75   (routes to mb/ob now)
+M=64  N=65536    32.05   32.19  99.6%     25.47   27.65
+M=256 N=65536    32.25   37.45  86.1%     25.54   37.93
+M=64  N=131072   32.73   32.90  99.5%     25.80   32.51
+M=4096 N=131072  33.45  636.78   5.3%     25.68  636.24
+```
+
+**At M <= 64 the call was 99% host.** The GPU work -- 21.6 us of kernel at
+M=16 N=32768 -- was entirely hidden behind 25.3 us of CPU. Every kernel-side
+number in `reports/ceiling_report.html` and every `score_grid` cell is GPU time,
+so none of them can show this, and a kernel improvement in that region would not
+have reached the caller at all.
+
+Two unmemoised binding lookups were 9.7 us of it: `topk_avo_supports` at
+4.86 us/call in the dispatcher and `topk_avo_workspace_size` at 4.80 us/call in
+the wrapper. Both are pure functions of (numRows, stride0, k); `lru_cache` took
+them to 0.089 and 0.092 us, 53x. Fixed in aiter-topk 6a71f2f33.
+
+**What is left, decomposed at M=64 N=65536 (enqueue us):**
+
+```
+raw binding _top_k_per_row_prefill_avo        18.07
++ public wrapper                              19.99
++ dispatcher                                  20.52
+  get_module (lru-cached)                      0.063
+  get_topk_scratch_workspace                   1.064
+```
+
+So ~18 us sits inside the binding itself: three `hipLaunchKernel` calls at about
+3 us of CPU each, plus marshalling four tensors and five scalars. `get_module`
+is already cached and is not the cost. That is aiter framework territory rather
+than this op, and it is the ceiling on anything done at the Python layer here.
+
+**Note the asymmetry that makes this easy to get wrong.** A kernel launch costs
+about 0.5 us of GPU gap when the queue is full (wall minus summed kernel time)
+but about 3 us of HOST time regardless. The two are different resources and the
+binding constraint at small M is the host one.
+
 ## Structural facts worth keeping (2026-09-18 additions)
 
 - `RowExtents` (`csrc/topk_common.hip.hpp`) is the ONLY place `rowStarts[]` and
