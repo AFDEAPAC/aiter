@@ -1672,3 +1672,72 @@ binding constraint at small M is the host one.
 - 16 of the 34 device kernels are `RAGGED=false`. Their instruction streams are
   byte-identical across the clamp, which is why the scored pow2 grid cannot
   regress and the ragged A/B is the only measurement that can see the cost.
+
+## The customer spec reframes what is worth optimising (2026-09-19)
+
+The spec is: fp32 logits `[M, N]`, arbitrary M/N, `M` in 1, 4, 8, ... 4k, `N` in
+512, 1024, ... 1M, `topk = 2048`. Two consequences that should stop work rather
+than start it, and one that started work:
+
+- The `N > 1.5M` cliff is **out of spec**. Do not spend time on it.
+- The `k = 512` crossover is **out of spec**; the spec fixes `topk = 2048`.
+- `N = 512` and `N = 1024` are **in spec and had essentially no coverage**.
+  `bench/grid.py` bottoms out at `N = 2048`, `verify_grid.py` inherits that
+  floor, and `stress_topk.py` touched `N = 512` in one boundary case. Closed by
+  `bench/spec_low_n.py`.
+
+Those two columns are not a smaller grid point. At `topk = 2048` they are the
+`k >= N` regime -- every element of the row is selected, so the answer is a
+permutation of the row plus a `-1` tail -- and the dispatch lands on aiter's
+one-block path, not AVO, because AVO needs `stride0 >= 32768`.
+
+### The unmemoised-binding bug was on the mb/ob path too, and it was bigger
+
+`6a71f2f33` fixed `topk_avo_supports` and `topk_avo_workspace_size`. The same
+mistake sat one branch over, on the path every small shape actually takes.
+Measured through the binding on this box:
+
+```
+topk_use_mulblocks      6.344 us
+topk_ob_workspace_size  6.740 us
+topk_mb_workspace_size  5.059 us
+```
+
+The one-block dispatch calls the first two on every call: 13.1 us of host time
+to pick a path and size a workspace, in front of a kernel that rocprofv3 times
+at 2.36 us. Fixed in aiter-topk `76e94f4df`, which took the spec's low-N corner
+from 24.7-26.2 us of wall time to 15.8-16.3 us, 32/32 still correct.
+
+**The control is what makes that number trustworthy.** `M=4096 N=4096` is the
+one cell in that sweep whose time is real GPU work, and it did not move: 70.13
+-> 70.11 us. Every cell that was waiting on the host dropped about 9.5 us. A
+uniform drop across all 32 cells would have been much weaker evidence, because
+it is also what a measurement artefact looks like.
+
+Note the saving realised (9.5 us) is less than the two lookups measured in
+isolation (13.1 us); the per-call microbenchmark of a binding includes overhead
+that is shared once both are on the same call. Trust the end-to-end number.
+
+**Generalise this before it bites a third time:** any `@compile_ops` binding
+that is a pure function of its arguments costs about 5-7 us per call through the
+binding layer alone. On this op that is two to three times the kernel. Grep for
+`@compile_ops` shape queries on any hot path and assume each one is 6 us until
+measured otherwise.
+
+Still 16 us of wall time around a 2.4 us kernel, so the low-N region remains
+host-bound. What is left, from cProfile at `M=64 N=512`: `torch_to_aiter_pybind`
+5x per call, the `compile_ops` wrapper 3x, `torch.empty` 5x.
+
+### A green sweep that measured the wrong module
+
+The first post-memoisation run of the low-N sweep reported no change, then
+`aiter has no attribute top_k_per_row_prefill`. Cause: `python /script.py` sets
+`sys.path[0]` to the **script's directory**, not the cwd, so `import aiter`
+resolved to the copy in site-packages instead of the `/aiter` mount. The run was
+green against a module we had not touched.
+
+`-e PYTHONPATH=/aiter` fixes it, but the durable fix is the assertion now at the
+top of `bench/spec_low_n.py`: print `aiter.__file__` and abort unless it is
+under the mount. This is the same failure class as the g_11 gate that was green
+because it never ran the changed instantiation -- a check that verifies the
+wrong object is worse than no check, because it produces confidence.
