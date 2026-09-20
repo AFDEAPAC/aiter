@@ -14,8 +14,11 @@ file asks: given a hostile argument, does the GPU survive?
 That question is not hypothetical. The HIP 700 fault on unaligned row bases
 (v5 Stage 2) was found by accident while scoping an unrelated tuning stage --
 `knowledge/aiter_contract_audit.md` says so in its first paragraph -- and
-`/home/mh/aiter-topk` still carries nine `gpucore.*.gpu` dumps from that period.
-A fault found by accident is a fault that shipped.
+`/home/mh/aiter-topk` had accumulated 17 `gpucore.*.gpu` dumps by the time they
+were deleted (2026-09-20, 50.6 GB across the box on a 99%-full `/home`); what
+they contained is in `knowledge/gpucore_extract.md`, and 11 of the 17 are from
+the AVO path rather than aiter's. A fault found by accident is a fault that
+shipped.
 
 Three techniques do the work
 ----------------------------
