@@ -1,0 +1,258 @@
+[
+  {
+    "M": 1,
+    "N": 512,
+    "enqueue_us": 16.162199899554253,
+    "e2e_us": 16.308799386024475,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 1,
+    "N": 1024,
+    "enqueue_us": 16.520805656909943,
+    "e2e_us": 16.661686822772026,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 1,
+    "N": 2048,
+    "enqueue_us": 16.408292576670647,
+    "e2e_us": 16.547292470932007,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 1,
+    "N": 4096,
+    "enqueue_us": 16.866596415638924,
+    "e2e_us": 17.003389075398445,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 4,
+    "N": 512,
+    "enqueue_us": 16.412101686000824,
+    "e2e_us": 16.553886234760284,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 4,
+    "N": 1024,
+    "enqueue_us": 16.44299365580082,
+    "e2e_us": 16.582589596509933,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 4,
+    "N": 2048,
+    "enqueue_us": 16.51008613407612,
+    "e2e_us": 16.6493933647871,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 4,
+    "N": 4096,
+    "enqueue_us": 16.515692695975304,
+    "e2e_us": 16.66218973696232,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 8,
+    "N": 512,
+    "enqueue_us": 16.458984464406967,
+    "e2e_us": 16.593383625149727,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 8,
+    "N": 1024,
+    "enqueue_us": 16.396790742874146,
+    "e2e_us": 16.524186357855797,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 8,
+    "N": 2048,
+    "enqueue_us": 16.28960482776165,
+    "e2e_us": 16.420697793364525,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 8,
+    "N": 4096,
+    "enqueue_us": 16.50528982281685,
+    "e2e_us": 16.65339805185795,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 16,
+    "N": 512,
+    "enqueue_us": 16.279593110084534,
+    "e2e_us": 16.41159877181053,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 16,
+    "N": 1024,
+    "enqueue_us": 16.420995816588402,
+    "e2e_us": 16.54638908803463,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 16,
+    "N": 2048,
+    "enqueue_us": 16.415100544691086,
+    "e2e_us": 16.549695283174515,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 16,
+    "N": 4096,
+    "enqueue_us": 16.468986868858337,
+    "e2e_us": 16.620289534330368,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 64,
+    "N": 512,
+    "enqueue_us": 16.148295253515244,
+    "e2e_us": 16.281893476843834,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 64,
+    "N": 1024,
+    "enqueue_us": 16.3860060274601,
+    "e2e_us": 16.520190984010696,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 64,
+    "N": 2048,
+    "enqueue_us": 16.424087807536125,
+    "e2e_us": 16.560088843107224,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 64,
+    "N": 4096,
+    "enqueue_us": 16.52909442782402,
+    "e2e_us": 16.684792935848236,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 256,
+    "N": 512,
+    "enqueue_us": 16.339905560016632,
+    "e2e_us": 16.478393226861954,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 256,
+    "N": 1024,
+    "enqueue_us": 16.374094411730766,
+    "e2e_us": 16.507096588611603,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 256,
+    "N": 2048,
+    "enqueue_us": 16.351789236068726,
+    "e2e_us": 16.484688967466354,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 256,
+    "N": 4096,
+    "enqueue_us": 16.405703499913216,
+    "e2e_us": 16.56300388276577,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 1024,
+    "N": 512,
+    "enqueue_us": 16.50049351155758,
+    "e2e_us": 16.622086986899376,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 1024,
+    "N": 1024,
+    "enqueue_us": 16.600284725427628,
+    "e2e_us": 16.737785190343857,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 1024,
+    "N": 2048,
+    "enqueue_us": 16.621090471744537,
+    "e2e_us": 16.758283600211143,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 1024,
+    "N": 4096,
+    "enqueue_us": 16.581006348133087,
+    "e2e_us": 21.45763486623764,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 4096,
+    "N": 512,
+    "enqueue_us": 16.510505229234695,
+    "e2e_us": 16.67899079620838,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 4096,
+    "N": 1024,
+    "enqueue_us": 16.859183087944984,
+    "e2e_us": 17.031775787472725,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 4096,
+    "N": 2048,
+    "enqueue_us": 16.76068641245365,
+    "e2e_us": 16.931984573602676,
+    "verdict": "PASS",
+    "detail": null
+  },
+  {
+    "M": 4096,
+    "N": 4096,
+    "enqueue_us": 16.601094976067543,
+    "e2e_us": 69.89112123847008,
+    "verdict": "PASS",
+    "detail": null
+  }
+]

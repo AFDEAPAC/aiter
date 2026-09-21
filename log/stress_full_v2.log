@@ -1,0 +1,510 @@
+tier=full cases=500
+id    case               expect  outcome  verd   detail
+0     m_zero             serve   ran      PASS   
+1     m_one              serve   ran      PASS   
+2     m_three            serve   ran      PASS   
+3     m_255              serve   ran      PASS   
+4     m_4097             serve   ran      PASS   
+5     n_one              serve   ran      PASS   
+6     n_three            serve   ran      PASS   
+7     n_four             serve   ran      PASS   
+8     n_2047             serve   ran      PASS   
+9     n_2049             serve   ran      PASS   
+10    n_odd_small        serve   ran      PASS   
+11    n_odd_large        serve   ran      PASS   
+12    n_max              serve   ran      PASS   
+13    n_zero             reject  raised   PASS   raised: top_k_per_row_prefill_avo: unsupported shape (numRows=64 stride0=0 k=2
+14    k_zero             reject  raised   PASS   raised: top_k_per_row_prefill_avo: unsupported shape (numRows=64 stride0=65536
+15    k_neg              reject  raised   PASS   raised: top_k_per_row_prefill_avo: unsupported shape (numRows=64 stride0=65536
+16    k_one              serve   ran      PASS   
+17    k_three            serve   ran      PASS   
+18    k_at_cap           serve   ran      PASS   
+19    k_over_cap         reject  raised   PASS   raised: top_k_per_row_prefill_avo: unsupported shape (numRows=64 stride0=65536
+20    k_over_n           serve   ran      PASS   
+21    start_ramp1        serve   ran      PASS   
+22    start_ramp65       serve   ran      PASS   
+23    start_neg          reject  ran      PASS   served (clamped)
+24    start_at_pitch     reject  ran      PASS   served (clamped)
+25    start_past         reject  ran      PASS   served (clamped)
+26    end_past_pitch     reject  ran      PASS   served (clamped)
+27    end_intmax         reject  ran      PASS   served (clamped)
+28    end_neg            reject  ran      PASS   served (clamped)
+29    end_eq_start       serve   ran      PASS   
+30    end_lt_start       serve   ran      PASS   
+31    end_one            serve   ran      PASS   
+32    end_half           serve   ran      PASS   
+33    end_short_k        serve   ran      PASS   
+34    end_ramp_past      reject  ran      PASS   served (clamped)
+35    dist_gaussian      serve   ran      PASS   
+36    dist_equal         serve   ran      PASS   
+37    dist_inf           serve   ran      PASS   
+38    dist_nan_pos       serve   ran      PASS   
+39    dist_nan_neg       serve   ran      PASS   
+40    dist_denorm        serve   ran      PASS   
+41    dist_zeros         serve   ran      PASS   
+42    dist_adversarial   serve   ran      PASS   
+43    tail_max_odd       serve   ran      PASS   
+44    tail_max_short     serve   ran      PASS   
+45    ws_dirty           serve   ran      PASS   
+46    ws_dirty_ragged    serve   ran      PASS   
+47    ws_short           reject  raised   PASS   raised: top_k_per_row_prefill_avo: workspace is 1 B, needs 4200192 B
+48    no_values          serve   ran      PASS   
+49    stride1_two        reject  raised   PASS   raised: top_k_per_row_prefill_avo: logits inner stride must be 1, got 2
+50    fuzz_000           reject  ran      PASS   served (clamped)
+51    fuzz_001           reject  ran      PASS   served (clamped)
+52    fuzz_002           reject  ran      PASS   served (clamped)
+53    fuzz_003           serve   ran      PASS   
+54    fuzz_004           reject  ran      PASS   served (clamped)
+55    fuzz_005           serve   ran      PASS   
+56    fuzz_006           reject  ran      PASS   served (clamped)
+57    fuzz_007           reject  ran      PASS   served (clamped)
+58    fuzz_008           reject  ran      PASS   served (clamped)
+59    fuzz_009           serve   ran      PASS   
+60    fuzz_010           serve   ran      PASS   
+61    fuzz_011           serve   ran      PASS   
+62    fuzz_012           serve   ran      PASS   
+63    fuzz_013           reject  ran      PASS   served (clamped)
+64    fuzz_014           reject  ran      PASS   served (clamped)
+65    fuzz_015           serve   ran      PASS   
+66    fuzz_016           serve   ran      PASS   
+67    fuzz_017           reject  ran      PASS   served (clamped)
+68    fuzz_018           reject  ran      PASS   served (clamped)
+69    fuzz_019           serve   ran      PASS   
+70    fuzz_020           serve   ran      PASS   
+71    fuzz_021           serve   ran      PASS   
+72    fuzz_022           serve   ran      PASS   
+73    fuzz_023           reject  ran      PASS   served (clamped)
+74    fuzz_024           serve   ran      PASS   
+75    fuzz_025           serve   ran      PASS   
+76    fuzz_026           reject  ran      PASS   served (clamped)
+77    fuzz_027           serve   ran      PASS   
+78    fuzz_028           serve   ran      PASS   
+79    fuzz_029           serve   ran      PASS   
+80    fuzz_030           serve   ran      PASS   
+81    fuzz_031           serve   ran      PASS   
+82    fuzz_032           serve   ran      PASS   
+83    fuzz_033           reject  ran      PASS   served (clamped)
+84    fuzz_034           serve   ran      PASS   
+85    fuzz_035           serve   ran      PASS   
+86    fuzz_036           reject  ran      PASS   served (clamped)
+87    fuzz_037           reject  ran      PASS   served (clamped)
+88    fuzz_038           reject  ran      PASS   served (clamped)
+89    fuzz_039           reject  ran      PASS   served (clamped)
+90    fuzz_040           reject  ran      PASS   served (clamped)
+91    fuzz_041           reject  ran      PASS   served (clamped)
+92    fuzz_042           reject  ran      PASS   served (clamped)
+93    fuzz_043           reject  ran      PASS   served (clamped)
+94    fuzz_044           reject  ran      PASS   served (clamped)
+95    fuzz_045           reject  ran      PASS   served (clamped)
+96    fuzz_046           serve   ran      PASS   
+97    fuzz_047           reject  ran      PASS   served (clamped)
+98    fuzz_048           serve   ran      PASS   
+99    fuzz_049           serve   ran      PASS   
+100   fuzz_050           serve   ran      PASS   
+101   fuzz_051           reject  ran      PASS   served (clamped)
+102   fuzz_052           reject  ran      PASS   served (clamped)
+103   fuzz_053           reject  ran      PASS   served (clamped)
+104   fuzz_054           reject  ran      PASS   served (clamped)
+105   fuzz_055           serve   ran      PASS   
+106   fuzz_056           reject  ran      PASS   served (clamped)
+107   fuzz_057           serve   ran      PASS   
+108   fuzz_058           serve   ran      PASS   
+109   fuzz_059           serve   ran      PASS   
+110   fuzz_060           reject  ran      PASS   served (clamped)
+111   fuzz_061           reject  ran      PASS   served (clamped)
+112   fuzz_062           reject  ran      PASS   served (clamped)
+113   fuzz_063           serve   ran      PASS   
+114   fuzz_064           serve   ran      PASS   
+115   fuzz_065           serve   ran      PASS   
+116   fuzz_066           serve   ran      PASS   
+117   fuzz_067           reject  ran      PASS   served (clamped)
+118   fuzz_068           reject  ran      PASS   served (clamped)
+119   fuzz_069           reject  ran      PASS   served (clamped)
+120   fuzz_070           reject  ran      PASS   served (clamped)
+121   fuzz_071           reject  ran      PASS   served (clamped)
+122   fuzz_072           reject  ran      PASS   served (clamped)
+123   fuzz_073           serve   ran      PASS   
+124   fuzz_074           reject  ran      PASS   served (clamped)
+125   fuzz_075           reject  ran      PASS   served (clamped)
+126   fuzz_076           reject  ran      PASS   served (clamped)
+127   fuzz_077           serve   ran      PASS   
+128   fuzz_078           serve   ran      PASS   
+129   fuzz_079           reject  ran      PASS   served (clamped)
+130   fuzz_080           reject  ran      PASS   served (clamped)
+131   fuzz_081           serve   ran      PASS   
+132   fuzz_082           serve   ran      PASS   
+133   fuzz_083           serve   ran      PASS   
+134   fuzz_084           reject  ran      PASS   served (clamped)
+135   fuzz_085           reject  ran      PASS   served (clamped)
+136   fuzz_086           serve   ran      PASS   
+137   fuzz_087           reject  ran      PASS   served (clamped)
+138   fuzz_088           serve   ran      PASS   
+139   fuzz_089           reject  ran      PASS   served (clamped)
+140   fuzz_090           serve   ran      PASS   
+141   fuzz_091           serve   ran      PASS   
+142   fuzz_092           reject  ran      PASS   served (clamped)
+143   fuzz_093           reject  ran      PASS   served (clamped)
+144   fuzz_094           reject  ran      PASS   served (clamped)
+145   fuzz_095           reject  ran      PASS   served (clamped)
+146   fuzz_096           serve   ran      PASS   
+147   fuzz_097           reject  ran      PASS   served (clamped)
+148   fuzz_098           reject  ran      PASS   served (clamped)
+149   fuzz_099           serve   ran      PASS   
+150   fuzz_100           serve   ran      PASS   
+151   fuzz_101           serve   ran      PASS   
+152   fuzz_102           reject  ran      PASS   served (clamped)
+153   fuzz_103           reject  ran      PASS   served (clamped)
+154   fuzz_104           reject  ran      PASS   served (clamped)
+155   fuzz_105           serve   ran      PASS   
+156   fuzz_106           reject  ran      PASS   served (clamped)
+157   fuzz_107           reject  ran      PASS   served (clamped)
+158   fuzz_108           reject  ran      PASS   served (clamped)
+159   fuzz_109           reject  ran      PASS   served (clamped)
+160   fuzz_110           serve   ran      PASS   
+161   fuzz_111           reject  ran      PASS   served (clamped)
+162   fuzz_112           reject  ran      PASS   served (clamped)
+163   fuzz_113           reject  ran      PASS   served (clamped)
+164   fuzz_114           reject  ran      PASS   served (clamped)
+165   fuzz_115           reject  ran      PASS   served (clamped)
+166   fuzz_116           reject  ran      PASS   served (clamped)
+167   fuzz_117           reject  ran      PASS   served (clamped)
+168   fuzz_118           reject  ran      PASS   served (clamped)
+169   fuzz_119           serve   ran      PASS   
+170   fuzz_120           reject  ran      PASS   served (clamped)
+171   fuzz_121           reject  ran      PASS   served (clamped)
+172   fuzz_122           reject  ran      PASS   served (clamped)
+173   fuzz_123           serve   ran      PASS   
+174   fuzz_124           reject  ran      PASS   served (clamped)
+175   fuzz_125           reject  ran      PASS   served (clamped)
+176   fuzz_126           reject  ran      PASS   served (clamped)
+177   fuzz_127           serve   ran      PASS   
+178   fuzz_128           serve   ran      PASS   
+179   fuzz_129           serve   ran      PASS   
+180   fuzz_130           reject  ran      PASS   served (clamped)
+181   fuzz_131           serve   ran      PASS   
+182   fuzz_132           serve   ran      PASS   
+183   fuzz_133           serve   ran      PASS   
+184   fuzz_134           serve   ran      PASS   
+185   fuzz_135           reject  ran      PASS   served (clamped)
+186   fuzz_136           reject  ran      PASS   served (clamped)
+187   fuzz_137           reject  ran      PASS   served (clamped)
+188   fuzz_138           reject  ran      PASS   served (clamped)
+189   fuzz_139           reject  ran      PASS   served (clamped)
+190   fuzz_140           serve   ran      PASS   
+191   fuzz_141           reject  ran      PASS   served (clamped)
+192   fuzz_142           reject  ran      PASS   served (clamped)
+193   fuzz_143           reject  ran      PASS   served (clamped)
+194   fuzz_144           reject  ran      PASS   served (clamped)
+195   fuzz_145           reject  ran      PASS   served (clamped)
+196   fuzz_146           serve   ran      PASS   
+197   fuzz_147           serve   ran      PASS   
+198   fuzz_148           reject  ran      PASS   served (clamped)
+199   fuzz_149           serve   ran      PASS   
+200   fuzz_150           serve   ran      PASS   
+201   fuzz_151           reject  ran      PASS   served (clamped)
+202   fuzz_152           reject  ran      PASS   served (clamped)
+203   fuzz_153           serve   ran      PASS   
+204   fuzz_154           reject  ran      PASS   served (clamped)
+205   fuzz_155           serve   ran      PASS   
+206   fuzz_156           reject  ran      PASS   served (clamped)
+207   fuzz_157           serve   ran      PASS   
+208   fuzz_158           serve   ran      PASS   
+209   fuzz_159           serve   ran      PASS   
+210   fuzz_160           serve   ran      PASS   
+211   fuzz_161           reject  ran      PASS   served (clamped)
+212   fuzz_162           reject  ran      PASS   served (clamped)
+213   fuzz_163           serve   ran      PASS   
+214   fuzz_164           reject  ran      PASS   served (clamped)
+215   fuzz_165           serve   ran      PASS   
+216   fuzz_166           reject  ran      PASS   served (clamped)
+217   fuzz_167           reject  ran      PASS   served (clamped)
+218   fuzz_168           reject  ran      PASS   served (clamped)
+219   fuzz_169           reject  ran      PASS   served (clamped)
+220   fuzz_170           reject  ran      PASS   served (clamped)
+221   fuzz_171           reject  ran      PASS   served (clamped)
+222   fuzz_172           reject  ran      PASS   served (clamped)
+223   fuzz_173           reject  ran      PASS   served (clamped)
+224   fuzz_174           reject  ran      PASS   served (clamped)
+225   fuzz_175           reject  ran      PASS   served (clamped)
+226   fuzz_176           reject  ran      PASS   served (clamped)
+227   fuzz_177           reject  ran      PASS   served (clamped)
+228   fuzz_178           serve   ran      PASS   
+229   fuzz_179           reject  ran      PASS   served (clamped)
+230   fuzz_180           serve   ran      PASS   
+231   fuzz_181           reject  ran      PASS   served (clamped)
+232   fuzz_182           reject  ran      PASS   served (clamped)
+233   fuzz_183           reject  ran      PASS   served (clamped)
+234   fuzz_184           reject  ran      PASS   served (clamped)
+235   fuzz_185           serve   ran      PASS   
+236   fuzz_186           reject  ran      PASS   served (clamped)
+237   fuzz_187           reject  ran      PASS   served (clamped)
+238   fuzz_188           reject  ran      PASS   served (clamped)
+239   fuzz_189           reject  ran      PASS   served (clamped)
+240   fuzz_190           reject  ran      PASS   served (clamped)
+241   fuzz_191           reject  ran      PASS   served (clamped)
+242   fuzz_192           serve   ran      PASS   
+243   fuzz_193           reject  ran      PASS   served (clamped)
+244   fuzz_194           serve   ran      PASS   
+245   fuzz_195           reject  ran      PASS   served (clamped)
+246   fuzz_196           reject  ran      PASS   served (clamped)
+247   fuzz_197           reject  ran      PASS   served (clamped)
+248   fuzz_198           serve   ran      PASS   
+249   fuzz_199           reject  ran      PASS   served (clamped)
+250   fuzz_200           serve   ran      PASS   
+251   fuzz_201           reject  ran      PASS   served (clamped)
+252   fuzz_202           reject  ran      PASS   served (clamped)
+253   fuzz_203           reject  ran      PASS   served (clamped)
+254   fuzz_204           reject  ran      PASS   served (clamped)
+255   fuzz_205           reject  ran      PASS   served (clamped)
+256   fuzz_206           serve   ran      PASS   
+257   fuzz_207           reject  ran      PASS   served (clamped)
+258   fuzz_208           reject  ran      PASS   served (clamped)
+259   fuzz_209           reject  ran      PASS   served (clamped)
+260   fuzz_210           reject  ran      PASS   served (clamped)
+261   fuzz_211           serve   ran      PASS   
+262   fuzz_212           serve   ran      PASS   
+263   fuzz_213           serve   ran      PASS   
+264   fuzz_214           reject  ran      PASS   served (clamped)
+265   fuzz_215           reject  ran      PASS   served (clamped)
+266   fuzz_216           serve   ran      PASS   
+267   fuzz_217           serve   ran      PASS   
+268   fuzz_218           serve   ran      PASS   
+269   fuzz_219           reject  ran      PASS   served (clamped)
+270   fuzz_220           serve   ran      PASS   
+271   fuzz_221           serve   ran      PASS   
+272   fuzz_222           serve   ran      PASS   
+273   fuzz_223           reject  ran      PASS   served (clamped)
+274   fuzz_224           reject  ran      PASS   served (clamped)
+275   fuzz_225           reject  ran      PASS   served (clamped)
+276   fuzz_226           reject  ran      PASS   served (clamped)
+277   fuzz_227           reject  ran      PASS   served (clamped)
+278   fuzz_228           serve   ran      PASS   
+279   fuzz_229           reject  ran      PASS   served (clamped)
+280   fuzz_230           serve   ran      PASS   
+281   fuzz_231           reject  ran      PASS   served (clamped)
+282   fuzz_232           reject  ran      PASS   served (clamped)
+283   fuzz_233           reject  ran      PASS   served (clamped)
+284   fuzz_234           reject  ran      PASS   served (clamped)
+285   fuzz_235           reject  ran      PASS   served (clamped)
+286   fuzz_236           reject  ran      PASS   served (clamped)
+287   fuzz_237           reject  ran      PASS   served (clamped)
+288   fuzz_238           reject  ran      PASS   served (clamped)
+289   fuzz_239           reject  ran      PASS   served (clamped)
+290   fuzz_240           serve   ran      PASS   
+291   fuzz_241           reject  ran      PASS   served (clamped)
+292   fuzz_242           reject  ran      PASS   served (clamped)
+293   fuzz_243           reject  ran      PASS   served (clamped)
+294   fuzz_244           reject  ran      PASS   served (clamped)
+295   fuzz_245           reject  ran      PASS   served (clamped)
+296   fuzz_246           reject  ran      PASS   served (clamped)
+297   fuzz_247           serve   ran      PASS   
+298   fuzz_248           reject  ran      PASS   served (clamped)
+299   fuzz_249           reject  ran      PASS   served (clamped)
+300   fuzz_250           serve   ran      PASS   
+301   fuzz_251           reject  ran      PASS   served (clamped)
+302   fuzz_252           reject  ran      PASS   served (clamped)
+303   fuzz_253           reject  ran      PASS   served (clamped)
+304   fuzz_254           serve   ran      PASS   
+305   fuzz_255           serve   ran      PASS   
+306   fuzz_256           reject  ran      PASS   served (clamped)
+307   fuzz_257           serve   ran      PASS   
+308   fuzz_258           reject  ran      PASS   served (clamped)
+309   fuzz_259           reject  ran      PASS   served (clamped)
+310   fuzz_260           reject  ran      PASS   served (clamped)
+311   fuzz_261           reject  ran      PASS   served (clamped)
+312   fuzz_262           serve   ran      PASS   
+313   fuzz_263           serve   ran      PASS   
+314   fuzz_264           serve   ran      PASS   
+315   fuzz_265           serve   ran      PASS   
+316   fuzz_266           serve   ran      PASS   
+317   fuzz_267           serve   ran      PASS   
+318   fuzz_268           serve   ran      PASS   
+319   fuzz_269           serve   ran      PASS   
+320   fuzz_270           serve   ran      PASS   
+321   fuzz_271           reject  ran      PASS   served (clamped)
+322   fuzz_272           serve   ran      PASS   
+323   fuzz_273           serve   ran      PASS   
+324   fuzz_274           reject  ran      PASS   served (clamped)
+325   fuzz_275           reject  ran      PASS   served (clamped)
+326   fuzz_276           reject  ran      PASS   served (clamped)
+327   fuzz_277           serve   ran      PASS   
+328   fuzz_278           serve   ran      PASS   
+329   fuzz_279           reject  ran      PASS   served (clamped)
+330   fuzz_280           serve   ran      PASS   
+331   fuzz_281           serve   ran      PASS   
+332   fuzz_282           reject  ran      PASS   served (clamped)
+333   fuzz_283           reject  ran      PASS   served (clamped)
+334   fuzz_284           serve   ran      PASS   
+335   fuzz_285           reject  ran      PASS   served (clamped)
+336   fuzz_286           serve   ran      PASS   
+337   fuzz_287           reject  ran      PASS   served (clamped)
+338   fuzz_288           serve   ran      PASS   
+339   fuzz_289           reject  ran      PASS   served (clamped)
+340   fuzz_290           reject  ran      PASS   served (clamped)
+341   fuzz_291           serve   ran      PASS   
+342   fuzz_292           reject  ran      PASS   served (clamped)
+343   fuzz_293           reject  ran      PASS   served (clamped)
+344   fuzz_294           reject  ran      PASS   served (clamped)
+345   fuzz_295           reject  ran      PASS   served (clamped)
+346   fuzz_296           reject  ran      PASS   served (clamped)
+347   fuzz_297           serve   ran      PASS   
+348   fuzz_298           serve   ran      PASS   
+349   fuzz_299           reject  ran      PASS   served (clamped)
+350   fuzz_300           reject  ran      PASS   served (clamped)
+351   fuzz_301           serve   ran      PASS   
+352   fuzz_302           reject  ran      PASS   served (clamped)
+353   fuzz_303           reject  ran      PASS   served (clamped)
+354   fuzz_304           reject  ran      PASS   served (clamped)
+355   fuzz_305           reject  ran      PASS   served (clamped)
+356   fuzz_306           reject  ran      PASS   served (clamped)
+357   fuzz_307           serve   ran      PASS   
+358   fuzz_308           reject  ran      PASS   served (clamped)
+359   fuzz_309           serve   ran      PASS   
+360   fuzz_310           reject  ran      PASS   served (clamped)
+361   fuzz_311           reject  ran      PASS   served (clamped)
+362   fuzz_312           serve   ran      PASS   
+363   fuzz_313           serve   ran      PASS   
+364   fuzz_314           reject  ran      PASS   served (clamped)
+365   fuzz_315           serve   ran      PASS   
+366   fuzz_316           serve   ran      PASS   
+367   fuzz_317           reject  ran      PASS   served (clamped)
+368   fuzz_318           reject  ran      PASS   served (clamped)
+369   fuzz_319           serve   ran      PASS   
+370   fuzz_320           reject  ran      PASS   served (clamped)
+371   fuzz_321           reject  ran      PASS   served (clamped)
+372   fuzz_322           serve   ran      PASS   
+373   fuzz_323           reject  ran      PASS   served (clamped)
+374   fuzz_324           serve   ran      PASS   
+375   fuzz_325           reject  ran      PASS   served (clamped)
+376   fuzz_326           serve   ran      PASS   
+377   fuzz_327           reject  ran      PASS   served (clamped)
+378   fuzz_328           serve   ran      PASS   
+379   fuzz_329           serve   ran      PASS   
+380   fuzz_330           reject  ran      PASS   served (clamped)
+381   fuzz_331           reject  ran      PASS   served (clamped)
+382   fuzz_332           reject  ran      PASS   served (clamped)
+383   fuzz_333           serve   ran      PASS   
+384   fuzz_334           reject  ran      PASS   served (clamped)
+385   fuzz_335           serve   ran      PASS   
+386   fuzz_336           serve   ran      PASS   
+387   fuzz_337           reject  ran      PASS   served (clamped)
+388   fuzz_338           reject  ran      PASS   served (clamped)
+389   fuzz_339           reject  ran      PASS   served (clamped)
+390   fuzz_340           reject  ran      PASS   served (clamped)
+391   fuzz_341           reject  ran      PASS   served (clamped)
+392   fuzz_342           reject  ran      PASS   served (clamped)
+393   fuzz_343           reject  ran      PASS   served (clamped)
+394   fuzz_344           reject  ran      PASS   served (clamped)
+395   fuzz_345           reject  ran      PASS   served (clamped)
+396   fuzz_346           reject  ran      PASS   served (clamped)
+397   fuzz_347           serve   ran      PASS   
+398   fuzz_348           serve   ran      PASS   
+399   fuzz_349           reject  ran      PASS   served (clamped)
+400   fuzz_350           reject  ran      PASS   served (clamped)
+401   fuzz_351           serve   ran      PASS   
+402   fuzz_352           reject  ran      PASS   served (clamped)
+403   fuzz_353           reject  ran      PASS   served (clamped)
+404   fuzz_354           serve   ran      PASS   
+405   fuzz_355           serve   ran      PASS   
+406   fuzz_356           reject  ran      PASS   served (clamped)
+407   fuzz_357           serve   ran      PASS   
+408   fuzz_358           reject  ran      PASS   served (clamped)
+409   fuzz_359           serve   ran      PASS   
+410   fuzz_360           reject  ran      PASS   served (clamped)
+411   fuzz_361           serve   ran      PASS   
+412   fuzz_362           reject  ran      PASS   served (clamped)
+413   fuzz_363           reject  ran      PASS   served (clamped)
+414   fuzz_364           reject  ran      PASS   served (clamped)
+415   fuzz_365           serve   ran      PASS   
+416   fuzz_366           reject  ran      PASS   served (clamped)
+417   fuzz_367           serve   ran      PASS   
+418   fuzz_368           serve   ran      PASS   
+419   fuzz_369           reject  ran      PASS   served (clamped)
+420   fuzz_370           serve   ran      PASS   
+421   fuzz_371           reject  ran      PASS   served (clamped)
+422   fuzz_372           serve   ran      PASS   
+423   fuzz_373           serve   ran      PASS   
+424   fuzz_374           reject  ran      PASS   served (clamped)
+425   fuzz_375           serve   ran      PASS   
+426   fuzz_376           reject  ran      PASS   served (clamped)
+427   fuzz_377           reject  ran      PASS   served (clamped)
+428   fuzz_378           reject  ran      PASS   served (clamped)
+429   fuzz_379           reject  ran      PASS   served (clamped)
+430   fuzz_380           reject  ran      PASS   served (clamped)
+431   fuzz_381           reject  ran      PASS   served (clamped)
+432   fuzz_382           reject  ran      PASS   served (clamped)
+433   fuzz_383           serve   ran      PASS   
+434   fuzz_384           reject  ran      PASS   served (clamped)
+435   fuzz_385           reject  ran      PASS   served (clamped)
+436   fuzz_386           serve   ran      PASS   
+437   fuzz_387           serve   ran      PASS   
+438   fuzz_388           reject  ran      PASS   served (clamped)
+439   fuzz_389           reject  ran      PASS   served (clamped)
+440   fuzz_390           serve   ran      PASS   
+441   fuzz_391           reject  ran      PASS   served (clamped)
+442   fuzz_392           reject  ran      PASS   served (clamped)
+443   fuzz_393           reject  ran      PASS   served (clamped)
+444   fuzz_394           serve   ran      PASS   
+445   fuzz_395           serve   ran      PASS   
+446   fuzz_396           reject  ran      PASS   served (clamped)
+447   fuzz_397           serve   ran      PASS   
+448   fuzz_398           reject  ran      PASS   served (clamped)
+449   fuzz_399           serve   ran      PASS   
+450   fuzz_400           reject  ran      PASS   served (clamped)
+451   fuzz_401           reject  ran      PASS   served (clamped)
+452   fuzz_402           serve   ran      PASS   
+453   fuzz_403           reject  ran      PASS   served (clamped)
+454   fuzz_404           reject  ran      PASS   served (clamped)
+455   fuzz_405           reject  ran      PASS   served (clamped)
+456   fuzz_406           serve   ran      PASS   
+457   fuzz_407           serve   ran      PASS   
+458   fuzz_408           reject  ran      PASS   served (clamped)
+459   fuzz_409           reject  ran      PASS   served (clamped)
+460   fuzz_410           serve   ran      PASS   
+461   fuzz_411           reject  ran      PASS   served (clamped)
+462   fuzz_412           reject  ran      PASS   served (clamped)
+463   fuzz_413           serve   ran      PASS   
+464   fuzz_414           reject  ran      PASS   served (clamped)
+465   fuzz_415           reject  ran      PASS   served (clamped)
+466   fuzz_416           serve   ran      PASS   
+467   fuzz_417           reject  ran      PASS   served (clamped)
+468   fuzz_418           serve   ran      PASS   
+469   fuzz_419           serve   ran      PASS   
+470   fuzz_420           reject  ran      PASS   served (clamped)
+471   fuzz_421           reject  ran      PASS   served (clamped)
+472   fuzz_422           reject  ran      PASS   served (clamped)
+473   fuzz_423           serve   ran      PASS   
+474   fuzz_424           reject  ran      PASS   served (clamped)
+475   fuzz_425           reject  ran      PASS   served (clamped)
+476   fuzz_426           reject  ran      PASS   served (clamped)
+477   fuzz_427           reject  ran      PASS   served (clamped)
+478   fuzz_428           reject  ran      PASS   served (clamped)
+479   fuzz_429           reject  ran      PASS   served (clamped)
+480   fuzz_430           serve   ran      PASS   
+481   fuzz_431           reject  ran      PASS   served (clamped)
+482   fuzz_432           reject  ran      PASS   served (clamped)
+483   fuzz_433           serve   ran      PASS   
+484   fuzz_434           reject  ran      PASS   served (clamped)
+485   fuzz_435           reject  ran      PASS   served (clamped)
+486   fuzz_436           reject  ran      PASS   served (clamped)
+487   fuzz_437           reject  ran      PASS   served (clamped)
+488   fuzz_438           reject  ran      PASS   served (clamped)
+489   fuzz_439           serve   ran      PASS   
+490   fuzz_440           reject  ran      PASS   served (clamped)
+491   fuzz_441           reject  ran      PASS   served (clamped)
+492   fuzz_442           reject  ran      PASS   served (clamped)
+493   fuzz_443           serve   ran      PASS   
+494   fuzz_444           serve   ran      PASS   
+495   fuzz_445           serve   ran      PASS   
+496   fuzz_446           reject  ran      PASS   served (clamped)
+497   fuzz_447           reject  ran      PASS   served (clamped)
+498   fuzz_448           reject  ran      PASS   served (clamped)
+499   fuzz_449           serve   ran      PASS   
+
+  cases    500
+  declined 0   (topk_avo_supports() said no; kernel never ran)
+  failed   0
+  crashed  0   <-- must be 0
+WROTE /topk/log/stress_topk.json
+
+STRESS GATE PASS

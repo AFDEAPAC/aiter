@@ -48,7 +48,7 @@ def bench(fn, iters, reps):
 
 
 def main():
-    os.environ["AITER_DISABLE_TOPK_AVO"] = "0"
+    os.environ["AITER_DISABLE_TOPK_SAMPLED"] = "0"
     print("%6s %9s | %11s %11s %11s" % ("M", "N", "enqueue_us", "e2e_us", "host_share"))
     for m, n in SHAPES:
         rs, re = boundaries(m, n - m)

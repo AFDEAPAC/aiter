@@ -19,7 +19,7 @@ answer there and is the right answer here:
     to whichever width went first, which is how an earlier sweep reported a
     +5.60% power-of-two effect that was +0.34% once interleaved.
 
-AITER_DISABLE_TOPK_AVO is irrelevant here -- top_k_per_row_prefill_avo is called
+AITER_DISABLE_TOPK_SAMPLED is irrelevant here -- top_k_per_row_prefill_sampled is called
 directly and never reads it -- but it is left unset so nothing is ambiguous.
 
   python /home/mh/topk-prefill-avo/bench/ceiling_sweep.py
@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch  # noqa: E402
 
 import aiter  # noqa: E402
-from aiter.ops.topk import topk_avo_supports  # noqa: E402
+from aiter.ops.topk import topk_sampled_supports  # noqa: E402
 from aiter.test_common import perftest  # noqa: E402
 
 MS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
@@ -47,9 +47,9 @@ ROUNDS = 3
 
 
 @perftest()
-def run_avo(logits, row_starts, row_ends, indices, values,
+def run_sampled(logits, row_starts, row_ends, indices, values,
             num_rows, stride_row, stride_col, k):
-    return aiter.top_k_per_row_prefill_avo(
+    return aiter.top_k_per_row_prefill_sampled(
         logits, row_starts, row_ends, indices, values,
         num_rows, stride_row, stride_col, k=k)
 
@@ -75,12 +75,12 @@ def triple(m, base, topk, rounds):
         args[w] = (lg, rs, re, idx, None, m, w, 1, topk)
 
     for w in widths:                       # warm every width before timing any
-        run_avo(*args[w])
+        run_sampled(*args[w])
 
     samples = {w: [] for w in widths}
     for _ in range(rounds):
         for w in widths:                   # interleaved
-            samples[w].append(run_avo(*args[w])[1])
+            samples[w].append(run_sampled(*args[w])[1])
 
     out = []
     for w in widths:
@@ -91,7 +91,7 @@ def triple(m, base, topk, rounds):
                     "spread_pct": (max(v) - min(v)) / st.median(v) * 100,
                     "runs": [round(x, 3) for x in v],
                     "bytes": m * w * 4,
-                    "supports": bool(topk_avo_supports(m, w, topk))})
+                    "supports": bool(topk_sampled_supports(m, w, topk))})
     del args
     torch.cuda.empty_cache()
     return out

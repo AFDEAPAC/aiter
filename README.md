@@ -7,9 +7,32 @@ indices only.
 > whose history is unrelated to aiter's.** It is a separate project that has no
 > aiter files in it and builds on its own; the fork is only being used as a place
 > to keep it. The part of this work that *is* aiter code lives in aiter's own
-> history on `feat/topk-per-row-gfx950-avo`, as the `top_k_per_row_prefill_avo`
+> history on `feat/topk-per-row-gfx950-avo`, as the `top_k_per_row_prefill_sampled`
 > op, generated from here by
 > [`scripts/export_aiter_op.py`](scripts/export_aiter_op.py).
+
+> **On the name.** The kernel is called `sampled`. The repository, the branch
+> `feat/topk-per-row-gfx950-avo` and the path `/home/mh/topk-prefill-avo` still
+> say `avo`, and they keep that name on purpose: renaming the directory would
+> break the absolute paths in the docker invocations recorded in every
+> `bench/` docstring, and buys nothing the identifier rename did not.
+>
+> `sampled` describes what the kernel does — it estimates a threshold by
+> sampling, filters a candidate set against it, selects exactly, and sends the
+> rows whose candidate set came out unusable to a separate exact fallback
+> (`phase_d_fallback`). The seed kernel was named `topk_fp32_sampled` for the
+> same reason. AVO named the process that produced the kernel, not the kernel,
+> which is why it is no longer used for it. AVO is still the right name for the
+> evolution harness itself, so `AVO_USE_CUSTOM_HARNESS` and
+> `AVO_ALLOW_STUB_BENCH` keep theirs.
+>
+> This kernel **references DeepSelect but is not a port of it.** It borrows two
+> things, both cited where they are used: the "distort" fp32-to-monotone-uint32
+> trick (`csrc/topk_common.hip.hpp`) and a lesson about a `__shfl_down` tree
+> that cost 3% recall. The architecture differs — DeepSelect's `v3_fp32` is one
+> kernel, this is nine — and our actual hipify of DeepSelect is a different tree
+> (`csrc/hip_kernels/v3/`, bf16). See
+> [`knowledge/deepselect_vllm_comparison.md`](knowledge/deepselect_vllm_comparison.md).
 
 Originally tuned for the single shape M=4096, N=131072, K=2048, where it measures
 **0.6194 ms** on MI355X (5 runs x 100 iters, stddev 0.067%) against a 0.760 ms

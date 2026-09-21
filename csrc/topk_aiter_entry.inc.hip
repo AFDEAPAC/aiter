@@ -16,7 +16,7 @@
 #include "aiter_tensor.h"
 #include <optional>
 
-namespace avo {
+namespace sampled {
 
 // One caller-provided buffer, carved the way alloc_bufs() carves its separate
 // hipMallocs. This is the single definition of that layout: workspace_bytes()
@@ -79,30 +79,30 @@ static inline Bufs bind_bufs(void* ws, const WsLayout& L, int cap) {
   return b;
 }
 
-} // namespace avo
+} // namespace sampled
 
 // Published to Python so the caller allocates the scratch (aiter's rule: host
 // code here never allocates device memory). Plain scratch, not zeroed: Phase A
 // clears the reservation counters and fb_count before any consumer reads them,
 // Phase B assigns cand_count rather than accumulating into it, and the small_n
 // path touches none of them.
-int64_t topk_avo_workspace_size(int64_t numRows, int64_t stride0, int64_t k)
+int64_t topk_sampled_workspace_size(int64_t numRows, int64_t stride0, int64_t k)
 {
     if(numRows <= 0)
         return 1;
     const int M     = static_cast<int>(numRows);
     const int N     = static_cast<int>(stride0);
     const int K     = static_cast<int>(k);
-    const auto sp   = avo::params_for(M, N, K);
+    const auto sp   = sampled::params_for(M, N, K);
     const int cap   = sp.path == PATH_SMALL_N ? CAND_SLOTS_PER_ROW : sp.cap;
-    return static_cast<int64_t>(avo::ws_layout(M, cap).total);
+    return static_cast<int64_t>(sampled::ws_layout(M, cap).total);
 }
 
 // Reports whether this op can serve the shape at all, so Python can route
 // around it instead of taking an AITER_CHECK abort. Kept in C++ because every
 // term it tests (LDS residency, dwordx4 geometry, the Phase C LDS cap) is a
 // property of these kernels, not of the caller.
-bool topk_avo_supports(int64_t numRows, int64_t stride0, int64_t k)
+bool topk_sampled_supports(int64_t numRows, int64_t stride0, int64_t k)
 {
     if(numRows <= 0 || stride0 <= 0 || k <= 0)
         return false;
@@ -112,13 +112,13 @@ bool topk_avo_supports(int64_t numRows, int64_t stride0, int64_t k)
     // instantiates RAGGED=true, where the vector count is n4_cover(len) and
     // load_row_f4 loads the final partial vector element-wise, so an odd pitch
     // only makes the row base unaligned -- which gfx950 serves natively.
-    return avo::params_for(
+    return sampled::params_for(
                static_cast<int>(numRows), static_cast<int>(stride0), static_cast<int>(k))
         .geom_ok;
 }
 
 // rowStarts[row] and rowEnds[row] bound [start, end); indices are absolute columns.
-void top_k_per_row_prefill_avo(const aiter_tensor_t& logits,
+void top_k_per_row_prefill_sampled(const aiter_tensor_t& logits,
                                const aiter_tensor_t& rowStarts,
                                const aiter_tensor_t& rowEnds,
                                aiter_tensor_t& indices,
@@ -133,32 +133,32 @@ void top_k_per_row_prefill_avo(const aiter_tensor_t& logits,
         return;
 
     AITER_CHECK(logits.dtype() == AITER_DTYPE_fp32,
-                "top_k_per_row_prefill_avo: logits must be fp32");
-    AITER_CHECK(stride1 == 1, "top_k_per_row_prefill_avo: logits inner stride must be 1");
+                "top_k_per_row_prefill_sampled: logits must be fp32");
+    AITER_CHECK(stride1 == 1, "top_k_per_row_prefill_sampled: logits inner stride must be 1");
     AITER_CHECK(indices.dtype() == AITER_DTYPE_i32,
-                "top_k_per_row_prefill_avo: indices must be int32");
+                "top_k_per_row_prefill_sampled: indices must be int32");
     AITER_CHECK(indices.numel() >= static_cast<size_t>(numRows) * static_cast<size_t>(k),
-                "top_k_per_row_prefill_avo: indices must hold numRows*k entries");
+                "top_k_per_row_prefill_sampled: indices must hold numRows*k entries");
     if(values.has_value())
     {
         AITER_CHECK(values.value().dtype() == AITER_DTYPE_fp32,
-                    "top_k_per_row_prefill_avo: values must be fp32");
+                    "top_k_per_row_prefill_sampled: values must be fp32");
         AITER_CHECK(values.value().numel() >=
                         static_cast<size_t>(numRows) * static_cast<size_t>(k),
-                    "top_k_per_row_prefill_avo: values must hold numRows*k entries");
+                    "top_k_per_row_prefill_sampled: values must hold numRows*k entries");
     }
     AITER_CHECK(rowStarts.numel() >= static_cast<size_t>(numRows) &&
                     rowEnds.numel() >= static_cast<size_t>(numRows),
-                "top_k_per_row_prefill_avo: rowStarts/rowEnds must have numRows entries");
-    AITER_CHECK(topk_avo_supports(numRows, stride0, k),
-                "top_k_per_row_prefill_avo: unsupported shape (numRows=%ld stride0=%ld k=%ld); "
-                "ask topk_avo_supports() first",
+                "top_k_per_row_prefill_sampled: rowStarts/rowEnds must have numRows entries");
+    AITER_CHECK(topk_sampled_supports(numRows, stride0, k),
+                "top_k_per_row_prefill_sampled: unsupported shape (numRows=%ld stride0=%ld k=%ld); "
+                "ask topk_sampled_supports() first",
                 (long)numRows,
                 (long)stride0,
                 (long)k);
     AITER_CHECK(workspace.has_value(),
-                "top_k_per_row_prefill_avo requires a caller-provided workspace "
-                "(see top_k_per_row_prefill_avo in topk.py)");
+                "top_k_per_row_prefill_sampled requires a caller-provided workspace "
+                "(see top_k_per_row_prefill_sampled in topk.py)");
 
     const int M = static_cast<int>(numRows);
     const int N = static_cast<int>(stride0);
@@ -167,7 +167,7 @@ void top_k_per_row_prefill_avo(const aiter_tensor_t& logits,
     HipDeviceGuard device_guard(logits.device_id);
     const hipStream_t stream = aiter::getCurrentHIPStream();
 
-    const ShapeParams sp = avo::params_for(M, N, K);
+    const ShapeParams sp = sampled::params_for(M, N, K);
     const float* in      = static_cast<const float*>(logits.data_ptr());
     const int* row_starts = static_cast<const int*>(rowStarts.data_ptr());
     const int* row_ends   = static_cast<const int*>(rowEnds.data_ptr());
@@ -183,12 +183,12 @@ void top_k_per_row_prefill_avo(const aiter_tensor_t& logits,
         return;
     }
 
-    const auto L = avo::ws_layout(M, sp.cap);
+    const auto L = sampled::ws_layout(M, sp.cap);
     AITER_CHECK(workspace.value().numel() * workspace.value().element_size() >= L.total,
-                "top_k_per_row_prefill_avo: workspace is %zu B, needs %zu B",
+                "top_k_per_row_prefill_sampled: workspace is %zu B, needs %zu B",
                 workspace.value().numel() * workspace.value().element_size(),
                 L.total);
-    Bufs b = avo::bind_bufs(workspace.value().data_ptr(), L, sp.cap);
+    Bufs b = sampled::bind_bufs(workspace.value().data_ptr(), L, sp.cap);
     if(val)
         topk_fused_impl<true, true>(in, M, N, row_starts, row_ends, K, idx, val, b, sp, stream);
     else

@@ -52,7 +52,7 @@ CASES = [
     ("rowend_past_stride0",   "rowEnds > stride0"),
     ("rowlen_short",          "row_len < k: identity emit and the padding value"),
     ("numrows_one",           "numRows = 1"),
-    ("workspace_exact",       "workspace sized exactly at topk_avo_workspace_size"),
+    ("workspace_exact",       "workspace sized exactly at topk_sampled_workspace_size"),
     ("stable_true",           "stable=True must never route to AVO"),
 ]
 
@@ -191,7 +191,7 @@ def run_one(case, which):
     stub_flydsl()
     import torch
     import aiter
-    from aiter.ops.topk import topk_avo_supports
+    from aiter.ops.topk import topk_sampled_supports
 
     if not aiter.__file__.startswith(AITER_ROOT):
         print(json.dumps({"case": case, "backend": which, "outcome": "wrong_aiter",
@@ -200,9 +200,9 @@ def run_one(case, which):
         return 0
 
     if which == "aiter":
-        os.environ["AITER_DISABLE_TOPK_AVO"] = "1"
+        os.environ["AITER_DISABLE_TOPK_SAMPLED"] = "1"
     else:
-        os.environ["AITER_DISABLE_TOPK_AVO"] = "0"
+        os.environ["AITER_DISABLE_TOPK_SAMPLED"] = "0"
 
     logits, starts, ends, M, N, stride1, K, stable = build_case(case, torch)
     idx = torch.full((M, K), -1, dtype=torch.int32, device="cuda")
@@ -210,9 +210,9 @@ def run_one(case, which):
 
     res = {"case": case, "backend": which, "m": M, "n": N, "k": K}
     try:
-        res["avo_supports"] = bool(topk_avo_supports(M, N, K))
+        res["sampled_supports"] = bool(topk_sampled_supports(M, N, K))
     except Exception as e:
-        res["avo_supports"] = "raised: %s" % str(e)[:80]
+        res["sampled_supports"] = "raised: %s" % str(e)[:80]
 
     try:
         aiter.top_k_per_row_prefill(logits, starts, ends, idx, vals,
@@ -272,7 +272,7 @@ def run_one(case, which):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--case", default=None)
-    ap.add_argument("--backend", choices=("avo", "aiter"), default="avo")
+    ap.add_argument("--backend", choices=("sampled", "aiter"), default="sampled")
     ap.add_argument("--json-out", default="/topk/log/aiter_contract_audit.json")
     args = ap.parse_args()
 
@@ -283,7 +283,7 @@ def main():
     print("%-24s %-9s %-8s %-9s %s" % ("case", "backend", "supports", "outcome", "detail"))
     for case, desc in CASES:
         row = {"case": case, "term": desc}
-        for which in ("avo", "aiter"):
+        for which in ("sampled", "aiter"):
             p = subprocess.run([sys.executable, __file__, "--case", case,
                                 "--backend", which],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -307,7 +307,7 @@ def main():
                     rec.get("n_neg_inf"), rec.get("n_nan"))
             rec["term"] = desc
             print("%-24s %-9s %-8s %-9s %s"
-                  % (case, which, rec.get("avo_supports"), rec.get("outcome"),
+                  % (case, which, rec.get("sampled_supports"), rec.get("outcome"),
                      detail[:88]))
         out.append(row)
 

@@ -428,9 +428,9 @@ interleaved A/B rounds). Generalizing a kernel is not automatically a cost: the
 host knows more than the kernel and should be made to say it.
 
 ### aiter's JIT does not rebuild when a generated source changes
-After `scripts/export_aiter_op.py` rewrote `topk_per_row_avo_kernels.cu`, the
+After `scripts/export_aiter_op.py` rewrote `topk_per_row_sampled_kernels.cu`, the
 next `import aiter` reused `aiter/jit/module_top_k_per_row.so` from 42 minutes
-earlier and reported the pre-change verdict (`topk_avo_supports(256, 131328,
+earlier and reported the pre-change verdict (`topk_sampled_supports(256, 131328,
 2048) == False`) for code that had already been fixed. The `.so` mtime being
 older than the `.cu` mtime is the check. Delete
 `aiter/jit/module_top_k_per_row.so` and `aiter/jit/build/module_top_k_per_row`
@@ -472,7 +472,7 @@ padding, and a third implementation that ordered short rows differently would
 give the same call a different meaning at a batch-size boundary.
 
 ### `k > stride0` is servable, and aiter has no guard against it
-`topk_avo_supports` refused `k > stride0`, so aiter's own default prefill config
+`topk_sampled_supports` refused `k > stride0`, so aiter's own default prefill config
 declined at num_rows 64/256/1024 (`unsupported geometry`, stride0 = num_rows
 there). aiter's `top_k_per_row_prefill` has no such check -- with ragged rows
 `k > stride0` just means EVERY row is the identity case above. Fix: the geometry
@@ -825,7 +825,7 @@ same and is far cheaper to rule out.
 
 ### SHIPPED (v5 Stage 7): an odd row pitch needed four deleted guards, not a port
 `stride0 % FP32_EPT != 0` was refused by `sampling_geometry_ok`,
-`sample_stride_exact`, `topk_avo_supports` and the harness, so aiter silently
+`sample_stride_exact`, `topk_sampled_supports` and the harness, so aiter silently
 kept such widths on its own mb/ob path. All four guards existed for the
 misalignment Stage 2 proved is a non-issue, and the kernels already handled an
 odd pitch: `sample_chunk_stride` masks the chunk spacing to a multiple of 4 so
@@ -1235,8 +1235,8 @@ topk_select FlyDSL instead.
 
 ### top_k_per_row_prefill dispatches stride0 >= 32768 to AVO when supported
 `aiter/ops/topk.py` routes non-stable calls with stride0 >= 32768 through
-`top_k_per_row_prefill_avo` when `topk_avo_supports()`; `stable=True` and
-`AITER_DISABLE_TOPK_AVO=1` force the original mb/ob path. Verified by
+`top_k_per_row_prefill_sampled` when `topk_sampled_supports()`; `stable=True` and
+`AITER_DISABLE_TOPK_SAMPLED=1` force the original mb/ob path. Verified by
 `op_tests/test_topk_prefill_dispatch.py`.
 
 ## Robustness traps (found by bench/stress_topk.py, 2026-09-18)
@@ -1270,16 +1270,16 @@ workspace each killed the calling Python process outright.
 `g_aiter_can_throw` is set, and only the `aiter_safe_call` ctypes bridge
 (`aiter_ctypes_error.h`, used by exactly one other kernel) sets it. The AVO
 entry does not go through it, so every `AITER_CHECK` is a `std::abort()`.
-**Fix:** validate in `top_k_per_row_prefill_avo` (`aiter/ops/topk.py`) and raise
+**Fix:** validate in `top_k_per_row_prefill_sampled` (`aiter/ops/topk.py`) and raise
 `ValueError`. Adopting the `aiter_safe_call` C-ABI instead would mean changing
 the entry's return type and its binding -- disproportionate for argument checks.
 **Generalises:** before assuming a vendor library's check macro raises, read it.
 
 ### An unmemoised binding call cost more than the validation it enabled
-**Symptom:** adding `topk_avo_supports()` to the Python wrapper regressed the
+**Symptom:** adding `topk_sampled_supports()` to the Python wrapper regressed the
 ragged path by +12.5% at M=64 N=65537 and +7.5% mean over 12 shapes.
-**Measured cause:** `topk_avo_supports` is **4.86 us/call** and
-`topk_avo_workspace_size` is **4.80 us/call** through the `@compile_ops`
+**Measured cause:** `topk_sampled_supports` is **4.86 us/call** and
+`topk_sampled_workspace_size` is **4.80 us/call** through the `@compile_ops`
 binding, against a 43 us kernel. The tell was that the absolute delta was a
 constant ~5 us that did not grow with the work -- host overhead, not kernel cost.
 **Fix:** `functools.lru_cache` on a pure `(numRows, stride0, k)` query. Safe:
@@ -1287,8 +1287,8 @@ constant ~5 us that did not grow with the work -- host overhead, not kernel cost
 `constexpr`). Residual after memoising: +0.39% mean, which is the price of never
 aborting.
 **Still on the table (measured, not done):** `top_k_per_row_prefill` calls
-`topk_avo_supports` unmemoised on every dispatch and
-`top_k_per_row_prefill_avo` calls `topk_avo_workspace_size` unmemoised, so the
+`topk_sampled_supports` unmemoised on every dispatch and
+`top_k_per_row_prefill_sampled` calls `topk_sampled_workspace_size` unmemoised, so the
 production path pays ~9.7 us of binding overhead per call -- 22% of the 43 us
 shape. Memoising both is a free win but changes the perf baseline, so it wants
 its own measured commit.
@@ -1343,11 +1343,11 @@ else in the tree.
 
 ### The dispatch threshold is one octave too low: AVO is slower than aiter at N=32K
 **Measured 2026-09-18**, aiter `op_tests/test_topk_per_row.py` with
-`--prefill_backend aiter avo` and `AITER_DISABLE_TOPK_AVO=1`, so both backends
+`--prefill_backend aiter avo` and `AITER_DISABLE_TOPK_SAMPLED=1`, so both backends
 go through one `@perftest` on one dataset, k=2048, fp32, 79 shapes.
 `reports/avo_vs_aiter_sweep.tsv`.
 
-`aiter_us / avo_us`, below 1.00 meaning AVO is the slower one:
+`aiter_us / sampled_us`, below 1.00 meaning AVO is the slower one:
 
 ```
  M \ N     2K    4K    8K   16K   32K   64K  128K  256K  512K 1024K
@@ -1376,12 +1376,12 @@ invisible to every gate in this repo. `bench/aiter_contract_audit.py` compares
 against aiter but only for CORRECTNESS. N=32768 is in the scored grid and has
 been green the whole time.
 
-**FIXED** in `aiter/ops/topk.py`: the floor is now `AVO_MIN_STRIDE0_WIDE = 32768`
-when `numRows >= 1024` and `AVO_MIN_STRIDE0_NARROW = 49152` below that.
+**FIXED** in `aiter/ops/topk.py`: the floor is now `SAMPLED_MIN_STRIDE0_WIDE = 32768`
+when `numRows >= 1024` and `SAMPLED_MIN_STRIDE0_NARROW = 49152` below that.
 
 49152, not the 65536 that first looked right. The original grid jumps an octave
 between 32K and 64K, so the crossover had to be filled in before picking a
-number (`log/crossover/`, aiter_us / avo_us, below 1.00 meaning AVO is slower):
+number (`log/crossover/`, aiter_us / sampled_us, below 1.00 meaning AVO is slower):
 
 ```
  M \ N     32K   40K   48K   56K   64K
@@ -1637,15 +1637,15 @@ number in `reports/ceiling_report.html` and every `score_grid` cell is GPU time,
 so none of them can show this, and a kernel improvement in that region would not
 have reached the caller at all.
 
-Two unmemoised binding lookups were 9.7 us of it: `topk_avo_supports` at
-4.86 us/call in the dispatcher and `topk_avo_workspace_size` at 4.80 us/call in
+Two unmemoised binding lookups were 9.7 us of it: `topk_sampled_supports` at
+4.86 us/call in the dispatcher and `topk_sampled_workspace_size` at 4.80 us/call in
 the wrapper. Both are pure functions of (numRows, stride0, k); `lru_cache` took
 them to 0.089 and 0.092 us, 53x. Fixed in aiter-topk 6a71f2f33.
 
 **What is left, decomposed at M=64 N=65536 (enqueue us):**
 
 ```
-raw binding _top_k_per_row_prefill_avo        18.07
+raw binding _top_k_per_row_prefill_sampled        18.07
 + public wrapper                              19.99
 + dispatcher                                  20.52
   get_module (lru-cached)                      0.063
@@ -1693,7 +1693,7 @@ one-block path, not AVO, because AVO needs `stride0 >= 32768`.
 
 ### The unmemoised-binding bug was on the mb/ob path too, and it was bigger
 
-`6a71f2f33` fixed `topk_avo_supports` and `topk_avo_workspace_size`. The same
+`6a71f2f33` fixed `topk_sampled_supports` and `topk_sampled_workspace_size`. The same
 mistake sat one branch over, on the path every small shape actually takes.
 Measured through the binding on this box:
 

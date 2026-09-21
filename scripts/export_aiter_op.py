@@ -29,8 +29,8 @@ MARKER = "// ---- AITER_EXPORT_END ----"
 # Relative to the aiter root. The headers keep their bare cross-includes and so
 # must land in one directory together; only the .cu, which sits elsewhere, needs
 # its include paths rewritten.
-HDR_DIR = "csrc/include/topk_avo"
-CU_PATH = "csrc/kernels/topk_per_row_avo_kernels.cu"
+HDR_DIR = "csrc/include/topk_sampled"
+CU_PATH = "csrc/kernels/topk_per_row_sampled_kernels.cu"
 
 BANNER = """// SPDX-License-Identifier: MIT
 // Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
@@ -131,9 +131,9 @@ def generate(fmt, aiter_root):
     body = kernel_region()
     for h in HEADERS:
         # The .cu lives in csrc/kernels while the headers live under
-        # csrc/include/topk_avo, so the bare includes it inherited from the
+        # csrc/include/topk_sampled, so the bare includes it inherited from the
         # harness would resolve to nothing.
-        body = body.replace(f'#include "{h}"', f'#include "topk_avo/{h}"')
+        body = body.replace(f'#include "{h}"', f'#include "topk_sampled/{h}"')
     entry = (REPO / "csrc" / "topk_aiter_entry.inc.hip").read_text()
     raw[CU_PATH] = banner + body + entry
 

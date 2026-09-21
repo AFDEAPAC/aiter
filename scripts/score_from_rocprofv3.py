@@ -41,7 +41,7 @@ same host process; this wrapper drops the warmups and aggregates the following
 dispatches. It does not re-launch the command once per sample.
 
 `unit` is what your harness *measured* (the "raw unit"). The wrapper converts
-it to a higher-is-better score because `avo_step.py` acceptance rules
+it to a higher-is-better score because `sampled_step.py` acceptance rules
 (`geomean` / `pareto` / `weighted`) all assume higher-is-better:
 
     raw `unit`        score.json `unit`     score.json `raw_unit`
@@ -143,7 +143,7 @@ def run_one_shape(command, kernel_name_regex, warmup, repeat, env=None):
     re-launching the host process per iteration would dwarf the kernel time).
     The wrapper drops the first `warmup` matching dispatches and uses the rest.
     """
-    with tempfile.TemporaryDirectory(prefix="avo_prof_") as prof_dir:
+    with tempfile.TemporaryDirectory(prefix="sampled_prof_") as prof_dir:
         if isinstance(command, list):
             rocprof_cmd = [
                 "rocprofv3",
@@ -202,7 +202,7 @@ def run_one_shape(command, kernel_name_regex, warmup, repeat, env=None):
 def aggregate(durations_ns, unit, flops=None, byte_count=None):
     """Convert a list of dispatch durations to (value, stddev, output_unit).
 
-    The returned `value` is always **higher-is-better** so avo_step.py's
+    The returned `value` is always **higher-is-better** so sampled_step.py's
     acceptance rules (geomean / pareto / weighted) work uniformly:
       - For raw timing units (`ns`, `us`) the duration is inverted to
         `ops_per_sec = 1e9 / median_ns`. Faster kernel → bigger score.

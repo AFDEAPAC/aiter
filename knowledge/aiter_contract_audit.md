@@ -24,7 +24,7 @@ Measured 2026-09-18, MI355X, `g_18-stable`, against `aiter-topk` at `c15ebce2c`.
 
 Each term is driven from the **Python entry point**, not from our own harness, so
 the dispatch, the `supports()` gate and the C++ argument checks are all in scope.
-For each term the same inputs go through AVO (`AITER_DISABLE_TOPK_AVO=0`) and
+For each term the same inputs go through AVO (`AITER_DISABLE_TOPK_SAMPLED=0`) and
 through aiter's own mb/ob path (`=1`), and the two outputs are compared to each
 other and to `torch.topk`.
 
@@ -86,7 +86,7 @@ uniform grid is untouched (inner tier +0.04%, 0 cells regressed). The ragged pat
 pays +0.63% to +0.83%, measured interleaved against the pre-fix binary.
 
 Blast radius before the fix: the parameter is documented and accepted (g_10), and
-`topk_avo_supports(numRows, stride0, k)` **cannot see `rowStarts`**, so the
+`topk_sampled_supports(numRows, stride0, k)` **cannot see `rowStarts`**, so the
 dispatcher had no way to route around it -- the fix had to be in the kernel.
 Production was not hit only because aiter's `create_row_boundaries` returns
 `row_starts = zeros`. That also means upstream aiter has never exercised its own
@@ -107,15 +107,15 @@ abort purely because AVO became available is a regression we introduced.
 
 Fixed by adding `stride1 == 1` to the dispatch condition in
 `aiter/ops/topk.py`, so such calls keep going to mb/ob exactly as before. The
-assert stays for direct callers of `top_k_per_row_prefill_avo`. Deliberately
+assert stays for direct callers of `top_k_per_row_prefill_sampled`. Deliberately
 NOT fixed by ignoring `stride1` the way aiter does: silently computing against
-the wrong layout is worse than declining, and `topk_avo_supports` cannot express
+the wrong layout is worse than declining, and `topk_sampled_supports` cannot express
 the condition because it only takes `(numRows, stride0, k)`.
 
 ### RESOLVED: `stride0 % 4 != 0` is now served, and it needed no kernel change
 
 Three guards were rejecting it -- `sampling_geometry_ok`, `sample_stride_exact`
-and `topk_avo_supports` -- plus the harness's own `N % FP32_EPT` check. All four
+and `topk_sampled_supports` -- plus the harness's own `N % FP32_EPT` check. All four
 were there for the alignment that Stage 2 proved is a non-issue. The kernels
 already handled an odd pitch:
 
@@ -147,7 +147,7 @@ Evidence, beyond the multiset check against the CPU oracle:
   tail-max control.
 
 What it buys, measured through the real Python dispatch in the correctness image
-(`AITER_DISABLE_TOPK_AVO` 1 vs 0), since these shapes previously fell back to
+(`AITER_DISABLE_TOPK_SAMPLED` 1 vs 0), since these shapes previously fell back to
 aiter's own mb/ob path:
 
 | shape | aiter | AVO | speedup |
@@ -183,7 +183,7 @@ still takes a GPU core dump on the same input.
 
 Why the clamp is in the kernel and not anywhere cheaper: `rowStarts`/`rowEnds`
 are device pointers, so a host check costs a D2H sync on every call; and
-`topk_avo_supports(numRows, stride0, k)` cannot see them, so declining the shape
+`topk_sampled_supports(numRows, stride0, k)` cannot see them, so declining the shape
 would only hand the same arguments to aiter's mb/ob path -- which faults on them.
 
 The worst case was not the fault. `rowEnds = pitch + 64` did NOT fault: it
@@ -207,7 +207,7 @@ ragged path (`bench/aiter_ab.py`, 12 shapes x 3 passes) the clamp alone is
 `inf_mixed`, `k_small` (k=3), `k_at_cap` (k=8192), `rowlen_zero`
 (`rowEnds == rowStarts`), `rowlen_negative` (`rowEnds < rowStarts`; both emit all
 `-1` / `-inf`), `rowlen_short` (identity emit, `-inf` padding on both),
-`numrows_one`, `workspace_exact` (`topk_avo_workspace_size` is sufficient),
+`numrows_one`, `workspace_exact` (`topk_sampled_workspace_size` is sufficient),
 `stable_true` (never routes to AVO).
 
 Row-level confirmation on four shapes (M=64 N=65536, the same with

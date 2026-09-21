@@ -798,7 +798,7 @@
   "aiter": {
    "outcome": "crashed",
    "rc": -6,
-   "error": "GPU core dump failed",
+   "error": "Falling back to file-based dump. Set HSA_COREDUMP_PATTERN to override.",
    "term": "rowEnds > stride0"
   }
  },

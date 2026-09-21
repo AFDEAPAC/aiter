@@ -50,10 +50,10 @@ Three techniques do the work
 
 Scope
 -----
-The AVO entry itself (`top_k_per_row_prefill_avo`), not the dispatcher. Routing
+The AVO entry itself (`top_k_per_row_prefill_sampled`), not the dispatcher. Routing
 is already covered by `aiter_contract_audit.py`, and pushing these cases through
 `top_k_per_row_prefill` would mostly measure aiter's mb/ob path instead: that
-dispatch needs `stride0 >= 32768` AND `topk_avo_supports()` (`aiter/ops/topk.py`),
+dispatch needs `stride0 >= 32768` AND `topk_sampled_supports()` (`aiter/ops/topk.py`),
 and most hostile shapes fail one of the two.
 
 Run inside the correctness image with both repos mounted:
@@ -75,7 +75,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from aiter_contract_audit import AITER_ROOT, stub_flydsl, use_mounted_aiter  # noqa: E402
 
-# csrc/topk_shape.hip.hpp: k above this is declined by topk_avo_supports().
+# csrc/topk_shape.hip.hpp: k above this is declined by topk_sampled_supports().
 PHASE_C_CAP_MAX = 8192
 INT32_MAX = 2**31 - 1
 
@@ -384,10 +384,10 @@ def run_one(case):
     import torch
     import aiter
     from aiter.ops.topk import (  # noqa: F401
-        _top_k_per_row_prefill_avo,
-        top_k_per_row_prefill_avo,
-        topk_avo_supports,
-        topk_avo_workspace_size,
+        _top_k_per_row_prefill_sampled,
+        top_k_per_row_prefill_sampled,
+        topk_sampled_supports,
+        topk_sampled_workspace_size,
     )
 
     res = {"case": name, "m": m, "n": n, "k": k, "starts": kind_s,
@@ -406,16 +406,16 @@ def run_one(case):
             if want_vals else None)
 
     try:
-        res["supports"] = bool(topk_avo_supports(m, n, k))
+        res["supports"] = bool(topk_sampled_supports(m, n, k))
     except Exception as e:
         res["supports"] = "raised: %s" % str(e)[:60]
 
     try:
         if ws == "auto":
-            top_k_per_row_prefill_avo(logits, starts, ends, idx, vals,
+            top_k_per_row_prefill_sampled(logits, starts, ends, idx, vals,
                                       m, n, stride1, k)
         else:
-            size = 1 if ws == "short" else int(topk_avo_workspace_size(m, n, k))
+            size = 1 if ws == "short" else int(topk_sampled_workspace_size(m, n, k))
             w = torch.empty(max(size, 1), dtype=torch.uint8, device="cuda")
             # 0xFF everywhere: if any consumer reads a counter before its
             # producer writes it, the value is maximal rather than plausibly
@@ -427,7 +427,7 @@ def run_one(case):
             # Through the PUBLIC wrapper, not the raw binding: the wrapper is
             # where the workspace-size check lives, and a short buffer must
             # raise rather than reach C++ and abort.
-            top_k_per_row_prefill_avo(logits, starts, ends, idx, vals,
+            top_k_per_row_prefill_sampled(logits, starts, ends, idx, vals,
                                       m, n, stride1, k, w)
         torch.cuda.synchronize()
     except Exception as e:
@@ -462,7 +462,7 @@ def verdict(case, rec):
 
     Raising is NOT unconditionally a pass. An exception is a defined, survivable
     refusal, so it is correct for a hostile input and correct for a shape
-    `topk_avo_supports()` declines. But a shape that supports() claims AND the
+    `topk_sampled_supports()` declines. But a shape that supports() claims AND the
     entry then refuses is a contract inconsistency, and reporting it green would
     hide exactly the kind of bug this file is for.
     """
@@ -537,7 +537,7 @@ def main():
         out.append(rec)
 
     print("\n  cases    %d" % len(sel))
-    print("  declined %d   (topk_avo_supports() said no; kernel never ran)" % n_decl)
+    print("  declined %d   (topk_sampled_supports() said no; kernel never ran)" % n_decl)
     print("  failed   %d" % n_fail)
     print("  crashed  %d   <-- must be 0" % n_crash)
     try:

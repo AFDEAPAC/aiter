@@ -22,8 +22,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from aiter_contract_audit import stub_flydsl, use_mounted_aiter  # noqa: E402
 
 
-def run_backend(aiter_mod, torch, logits, starts, ends, M, N, stride1, K, use_avo):
-    os.environ["AITER_DISABLE_TOPK_AVO"] = "0" if use_avo else "1"
+def run_backend(aiter_mod, torch, logits, starts, ends, M, N, stride1, K, use_sampled):
+    os.environ["AITER_DISABLE_TOPK_SAMPLED"] = "0" if use_sampled else "1"
     idx = torch.full((M, K), -1, dtype=torch.int32, device="cuda")
     vals = torch.full((M, K), 0.0, dtype=torch.float32, device="cuda")
     aiter_mod.top_k_per_row_prefill(logits, starts, ends, idx, vals,
@@ -60,7 +60,7 @@ def main():
     st = starts.cpu().tolist()
 
     n_idx_same = n_multiset_same = n_tie_only = n_real = 0
-    n_avo_vs_torch = n_aiter_vs_torch = 0
+    n_sampled_vs_torch = n_aiter_vs_torch = 0
     first_real = None
 
     for r in range(M):
@@ -87,7 +87,7 @@ def main():
                 if first_real is None:
                     first_real = r
         if torch.equal(av, tv):
-            n_avo_vs_torch += 1
+            n_sampled_vs_torch += 1
         if torch.equal(bv, tv):
             n_aiter_vs_torch += 1
 
@@ -97,9 +97,9 @@ def main():
     print("  rows differing only at K-th ties     %d" % n_tie_only)
     print("  rows differing for another reason    %d%s"
           % (n_real, (" (first: row %d)" % first_real) if first_real is not None else ""))
-    print("  AVO   multiset == torch.topk         %d / %d" % (n_avo_vs_torch, M))
+    print("  AVO   multiset == torch.topk         %d / %d" % (n_sampled_vs_torch, M))
     print("  aiter multiset == torch.topk         %d / %d" % (n_aiter_vs_torch, M))
-    print("  value sums: avo %.4f  aiter %.4f"
+    print("  value sums: sampled %.4f  aiter %.4f"
           % (a_val.cpu().sum().item(), b_val.cpu().sum().item()))
     return 0 if n_real == 0 else 1
 

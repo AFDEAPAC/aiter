@@ -71,7 +71,7 @@
   "expect": "reject",
   "supports": false,
   "outcome": "raised",
-  "error": "top_k_per_row_prefill_avo: unsupported shape (numRows=64 stride0=0 k=2048); ask topk_avo_supports() first",
+  "error": "top_k_per_row_prefill_sampled: unsupported shape (numRows=64 stride0=0 k=2048); ask topk_sampled_supports() first",
   "verdict": "PASS"
  },
  {
@@ -86,7 +86,7 @@
   "expect": "reject",
   "supports": false,
   "outcome": "raised",
-  "error": "top_k_per_row_prefill_avo: unsupported shape (numRows=64 stride0=65536 k=0); ask topk_avo_supports() first",
+  "error": "top_k_per_row_prefill_sampled: unsupported shape (numRows=64 stride0=65536 k=0); ask topk_sampled_supports() first",
   "verdict": "PASS"
  },
  {
@@ -116,7 +116,7 @@
   "expect": "reject",
   "supports": false,
   "outcome": "raised",
-  "error": "top_k_per_row_prefill_avo: unsupported shape (numRows=64 stride0=65536 k=8193); ask topk_avo_supports() first",
+  "error": "top_k_per_row_prefill_sampled: unsupported shape (numRows=64 stride0=65536 k=8193); ask topk_sampled_supports() first",
   "verdict": "PASS"
  },
  {
@@ -341,7 +341,7 @@
   "expect": "reject",
   "supports": true,
   "outcome": "raised",
-  "error": "top_k_per_row_prefill_avo: workspace is 1 B, needs 4200192 B",
+  "error": "top_k_per_row_prefill_sampled: workspace is 1 B, needs 4200192 B",
   "verdict": "PASS"
  },
  {
@@ -371,7 +371,7 @@
   "expect": "reject",
   "supports": true,
   "outcome": "raised",
-  "error": "top_k_per_row_prefill_avo: logits inner stride must be 1, got 2",
+  "error": "top_k_per_row_prefill_sampled: logits inner stride must be 1, got 2",
   "verdict": "PASS"
  }
 ]

@@ -76,19 +76,19 @@ def main():
         "num_prefix=%d topk=%d warmup=%d iters=%d"
         % (args.num_prefix, args.topk, args.warmup, args.iters)
     )
-    print("%6s %8s %11s %11s %8s" % ("M", "width", "avo_us", "aiter_us", "ratio"))
+    print("%6s %8s %11s %11s %8s" % ("M", "width", "sampled_us", "aiter_us", "ratio"))
     for m in args.rows:
         row_starts, row_ends = boundaries(m, args.num_prefix)
         logits = logits_for(row_starts, row_ends)
         indices = torch.empty((m, args.topk), dtype=torch.int32, device="cuda")
         stride0 = logits.stride(0)
-        if not aiter.topk_avo_supports(m, stride0, args.topk):
+        if not aiter.topk_sampled_supports(m, stride0, args.topk):
             print("%6d %8d %11s" % (m, logits.shape[1], "declined"))
             continue
         # The Python wrapper owns the workspace (get_topk_scratch_workspace), so
         # it is inside the timed region for both ops, as it is in production.
-        avo = bench(
-            lambda: aiter.top_k_per_row_prefill_avo(
+        sampled = bench(
+            lambda: aiter.top_k_per_row_prefill_sampled(
                 logits,
                 row_starts,
                 row_ends,
@@ -119,7 +119,7 @@ def main():
         )
         print(
             "%6d %8d %11.2f %11.2f %7.2fx"
-            % (m, logits.shape[1], avo, ref, ref / avo)
+            % (m, logits.shape[1], sampled, ref, ref / sampled)
         )
 
 

@@ -47,18 +47,18 @@ Three design decisions, and the sweep is worthless without any of them.
    comparison spans the whole triple and does not. Same trap
    .evo/config-v5.yaml records as baseline_decay_warning.
 
-AITER_DISABLE_TOPK_AVO=1 is required, and it does NOT disable the op under test.
+AITER_DISABLE_TOPK_SAMPLED=1 is required, and it does NOT disable the op under test.
 It appears at exactly one executable site, aiter/ops/topk.py:419, inside the
 dispatch condition of top_k_per_row_prefill, so it only forces the REFERENCE
-side onto the original mb/ob path; top_k_per_row_prefill_avo never reads it.
+side onto the original mb/ob path; top_k_per_row_prefill_sampled never reads it.
 Confirmed by construction: with the variable set, top_k_per_row_prefill is
-666.61 us at M=256 stride0=1048577 while top_k_per_row_prefill_avo is 217.56,
+666.61 us at M=256 stride0=1048577 while top_k_per_row_prefill_sampled is 217.56,
 and with it unset top_k_per_row_prefill returns to the AVO number.
 
 Run inside the correctness image:
 
   docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
-    --ipc=host --shm-size 16G -e PYTHONPATH=/aiter -e AITER_DISABLE_TOPK_AVO=1 \
+    --ipc=host --shm-size 16G -e PYTHONPATH=/aiter -e AITER_DISABLE_TOPK_SAMPLED=1 \
     -v /home/mh/aiter-topk:/aiter -v /home/mh:/home/mh -w /aiter <image> \
     python /home/mh/topk-prefill-avo/bench/parity_sweep.py
 """
@@ -74,7 +74,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch  # noqa: E402
 
 import aiter  # noqa: E402
-from aiter.ops.topk import topk_avo_supports  # noqa: E402
+from aiter.ops.topk import topk_sampled_supports  # noqa: E402
 from aiter.test_common import perftest  # noqa: E402
 from aiter_ab import boundaries, logits_for  # noqa: E402
 
@@ -85,9 +85,9 @@ ROUNDS = 4
 
 
 @perftest()
-def run_avo(logits, row_starts, row_ends, indices, values,
+def run_sampled(logits, row_starts, row_ends, indices, values,
             num_rows, stride_row, stride_col, k):
-    return aiter.top_k_per_row_prefill_avo(
+    return aiter.top_k_per_row_prefill_sampled(
         logits, row_starts, row_ends, indices, values,
         num_rows, stride_row, stride_col, k=k)
 
@@ -100,7 +100,7 @@ def run_ref(logits, row_starts, row_ends, indices, values,
         num_rows, stride_row, stride_col, k=k)
 
 
-RUNNERS = {"avo": run_avo, "mbob": run_ref}
+RUNNERS = {"avo": run_sampled, "mbob": run_ref}
 
 
 def triple(m, base, topk, rounds=ROUNDS):
@@ -131,13 +131,13 @@ def triple(m, base, topk, rounds=ROUNDS):
     for w in widths:
         r = {"m": m, "base": base, "width": w, "topk": topk, "odd": bool(w & 1),
              "pow2": w == base, "rounds": rounds, "harness": "aiter.perftest",
-             "supports": bool(topk_avo_supports(m, w, topk))}
+             "supports": bool(topk_sampled_supports(m, w, topk))}
         for op in RUNNERS:
             v = samples[w][op]
             r[op + "_us"] = st.median(v)
             r[op + "_spread_pct"] = (max(v) - min(v)) / st.median(v) * 100
             r[op + "_runs"] = [round(x, 2) for x in v]
-        r["speedup"] = r["mbob_us"] / r["avo_us"]
+        r["speedup"] = r["mbob_us"] / r["sampled_us"]
         out.append(r)
     del args
     torch.cuda.empty_cache()
@@ -151,15 +151,15 @@ def main():
     ap.add_argument("--out", default="/home/mh/topk-prefill-avo/reports/parity_sweep.json")
     args = ap.parse_args()
 
-    if os.environ.get("AITER_DISABLE_TOPK_AVO", "0") != "1":
-        print("REFUSING: set AITER_DISABLE_TOPK_AVO=1, or the reference side is "
+    if os.environ.get("AITER_DISABLE_TOPK_SAMPLED", "0") != "1":
+        print("REFUSING: set AITER_DISABLE_TOPK_SAMPLED=1, or the reference side is "
               "also AVO and every ratio is 1.00x by construction")
         return 2
 
     out = []
     print("harness: aiter.test_common.perftest (rotated args, GPU time from trace)")
     print("%6s %9s %9s | %10s %6s | %10s %6s | %8s"
-          % ("M", "stride0", "kind", "avo_us", "sd%", "mbob_us", "sd%", "speedup"))
+          % ("M", "stride0", "kind", "sampled_us", "sd%", "mbob_us", "sd%", "speedup"))
     for m in MS:
         for base in BASES:
             try:
@@ -174,13 +174,13 @@ def main():
             for r in recs:
                 kind = "pow2 even" if r["pow2"] else ("odd" if r["odd"] else "even")
                 print("%6d %9d %9s | %10.2f %6.2f | %10.2f %6.2f | %7.2fx"
-                      % (r["m"], r["width"], kind, r["avo_us"], r["avo_spread_pct"],
+                      % (r["m"], r["width"], kind, r["sampled_us"], r["sampled_spread_pct"],
                          r["mbob_us"], r["mbob_spread_pct"], r["speedup"]))
             out.extend(recs)
             sys.stdout.flush()
 
-    by = {(r["m"], r["width"]): r for r in out if "avo_us" in r}
-    print("\nAVO side, aiter @perftest. parity = (B+1) vs (B+2), both off the")
+    by = {(r["m"], r["width"]): r for r in out if "sampled_us" in r}
+    print("\nSAMPLED side, aiter @perftest. parity = (B+1) vs (B+2), both off the")
     print("power of two; pow2 = (B+2) vs B, both even. x = AVO over mb/ob.")
     print("\n%6s %9s | %9s %9s %9s | %8s %8s | %7s %7s"
           % ("M", "B", "B(pow2)", "B+1 odd", "B+2 even",
@@ -191,12 +191,12 @@ def main():
             a, o, e = by.get((m, base)), by.get((m, base + 1)), by.get((m, base + 2))
             if not (a and o and e):
                 continue
-            dp = (o["avo_us"] - e["avo_us"]) / e["avo_us"] * 100
-            d2 = (e["avo_us"] - a["avo_us"]) / a["avo_us"] * 100
+            dp = (o["sampled_us"] - e["sampled_us"]) / e["sampled_us"] * 100
+            d2 = (e["sampled_us"] - a["sampled_us"]) / a["sampled_us"] * 100
             par.append(dp)
             pw2.append(d2)
             print("%6d %9d | %9.2f %9.2f %9.2f | %+7.2f%% %+7.2f%% | %6.2fx %6.2fx"
-                  % (m, base, a["avo_us"], o["avo_us"], e["avo_us"], dp, d2,
+                  % (m, base, a["sampled_us"], o["sampled_us"], e["sampled_us"], dp, d2,
                      o["speedup"], e["speedup"]))
     if par:
         print("\nparity (odd vs even, both non-pow2): mean %+.2f%%  max %+.2f%%  min %+.2f%%"

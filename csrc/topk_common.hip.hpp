@@ -79,7 +79,7 @@ template <> struct RowExtents<false> {
 //
 // This is the only place that can. rowStarts/rowEnds are device pointers, so a
 // host-side check would cost a D2H sync on every call; and declining the shape
-// in topk_avo_supports() does not help either, because that signature is
+// in topk_sampled_supports() does not help either, because that signature is
 // (numRows, stride0, k) and never sees the extents -- a decline just routes the
 // same arguments to aiter's mb/ob path, which faults on them too.
 //

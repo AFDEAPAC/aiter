@@ -61,8 +61,8 @@ QUOTED_SELECT = {
 # per-call Python dispatch and allocation, which at 2 us of GPU work makes the
 # HOST the bottleneck and the measurement meaningless for this table.
 @perftest()
-def run_avo(logits, row_starts, row_ends, indices, values, m, stride0, k):
-    return aiter.top_k_per_row_prefill_avo(
+def run_sampled(logits, row_starts, row_ends, indices, values, m, stride0, k):
+    return aiter.top_k_per_row_prefill_sampled(
         logits, row_starts, row_ends, indices, values, m, stride0, 1, k
     )
 
@@ -89,9 +89,9 @@ def measure_cell(m, n, k, want_values):
     )
     stride0 = logits.stride(0)
 
-    avo = None
-    if aiter.topk_avo_supports(m, stride0, k):
-        _, avo = run_avo(
+    sampled = None
+    if aiter.topk_sampled_supports(m, stride0, k):
+        _, sampled = run_sampled(
             logits, row_starts, row_ends, indices, values, m, stride0, k
         )
 
@@ -103,7 +103,7 @@ def measure_cell(m, n, k, want_values):
     del logits, row_starts, row_ends, indices, values
     gc.collect()
     torch.cuda.empty_cache()
-    return avo, sel
+    return sampled, sel
 
 
 def main():
@@ -120,12 +120,12 @@ def main():
 
     want_values = not args.no_values
     print(
-        "AVO top_k_per_row_prefill_avo, k=%d, values=%s, rowEnds=N (dense)"
+        "AVO top_k_per_row_prefill_sampled, k=%d, values=%s, rowEnds=N (dense)"
         % (args.topk, want_values)
     )
     print("timer: aiter @perftest() -- DEVICE time, host cost excluded")
     print(
-        "cells: avo_us | sel_us (topk_select, same timer) | ref_us (quoted table)"
+        "cells: sampled_us | sel_us (topk_select, same timer) | ref_us (quoted table)"
     )
     print()
 
@@ -137,10 +137,10 @@ def main():
             if args.topk > n:
                 cells.append("%22s" % "k>N")
                 continue
-            avo, sel = measure_cell(m, n, args.topk, want_values)
+            sampled, sel = measure_cell(m, n, args.topk, want_values)
             ref = REFERENCE.get(m, [None] * len(NS))
             r = ref[NS.index(n)] if n in NS and m in REFERENCE else None
-            a = "declined" if avo is None else "%.1f" % avo
+            a = "declined" if sampled is None else "%.1f" % sampled
             s = sel if isinstance(sel, str) else "%.1f" % sel
             cells.append("%22s" % ("%s | %s | %s" % (a, s, "-" if r is None else r)))
         print("%6d" % m + "".join(cells), flush=True)
