@@ -1741,3 +1741,130 @@ top of `bench/spec_low_n.py`: print `aiter.__file__` and abort unless it is
 under the mount. This is the same failure class as the g_11 gate that was green
 because it never ran the changed instantiation -- a check that verifies the
 wrong object is worse than no check, because it produces confidence.
+
+## Profiling the anchor, 2026-09-22 (see reports/anchor_profile_2026-09.md)
+
+### The read-only floor AND the gx=1 read+write floor were both the wrong yardstick
+
+`scripts/bw_kernel.hip` measures `PHASEB_FLOOR_read+write` at `dim3(1, M)` with a
+grid-stride walk. `phase_b_filter_coop` runs `dim3(8, M)` with a contiguous per-block
+chunk. Judged against the gx=1 floor (435.84 us) phase_b looks like 1.05x; against a
+floor measured at its OWN geometry (`scripts/bw_gx_floor.hip`, G=8 wg512, 423.56 us) it
+is 1.077x. Small difference here, but the habit matters: `bandwidth_g26.md` drew its
+"streaming is already at peak" conclusion from the mismatched shape.
+
+### The write stream, not the write GRANULARITY, is what costs
+
+Same kernel, same geometry, only argv[1] changes: read-only 339.88 us, read + 93.98 MB
+of 8 B candidate writes 423.56 us. The 94 MB costs **83.68 us = 1.123 TB/s effective**,
+against 6.318 TB/s on the read. PMC says the writes are already clean -- 95.7% of
+`TCC_EA0_WRREQ` are full 64 B, `TCC_EA0_RDREQ_32B` is 0, `TCC_EA0_WRREQ_STALL` is
+negligible. So the old note "small scattered stores are what a filter pass pays for" is
+now only half true: the LDS wave-staging fixed the granularity, and what remains is the
+flat cost of mixing any write stream into a read stream on this HBM. **The only lever
+left on that 83.7 us is writing fewer bytes** (narrower candidate records, or a tighter
+margin), not writing them better.
+
+### phase_a + phase_c are 21% of wall on 10% of the traffic
+
+63.20 + 59.48 = 122.68 us moving 262.9 MB, i.e. 2.13 and 2.16 TB/s. Charged at the
+read+write floor rate that traffic is 49.7 us, so ~73 us is not memory time. Both are at
+full occupancy (LDS 4,608 / 5,632 B, VGPR 16 / 24), so it is not occupancy. ATT per-wave
+critical path on phase_c: `lgkmcnt` + `s_barrier` = 35-38%, against 0.3% aggregate stall
+on `ds_read` itself -- the LDS radix select's barrier/scan dependency chain, not LDS
+bandwidth and not bank conflicts. This is the largest remaining structural target, and
+it is the same conclusion `.evo/session_checkpoint.md` reached for small M ("S3:
+parallelize phase_a and phase_c"), now shown to hold at the anchor too.
+
+### phase_b has no load pipelining depth: every vmcnt wait is vmcnt(0)
+
+ATT aggregate: `s_waitcnt vmcnt(0)` holds 70.9% of stall, `buffer_load` itself 0.0%.
+Per-wave critical path: 66.8-74.5%. One single static `s_waitcnt vmcnt(0)` accounts for
+67.5M of the 68.4M vmcnt stall cycles. The wave runs only **8 loop iterations**
+(`SQ_INSTS_VMEM` = 9.14 per wave), so there is no room to software-pipeline inside a
+wave; occupancy is what hides it, which is why the kernel is still within 7.7% of its
+floor. **Not yet falsified**: the causal weaken-the-wait A/B (`att.md` 3b) needs a source
+edit and was not run.
+
+### phase_b spends 51% of VALU issue capacity, at 17 lane-ops per element
+
+`SQ_INSTS_VALU` = 143,595,723 per dispatch (confirmed twice, by hand-rolled rocprofv3 and
+by rocprof-compute, agreeing to 0.1 ppm). Against 256 CU x 4 SIMD x 2.4 GHz / 4 that is
+51%. The header comment claims "ONE integer compare per element"; the real cost is 17
+VALU lane-ops per element once the 4x `__ballot` + `__popcll` + conditional LDS
+addressing is counted. Not the binding constraint at 4.92 TB/s, but it is the reason
+`v_cmp_ngt_f32` and `v_cmp_ne_u32` appear in the top-15 ATT stalls.
+
+### summary.txt in log/large_n_profile is stale and names kernels that no longer dispatch
+
+Dated 2026-09-17 21:41 against a 2026-09-18 14:00 binary. It reports
+`phase_b_filter_wavestage` / `phase_c_select_waveseg` at `coop_g=1`. The anchor now
+dispatches `phase_b_filter_coop` / `phase_c_select_contig` at `coop_g=8`. Anything that
+cites those kernel names as "the anchor breakdown" is citing a superseded build.
+Related: `log/large_n_sweep.tsv`'s 609.40 us for this cell is not stale drift, it is the
+`coop_g=1` configuration -- re-measured warm as 609.6 us. The coop_g sweep at the anchor
+is g=1 609.6, g=2 582.2, g=4 591.8, g=8 581.3, g=16 645.2, g=32 780.0 us.
+
+### FALSIFIED: splitting the exact fallback select across blocks with a hand-rolled barrier
+`arch_scope: gfx950`, measured 2026-09-22 on aiter `7d9c2d128` + the sampled
+routing widening.
+
+**The cost being attacked is real and worth restating.** One row whose candidate
+set comes out unusable costs a flat ~350 us, whatever M is. Measured at
+N=524288, gaussian, by seed: m=32 goes 39-40 us at `fb_count=0` to 384-391 us at
+`fb_count=1`; m=4096 goes 1881 us to 2243 us. It is flat because the select is
+`RADIX_PASSES` full re-reads of the row plus the gather -- `block_select_stream`
+filters by pivot prefix inside the loop rather than compacting -- and ONE
+workgroup does all five while its 31 or 4095 neighbours have already retired.
+
+**Where it happens is not where it looks.** `phase_d_fallback` is only ever
+launched from `run_fallback`, which precedes it with `fill_identity_rows` and so
+means "exact select for EVERY row". The per-row fallback is done inline by
+`phase_c_select_contig`, which both appends the row to `fb_rows` and calls
+`exact_row_select` itself. A first attempt parallelised `phase_d_fallback` and
+changed nothing at all, because that kernel never runs on this path.
+
+**The barrier is not the reason it fails, which is the surprising part.**
+`scripts/spin_barrier_spike.hip` prices a hand-rolled sense-reversing barrier
+over G blocks sharing one row at 0.92 / 0.81 / 1.33 / 1.43 / 1.64 / 2.19 us for
+G = 2 / 4 / 8 / 16 / 32 / 64 -- all under the 2.63 us of the extra kernel launch
+that is the alternative, and far under the 7.38 us this file records for
+`cg::this_grid().sync()` at grid=64. That measurement stands; it is a different
+mechanism from the cooperative sync and it is genuinely cheap in isolation.
+
+**What kills it, with Phase C deferring to a split `phase_d_fallback`
+(FB_SPLIT=16, 3 barriers per radix pass):**
+
+| case | before | after |
+|---|---:|---:|
+| m=32 n=524288 seed 0, `fb_count=1` | 391 us | **468 us** |
+| m=32 n=524288 seed 1, `fb_count=0` | 39 us | **46 us** |
+| m=32 n=262144 all-equal, all 32 rows | 600 us | **2112 us** |
+| m=128 n=262144 all-equal, all 128 rows | 761 us | **3814 us** |
+| m=128 n=1048576, no fallback | 124 us | **132 us** |
+
+Three separate losses, and the third is the one that generalises:
+
+- **+7 us on every call**, fallback or not, for the extra dispatch plus the
+  512 B `hipMemsetAsync` the barrier needs to start from a known state.
+- **The split does not repay even at one row.** 391 -> 468 us with 16 blocks on
+  the row. Spreading the scan 16 ways did not beat the 13 barriers and the
+  per-pass fold of HIST_SLOTS counters into a global histogram.
+- **The barrier price is per block AND per concurrent group.** The same spike
+  measures G=16 at 1.43 us with one group and **4.22 us with eight**, G=64 at
+  2.19 us against **10.39 us**. `all-equal` runs 32 or 128 groups at once, and
+  the exact select there was ALREADY fully parallel -- one block per row across
+  M blocks -- so the split replaced a perfect arrangement with a contended one.
+
+**Generalises:** a barrier priced in isolation is not priced. The number that
+matters is its cost at the concurrency the kernel actually reaches, and the
+regime where a split is most tempting (few rows) is the opposite of the regime
+that sets the barrier's worst case (many rows). Reverted; the ~350 us
+characterisation above is the part worth keeping.
+
+**Still open.** The row falls back because its sampled threshold missed, and
+that is width-specific rather than data-luck: over 5 seeds x ~30000 rows,
+N=524288 is the ONLY width that trips it, at 1.2% of rows under
+`topk_shape.hip.hpp`'s small-S rule (M<=32, `S_RULE1_M_MAX`) against 0.005%
+above it. Making the threshold not miss at that width would remove the cost
+without touching the select at all, and is untried.
