@@ -24,3 +24,10 @@ attempt	target	outcome	wall_ms	evidence
 23	Phase A with 2 radix passes	reject_risk	0.6144	0.8% faster but overflow headroom 9.6% -> 4.3%
 24	sample count back to S=4096	reject_perf	0.7043	trade-off did not flip; fallback rows cost more
 25	auto margin from estimator noise	accept	0.6194	K=512 guard 0.7326 -> 0.5725 (-22%), under_K 82 -> 0
+26	candidate record 8B -> 4B (index only)	reject_arith	-	killed on arithmetic before edit: 2.19% density means phase_c re-read touches 1.09 GB of lines to save 47 MB of writes
+27	re-open phase-a-passes=2 with CAP_SAFE_FILL headroom	reject_perf	-	premise did change (gaussian 0.954-0.995x, fb=0 everywhere incl the old +320% cell) but uniform M=256 N=1M still gains fb 0->1; one fallback row ~700us against a 215us cell, and the 2-5% win flips zero cells
+28	remove the dead s_red LDS declarations (known_bad:678 OPEN lever)	reject_arith	-	killed on arithmetic: phase_a runs 1024 threads = 16 waves so occupancy is wave-limited at 2 blocks/CU; 1 KB out of 21-71 KB never crosses a blocks/CU boundary at any S in play
+29	joint (S, margin) sweep	reject_perf	-	shipped auto point is the optimum; margin<=1.25 floods the fallback (fb 54, 1.45x at M=4096 N=262144) because it breaks margin*(1-3/sqrt(R))>=1; the one 0.970x point (M=512 N=262144 margin 1.30) gives fb=1 and 1.26x at M=4096
+30	fix the fuse-ab layout mismatch, then measure A+B fusion fairly	reject_perf	-	root cause was coop selecting phase_c layout without consulting g_fuse_ab, not uninit counters; with that fixed fusion still faults on most shapes and where it runs is 1.575x (m=1 n=128K), 3.927x (m=16 n=1M), 1.208x (anchor) SLOWER -- one block per row destroys phase_b streaming
+31	coop_g re-sweep on the near-miss cells	reject_perf	-	shipped table already optimal everywhere tried (auto within 0.1-0.2% of best); the non-monotone dip at M=512/1024 N=131072 is correct, coop_g=2 really is best there
+32	per-kernel decomposition at small and large M	accept_knowledge	-	small M is phase_c-dominated not phase_a (40.1% vs 25.4% at m=16); large M excess is the candidate write, flat in M and falling with N

@@ -1868,3 +1868,61 @@ N=524288 is the ONLY width that trips it, at 1.2% of rows under
 `topk_shape.hip.hpp`'s small-S rule (M<=32, `S_RULE1_M_MAX`) against 0.005%
 above it. Making the threshold not miss at that width would remove the cost
 without touching the select at all, and is untried.
+
+### The N>=128K multiplier is the candidate WRITE, and both ways out are now closed
+Measured 2026-09-23 on gfx950 over the published PR 5686 pipe101 floor, with the
+profiler-trace ruler that divides by captured events (bench/select_ab_sweep.py).
+
+Per-kernel share of `topk_select` routed to `sampled`, seed 0:
+
+| cell | total | phase_b | phase_a | phase_c |
+|---|---:|---:|---:|---:|
+| m=16 n=131072 | 26.94 us | 34.4% | 25.4% | **40.1%** |
+| m=128 n=524288 | 67.03 us | **66.8%** | 17.9% | 15.3% |
+| m=4096 n=262144 | 1088.76 us | **82.6%** | 11.7% | 5.6% |
+
+Two things that redirect any future attempt:
+
+**At small M the biggest kernel is phase_c, not phase_a.** Every "make the
+threshold cheaper" idea targets phase_a, which is 25% of an m=16 call. Zeroing it
+outright takes m=16 n=131072 from 26.94us to 20.1us, which is 18.7% of the floor
+against 13.9% -- still deep red. The phase_a serial-depth lead is real (see the
+entry above) and it is not where the time is.
+
+**At large M the excess over the floor is the candidate write, and it is
+structural.** phase_b's achieved bandwidth, m=4096:
+
+| N | phase_b | read | TB/s | vs pipe101 floor |
+|---|---:|---:|---:|---:|
+| 131072 | 486.89 us | 2.147 GB | 4.41 | 1.435x |
+| 262144 | 899.27 us | 4.295 GB | 4.78 | 1.391x |
+| 524288 | 1672.73 us | 8.590 GB | 5.14 | 1.310x |
+| 1048576 | 2812.80 us | 17.180 GB | 6.11 | 1.108x |
+
+The ratio falls monotonically with N and is FLAT in M (1.418 / 1.391 / 1.391 at
+M=1024 / 2048 / 4096, N=262144). That is the signature of a per-row cost against
+a read that grows with N -- the `margin * K` candidates each row writes, at the
+1.123 TB/s effective write rate this box gives a mixed read/write stream. It is
+not a streaming inefficiency, so coop_g cannot reach it (swept: the shipped
+table is already optimal on every cell tried, including the non-monotone dip at
+M=512/1024 N=131072, where coop_g=2 really is best at 0.0739 against 0.0780 at 8).
+
+Both ways to write less are now measured and closed:
+
+- **Fewer bytes per candidate** is arithmetically dead. At the anchor the
+  candidate density is 2867/131072 = 2.19%, so a 128 B line has a 51% chance of
+  holding one; dropping the key and re-reading it in phase_c touches
+  0.51 x 4096 lines x 128 B x 4096 rows = 1.09 GB to save 47 MB of writes.
+- **Fewer candidates** is bounded below by the estimator. Safety needs
+  `margin * (1 - 3/sqrt(R)) >= 1`, and the joint (S, margin) sweep -- the first
+  one, both knobs had only ever been moved alone -- confirms it: at m=4096
+  n=262144, margin 1.20 gives 54 fallback rows and 1.453x, 1.25 gives 7 and
+  1.290x, 1.30 gives 1 and 1.261x. The shipped auto point is the optimum, and
+  the one cell where something beat it (m=512 n=262144 at margin 1.30, S=11520,
+  0.970x) regresses m=4096 n=262144 to 1.261x, which is a per-cell fit.
+
+**Consequence.** Of the 42 red pow2 cells at N >= 128K, the 20 at M <= 16 are
+dispatch-bound (floor 3.66-5.5us against a three-kernel pipeline) and the rest
+are held by a write volume that neither knob can lower. Closing them needs a
+different candidate representation or a different pipeline shape, not a tuning
+pass.
