@@ -2012,3 +2012,53 @@ read before opening a new one:
 - `coop_g` was re-swept at small M and LARGE N, which the 2026-09-18 sweep never
   covered (it was at N=32768): auto is within 0-3.7% of the best value at
   m=16 n=131072, m=16 n=1048576, m=64 n=524288 and m=128 n=1048576.
+
+### OPEN LEVER: rule 0's sample count is too large at N <= 262144, and the
+### neighbourhood is cliff-edged
+`arch_scope: gfx950`, 2026-09-23, k=2048, dist gaussian, seed 0, full-pipeline
+wall from benchmark_topk, warmup 20 / iters 100 / repeats 3.
+
+Not falsified and not shipped: a real effect that needs more work than one pass.
+
+`derive_sample_s_for_n` rule 0 is `S = R_TARGET * N / (margin * K)` with
+R_TARGET = 179. Swept S per cell over M = 64..4096, N = 131072..1048576:
+
+| N | S auto picks | measured best | ratio vs auto |
+|---|---|---|---|
+| 131072 | 8192 | **6144** | 0.981 - 0.995x, and 6144 wins at ALL SEVEN M |
+| 262144 | 16384 | **8192 - 12288** | 0.952 - 0.986x |
+| 524288 | 16384 | 16384 | auto already best |
+| 1048576 | 16384 | 16384 | auto already best |
+
+At N >= 262144 the law is saturated -- it asks for 16365 at N=262144 and 65462
+at N=1048576 and gets SAMPLE_S_MAX either way -- so R_TARGET stops being a law
+there. The file already says R_TARGET "does not transfer" and that rule 1 was
+written to derive the requirement instead; rule 1 is gated to M <= 32 by
+S_RULE1_M_MAX, so M >= 64 never gets the derived form.
+
+The win reproduces tightly where it was checked properly. Interleaved A/B/A/B,
+six pairs in one clock state, auto against S=12288:
+
+    m=4096 n=262144   auto 1.0474 (1.0453-1.0482)   S=12288 1.0266 (1.0256-1.0276)   0.9802x
+    m=512  n=262144   auto 0.1399 (0.1395-0.1402)   S=12288 0.1377 (0.1376-0.1382)   0.9843x
+    m=4096 n=131072   auto 0.5884                    S=12288 0.6193                   1.0526x
+
+Per-arm spread is 0.3% and the arms do not overlap, so these are real at 2%.
+Note the third line: the same S is 5.3% WORSE at N=131072, so any rule has to be
+a function of N, not a constant.
+
+**Why this is not shipped.** The neighbourhood is cliff-edged and the cliff is
+not understood. S=10240 at N=262144 sends rows to the exact fallback at
+m=256 (3.28x), m=512 (2.20x), m=1024 (2.20x), m=2048 (1.53x) and m=4096 (1.24x)
+while 8192 and 12288 next to it are clean. S <= 8192 at N=1048576 is 1.45x to
+**13.62x**. It is not simple stride exactness -- both 10240 and 12288 take the
+masked (non-exact) stride at N=262144 and only one of them falls off. Before any
+of this ships it needs: the cliff explained, a distribution gate (gaussian only
+so far, and knowledge/known_bad.md is emphatic that sampling knobs are
+distribution-sensitive), and a full-grid A/B.
+
+**What it would be worth.** At N=262144 the gains are 0.952-0.986x, which moves
+m=2048 from 59.3% of the pipe101 floor to 60.6% and m=4096 from 60.7% to 61.8%.
+At N=131072 the gains are real but 0.5-2%, and flip nothing. So this is worth
+perhaps two pow2 cells, not a regime change -- weigh that against the cliff
+before spending on it.
