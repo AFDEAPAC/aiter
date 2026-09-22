@@ -94,6 +94,22 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
 
   int bcnt = 0;
 
+// Ceiling-first pricing for the candidate compaction, in the style this repo
+// already uses for ABLATE_HIST_ATOMIC: both of these give WRONG results and
+// exist only to say what a perfect version of one half could be worth.
+//
+//   1 = write to a fixed per-lane slot, so the ballot prefix arithmetic
+//       (s_and + s_bcnt + the running offsets) disappears but the ds_write and
+//       its divergence stay.
+//   2 = do all the arithmetic and skip the ds_write itself.
+//
+// Measured baseline to price against: an ablation that skips the compact block
+// entirely (tiny margin, nothing passes the threshold) runs phase_b at 363.52us
+// against 463.87 at m=4096 n=131072, so the whole compaction is 100.35us.
+#ifndef ABLATE_COMPACT
+#define ABLATE_COMPACT 0
+#endif
+
 #define COOP_DRAIN_WAVE()                                                          \
   do {                                                                             \
     unsigned _off = 0;                                                             \
@@ -123,6 +139,21 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
     const int t2 = t1 + __popcll(b2);
     const int wtotal = t2 + __popcll(b3);
     if (wtotal > 0) {
+#if ABLATE_COMPACT == 1
+      if (b0 & (1ull << lane))
+        buf[lane] = ((uint64_t)__float_as_uint(v[0]) << 32) | (uint32_t)(base_idx + 0);
+      if (b1 & (1ull << lane))
+        buf[lane] = ((uint64_t)__float_as_uint(v[1]) << 32) | (uint32_t)(base_idx + 1);
+      if (b2 & (1ull << lane))
+        buf[lane] = ((uint64_t)__float_as_uint(v[2]) << 32) | (uint32_t)(base_idx + 2);
+      if (b3 & (1ull << lane))
+        buf[lane] = ((uint64_t)__float_as_uint(v[3]) << 32) | (uint32_t)(base_idx + 3);
+#elif ABLATE_COMPACT == 2
+      if (b0 & (1ull << lane)) (void)(bcnt + __popcll(b0 & lt));
+      if (b1 & (1ull << lane)) (void)(bcnt + t0 + __popcll(b1 & lt));
+      if (b2 & (1ull << lane)) (void)(bcnt + t1 + __popcll(b2 & lt));
+      if (b3 & (1ull << lane)) (void)(bcnt + t2 + __popcll(b3 & lt));
+#else
       if (b0 & (1ull << lane))
         buf[bcnt + __popcll(b0 & lt)] =
             ((uint64_t)__float_as_uint(v[0]) << 32) | (uint32_t)(base_idx + 0);
@@ -135,6 +166,7 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
       if (b3 & (1ull << lane))
         buf[bcnt + t2 + __popcll(b3 & lt)] =
             ((uint64_t)__float_as_uint(v[3]) << 32) | (uint32_t)(base_idx + 3);
+#endif
       bcnt += wtotal;
     }
     if (bcnt > WSTAGE_CAP - 4 * WAVE_SIZE) {

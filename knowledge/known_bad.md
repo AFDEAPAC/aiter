@@ -1926,3 +1926,89 @@ dispatch-bound (floor 3.66-5.5us against a three-kernel pipeline) and the rest
 are held by a write volume that neither knob can lower. Closing them needs a
 different candidate representation or a different pipeline shape, not a tuning
 pass.
+
+### The candidate WRITE is the whole compaction cost -- the arithmetic is free
+`arch_scope: gfx950`, 2026-09-23, m=4096, k=2048, dist gaussian, phase_b timed
+alone with `rocprofv3 --kernel-trace`.
+
+Three ablations, two of which give wrong results and exist only to price a half
+(kept as `-DABLATE_COMPACT=n` so they reproduce, same convention as
+`ABLATE_HIST_ATOMIC`):
+
+| variant | n=131072 | n=262144 |
+|---|---:|---:|
+| shipped | 465.87 us | 869.18 us |
+| `ABLATE_COMPACT=1` fixed-slot write, no prefix arithmetic | 465.19 | 870.82 |
+| `ABLATE_COMPACT=2` all arithmetic, no `ds_write` | 464.55 | 873.58 |
+| tiny margin so nothing passes the threshold | **363.52** | **717.40** |
+
+The first three are the same to within noise. **Removing the ballot-prefix
+arithmetic changes nothing; removing the LDS write changes nothing; removing the
+CANDIDATES saves 100.35 / 151.84 us.** So the cost is the 94 MB of global
+candidate writes and their drain, not the compaction instructions.
+
+That kills a plausible-looking lead, recorded here because it looked strong:
+the compaction cost is 100 us at n=131072 and 152 us at n=262144 for the SAME
+candidate volume, which reads as "per-iteration overhead" and is not. The extra
+52 us is the read/write mixing penalty getting worse as the read stream grows --
+a hardware property, not something the kernel can schedule around.
+
+Confirmed independently by PMC on the same kernel: `TCC_EA0_RDREQ = 16783874`
+x 128 B = 2.148 GB, exactly the input, with **0% 32-B requests**;
+`TCC_EA0_WRREQ = 1526620` at **95.7% full 64 B**; `TCC_EA0_WRREQ_STALL` 1.4e4
+against 1.5e6 requests; TCC hit 5.6% (pure streaming). phase_b wastes no bytes.
+
+**Consequence.** Writing fewer bytes per candidate is arithmetically dead (see
+the density entry above) and writing fewer candidates is bounded below by the
+estimator (see the joint (S, margin) entry). With the compaction instructions
+now priced at zero, there is nothing left in phase_b at large M.
+
+Also measured and closed while looking: a wave-uniform `if (b_k)` guard on each
+of the four compaction slots -- 24% of slots are empty across all 64 lanes at
+2.19% density -- is correct on all five distributions but 0.9% (n=131072) to
+1.8% (n=262144) SLOWER. The scalar branch costs more than the skip saves.
+`--cf-block` was swept for the first time and `auto` (512) is already optimal:
+64 costs 2.2x, 128 1.39x, 256 1.04x, 1024 1.26x.
+
+### Ceiling: phase_a and phase_c free still leaves 15 of 40 cells red
+`arch_scope: gfx950`, 2026-09-23, k=2048, dist gaussian, seed 0, per-phase times
+from `rocprofv3 --kernel-trace`, efficiency against the published PR 5686
+pipe101 floor. The "free" column is `phase_b measured + 2 x 2.64us` of dispatch
+(the empty-launch marginal from knowledge/g0_floor_model.json), i.e. what the
+pipeline would cost if the threshold and the select were instantaneous.
+
+```
+            N=131072      N=262144      N=524288      N=1048576
+   M=1    18.1 -> 34.9  16.0 -> 33.5  14.2 -> 30.3  13.9 -> 30.0
+   M=4    15.7 -> 31.0  14.8 -> 29.9  14.1 -> 27.5  18.1 -> 37.3
+   M=16   14.3 -> 26.5  13.5 -> 25.3  15.0 -> 28.3  24.5 -> 44.0
+   M=64   19.6 -> 35.8  28.5 -> 50.6  40.0 -> 63.3  55.1 -> 77.1
+   M=128  31.7 -> 53.1  42.4 -> 67.0  55.6 -> 76.5  60.3 -> 72.6
+   M=256  42.7 -> 63.8  55.9 -> 76.6  59.3 -> 71.0  70.0 -> 78.9
+   M=512  55.5 -> 77.5  55.5 -> 69.5  68.1 -> 78.8  71.5 -> 77.7
+   M=1024 52.2 -> 67.7  62.5 -> 79.6  65.9 -> 75.5  73.0 -> 79.4
+   M=2048 59.4 -> 79.7  59.3 -> 73.1  67.6 -> 77.2  74.2 -> 80.1
+   M=4096 56.4 -> 72.3  60.7 -> 73.9  68.6 -> 77.5  83.4 -> 90.3
+```
+
+**12 of 40 are at or above 60% now; 25 would be if phase_a and phase_c cost
+nothing.** The other 15 -- every cell at M <= 16, and M=64 at N <= 262144 --
+stay between 25% and 51% in a limit that cannot be reached. Chasing 60% there is
+chasing a number this pipeline shape cannot produce, because phase_b alone plus
+two dispatches already exceeds the floor/0.6 budget.
+
+This bounds every remaining direction at once, and it should be the first thing
+read before opening a new one:
+
+- phase_b is at 94% of its streaming floor (ablation: 363.52us for 2.147 GB =
+  5.91 TB/s against 6.3) and its remaining excess is the candidate write, closed
+  three independent ways above.
+- phase_a and phase_c are flat in N (6.6 -> 13.7us and 11.0 -> 13.5us across
+  N=131072..1048576 at M<=128) and their block width is already optimal --
+  swept for the first time here, and SMALLER is strictly worse: phase_a at
+  m=16 n=131072 reads 6.64us at 1024 threads, 8.30 at 512, 9.59 at 256, 13.88
+  at 128. The barrier-cost-per-wave argument for a narrower block is wrong;
+  fewer threads means more elements each, and that dominates.
+- `coop_g` was re-swept at small M and LARGE N, which the 2026-09-18 sweep never
+  covered (it was at N=32768): auto is within 0-3.7% of the best value at
+  m=16 n=131072, m=16 n=1048576, m=64 n=524288 and m=128 n=1048576.
