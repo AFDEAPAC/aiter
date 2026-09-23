@@ -2118,3 +2118,48 @@ reads. That is the same write-costs-5.6x-read-per-byte the anchor ledger recorde
 so the copy is not mis-issued -- it is paying the box's write price for every byte.
 Alignment, the thread map, and the number of passes are all closed. Only fewer bytes
 move this: a narrower candidate record, or fewer candidates.
+
+## The candidate write costs what it DISTURBS, not what it writes (gfx950, 2026-09-23)
+
+`arch_scope: gfx950`. Follows the entry above, same harness.
+
+m=4096 k=2048 auto shape, from scripts/sp2.cpp:
+
+    N         S      margin   rank    cap   coop_g   expected candidates/row
+    131072    8192   1.400    179     4096  8        2867
+    262144    16384  1.400    179     4096  8        2867
+
+The two widths plan IDENTICAL candidate counts, so phase_b's epilogue writes the
+same 2867 x 4096 x 8B = 93.9MB at both. It costs 98.3us at N=131072 and 153.1us at
+N=262144 -- 1.56x for the same bytes. The only thing that changed is the read
+stream around it, 2.148GB against 4.295GB.
+
+So the epilogue write is not paying its own bandwidth. It is paying to interleave
+with the read stream, and the bill scales with the reads it interrupts. Three
+measurements agree and none of them make sense under a pure-bandwidth model:
+
+    lever                                    N=131072   N=262144
+    halve the record to 4B (ABLATE_EPI=7)      -5.9us     -48.4us
+    --margin 1.40 -> 1.08, 23% fewer cands     -8.9us     -21.5us
+    head forced to a 128B boundary (EPI=6)      +2.7us      -2.4us
+
+Halving the bytes buys 6% of the copy at N=131072 and 31% at N=262144. Under a
+bandwidth model both would be ~50%. Under an interference model the win tracks how
+much read traffic there is to protect, which is what the numbers do.
+
+Occupancy is NOT the mechanism. wbuf is WSTAGE_WAVES=8 x WSTAGE_CAP=320 x 8B =
+20KB, and at 512 threads per block gfx950 admits 4 blocks/CU on wave slots against
+7 on LDS, so the staging buffer is not the binding constraint and shrinking it
+cannot raise occupancy.
+
+**What this closes.** Every in-place fix to the copy is capped by the interference,
+not by the copy: alignment 0, thread map -6.0us, per-wave parallel -12.8us, halving
+the record -5.9us at the width where the read stream is smallest.
+
+**What it opens.** The write only has to exist because phase_c is a separate kernel
+that reads the candidates back. cap=4096 x 8B = 32KB fits in LDS, so a phase_b/c
+fused at coop_g=1 would never put a candidate in global memory at all: it removes
+98.3-153.1us from phase_b AND the same 93.9MB read from phase_c, and it keeps the
+read stream pure. coop_g=1 means one block per row, which is 4096 blocks at M=4096
+(16 per CU) but ONE block for the whole row at M=1, so it has to be M-gated. NOT
+attempted -- recorded as the direction the pricing points at.

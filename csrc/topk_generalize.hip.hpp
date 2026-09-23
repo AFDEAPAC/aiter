@@ -310,6 +310,19 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
       for (int j = lane; j < cnt; j += WAVE_SIZE) dst[j] = buf[j];
     }
   }
+#elif ABLATE_EPI == 7
+  // Price halving the candidate record. Alignment, the thread map and the number
+  // of passes are all closed, so the only lever left on the epilogue's 98.3us is
+  // bytes. This writes the low 32 bits only, which is the footprint a 4-byte
+  // record would have. Wrong results -- phase_c reads uint64 -- pricing only.
+  {
+    uint32_t* row32 = reinterpret_cast<uint32_t*>(row_base);
+    for (int j = threadIdx.x; j < s_tot; j += blockDim.x) {
+      int w = 0;
+      while (w + 1 < nwaves && j >= s_off[w + 1]) w++;
+      row32[s_base + j] = (uint32_t)wbuf[(size_t)w * WSTAGE_CAP + (j - s_off[w])];
+    }
+  }
 #elif ABLATE_EPI == 6
   // Alignment ONLY, priced honestly. ABLATE_EPI=3 was not a valid ceiling: it
   // sent all eight waves to row_base, which shrinks the footprint eightfold and
