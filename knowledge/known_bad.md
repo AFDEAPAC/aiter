@@ -2589,3 +2589,55 @@ written into the coop_g choice as an assumption.
 
 **And it flips nothing on its own.** The three shapes above need 22.2, 14.8 and
 15.1us to reach 60% of the pipe101 floor; this is worth 3.3, 2.9 and 1.0.
+
+## The exact early exit from the radix select: correct, and not worth it
+## (gfx950, 2026-09-24)
+
+`arch_scope: gfx950`. Upstream's `topk_per_row_kernels.cu` stops early through
+`counter.len == 1`, with the note that random fp32 makes the selected 24-bit
+prefix name a single element almost always -- so the fourth pass usually resolves
+something already decided. Measured here, the fourth pass alone costs 1.12us at
+m=512 n=131072, 0.92 at m=256, 1.34 at m=1024 and 5.56 at m=4096.
+
+**The exit that fits this select, and it is exact.** After a pass,
+`pivot` holds the digits chosen so far with everything below still zero, so it IS
+the chosen bucket's lower bound, and `ek` is how many keys are still needed from
+inside that bucket. If the bucket's own count equals `ek`, every key at or above
+the lower bound is in the answer and no further digit can change it:
+
+    if (p + 1 < npasses && bucket_count == ek && pivot != 0u) {
+      pivot -= 1u; eq_needed = 0; return;
+    }
+
+`benchmark_topk --mode verify` is VERDICT PASS on all 245 of 7 M x 7 N x 5
+distributions with it on, so this is a performance verdict, not a correctness one.
+
+**Why it loses.** The bucket's own count is not something the loop already has --
+`block_find_pivot_bucket_wave0` publishes only the bucket index and the count
+ABOVE it -- so the exit costs one more `__shfl` and one more LDS slot on EVERY
+pass, fired or not. Three-kernel device total, SELECT_EARLY_EXIT 0 against 1:
+
+    m=4096 n=131072   539.67 -> 535.57   0.9924
+    m=2048 n=131072   257.07 -> 253.98   0.9880
+    m=1024 n=131072   146.27 -> 145.82   0.9969
+    m=512  n=131072    71.77 ->  71.53   0.9967
+    m=32   n=1048576   49.32 ->  49.29   0.9994
+    m=256  n=131072    45.75 ->  45.90   1.0033
+    m=64   n=1048576   66.40 ->  66.81   1.0062
+    m=8    n=524288    28.91 ->  29.37   1.0159
+    m=128  n=524288    66.48 ->  67.54   1.0159
+
+The pass it removes is worth 5.56us at m=4096 and 0.86us at m=8, while the shuffle
+it adds costs the same everywhere. It pays exactly where the pass is expensive.
+
+**Why it is not shipped even M-gated.** The shapes it helps -- m=2048 and m=4096
+at N=131072 -- are already at or above 60% of the pipe101 floor. The shapes it
+hurts are red. Gating it to M >= 1024 would buy 0.31% at m=1024 n=131073, which
+needs 4.2us and would get 0.45.
+
+**What would change the verdict**: publishing the bucket count for free. `above`
+and `cnt` both fit in 16 bits for phase_a and phase_c (S <= 16384, c <= 8192) and
+could share one word, but `block_select_lds` is also called with `len` as the
+count (topk_generalize.hip.hpp:44), where `above` can exceed 65535. A bound check
+on that caller, or a second word only on the paths that need it, would make the
+exit free to evaluate and the large-M win real.
