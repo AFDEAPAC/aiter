@@ -65,8 +65,11 @@ static double stddev_pct(const std::vector<double>& v, double med) {
 }
 
 int main(int argc, char** argv) {
-  const int M = 4096, N = 131072;
-  const int w_per_row = (argc > 1) ? atoi(argv[1]) : 2867;  // margin 1.4 * K=2048
+  // M and N from argv so the floor can be measured at the shape being judged,
+  // not only at the anchor. argv: M N [w_per_row]
+  const int M = (argc > 1) ? atoi(argv[1]) : 4096;
+  const int N = (argc > 2) ? atoi(argv[2]) : 131072;
+  const int w_per_row = (argc > 3) ? atoi(argv[3]) : 2867;  // margin 1.4 * K=2048
   const int out_stride = 4096;
   const size_t n = (size_t)M * N;
   const size_t bytes = n * sizeof(float);

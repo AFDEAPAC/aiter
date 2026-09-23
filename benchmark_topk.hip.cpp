@@ -191,7 +191,11 @@ __device__ __forceinline__ void block_select_lds(const uint32_t* __restrict__ s_
                                                  uint32_t* __restrict__ s_scan,
                                                  uint32_t* __restrict__ s_mm, uint32_t& pivot,
                                                  int& eq_needed, int npasses = RADIX_PASSES,
-                                                 bool prefix_skip = false) {
+                                                 bool prefix_skip = false,
+                                                 // The caller counted pass 0's digits into s_hist while
+                                                 // it was loading the keys, and zeroed s_hist first, so
+                                                 // pass 0 only has to find its bucket.
+                                                 bool hist_prefilled = false) {
   const int rep = threadIdx.x & (HIST_REP - 1);
   if (threadIdx.x == 0) {
     s_scan[0] = 0;
@@ -222,13 +226,19 @@ __device__ __forceinline__ void block_select_lds(const uint32_t* __restrict__ s_
 #if SELECT_CLEAR_ON_READ
   // Zeroed once here; from then on the scan re-zeroes each bucket as it reads
   // it, so the per-pass clear loop and its barrier are gone.
-  for (int i = threadIdx.x; i < HIST_SLOTS; i += blockDim.x) s_hist[i] = 0;
-  __syncthreads();
+  if (!hist_prefilled) {
+    for (int i = threadIdx.x; i < HIST_SLOTS; i += blockDim.x) s_hist[i] = 0;
+    __syncthreads();
+  }
 #endif
   for (int p = start; p < npasses; p++) {
     const int sh = radix_shift(p);
     const int hshift = sh + 8;
     const bool filter = (p > 0);
+    // Pass `start` reads a histogram the caller already filled, so this
+    // scan of s_keys and the wait that ends it are paid for.
+    const bool skip_hist = hist_prefilled && p == start;
+    if (!skip_hist) {
 #if !SELECT_CLEAR_ON_READ
     for (int i = threadIdx.x; i < HIST_SLOTS; i += blockDim.x) s_hist[i] = 0;
     __syncthreads();
@@ -264,6 +274,7 @@ __device__ __forceinline__ void block_select_lds(const uint32_t* __restrict__ s_
 #endif
     }
 #endif
+    }
     __syncthreads();
 #if SELECT_WAVE0_SCAN
     block_find_pivot_bucket_wave0<SELECT_CLEAR_ON_READ != 0>(s_hist, s_scan, ek);
@@ -537,6 +548,19 @@ __global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restric
 
   const int v4_per_chunk = SAMPLE_CHUNK_ELEMS / FP32_EPT;
   const int total_v4 = S / FP32_EPT;
+  // Count pass 0's digits while the samples are being loaded, so the select
+  // starts at pass 1 with the histogram already built. ATT puts 40% of phase_a's
+  // traced latency on the wait for the first sample load and another 37% on the
+  // barriers; this pass's scan of s_keys and the barrier that ends it both sit
+  // inside that, and the counting itself hides under the load it shares.
+#ifndef PA_FOLD
+#define PA_FOLD 1
+#endif
+#if PA_FOLD
+  const int fold_rep = threadIdx.x & (HIST_REP - 1);
+  for (int i = threadIdx.x; i < HIST_SLOTS; i += blockDim.x) s_hist[i] = 0u;
+  __syncthreads();
+#endif
   // phase_a's load is latency-bound, not bandwidth-bound: ABLATE_PA=1 measures
   // 18.10us at m=4096 n=131072 with S=4096 and the SAME 18.09us at S=512, where
   // the bytes are eight times fewer. At S=4096 total_v4 equals blockDim, so each
@@ -566,10 +590,21 @@ __global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restric
     const int off4 = u % v4_per_chunk;
     vfloat4 v = *(reinterpret_cast<const vfloat4*>(ri + (size_t)chunk * chunk_stride) + off4);
     const int base = u * FP32_EPT;
-    s_keys[base + 0] = fp32_to_sortable(v[0]);
-    s_keys[base + 1] = fp32_to_sortable(v[1]);
-    s_keys[base + 2] = fp32_to_sortable(v[2]);
-    s_keys[base + 3] = fp32_to_sortable(v[3]);
+    const uint32_t k0 = fp32_to_sortable(v[0]);
+    const uint32_t k1 = fp32_to_sortable(v[1]);
+    const uint32_t k2 = fp32_to_sortable(v[2]);
+    const uint32_t k3 = fp32_to_sortable(v[3]);
+    s_keys[base + 0] = k0;
+    s_keys[base + 1] = k1;
+    s_keys[base + 2] = k2;
+    s_keys[base + 3] = k3;
+#if PA_FOLD
+    // radix_shift(0) is 24, so pass 0's digit is the top byte.
+    atomicAdd(&s_hist[(k0 >> 24) * HIST_REP + fold_rep], 1u);
+    atomicAdd(&s_hist[(k1 >> 24) * HIST_REP + fold_rep], 1u);
+    atomicAdd(&s_hist[(k2 >> 24) * HIST_REP + fold_rep], 1u);
+    atomicAdd(&s_hist[(k3 >> 24) * HIST_REP + fold_rep], 1u);
+#endif
   }
   __syncthreads();
 
@@ -591,7 +626,8 @@ __global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restric
   if constexpr (COMPACT) {
     block_select_lds_compact(s_keys, S, rank_row, s_hist, s_red, s_scan, pivot, eq_needed, npasses);
   } else {
-    block_select_lds(s_keys, S, rank_row, s_hist, s_red, s_scan, s_mm, pivot, eq_needed, npasses);
+    block_select_lds(s_keys, S, rank_row, s_hist, s_red, s_scan, s_mm, pivot, eq_needed, npasses,
+                     false, PA_FOLD != 0);
   }
 #endif
   if (threadIdx.x == 0) {
