@@ -2361,3 +2361,41 @@ repo already applies elsewhere. That constant was added to rule 1's acceptance i
 checked against it. bench/fbrate.py found no fallback rows at those widths, so
 this is a latent margin rather than a live bug, but the two paths disagree about
 what "safe fill" means and only one of them is enforced.
+
+## phase_a's radix select is near its floor at 3 passes, and compaction cannot
+## pay for itself there (gfx950, 2026-09-23)
+
+`arch_scope: gfx950`. Extends the phase_a read/select split above. k=2048 --dist
+gaussian --seed 0, phase_a device time, `--phase-a-passes` walked up from the
+ABLATE_PA=1 floor (load + LDS fill, no select):
+
+    m=4096 n=131072        floor 33.50
+      plain    1 pass 45.81   2 57.13 (+11.32)  3 64.72 (+7.59)  4 72.61 (+7.89)
+      compact  1 pass 45.61   2 61.14 (+15.53)  3 67.29 (+6.15)  4 70.88 (+3.59)
+    m=4096 n=262144        floor 60.12
+      plain    1 pass 85.91   2 108.15 (+22.24) 3 123.23 (+15.08) 4 138.22 (+14.99)
+      compact  1 pass 95.55   2 119.51 (+23.96) 3 129.79 (+10.28) 4 137.73 (+7.94)
+
+Two things to take from this.
+
+**The passes cost the same whether or not they are filtered.** Passes 2 and 3 only
+touch keys whose high digits match the pivot -- about 1/256 of them -- and still
+cost 15.08us against pass 1's 25.8us. So the cost is re-reading all c keys out of
+LDS and evaluating the filter, not the histogram atomics.
+
+**Compaction works and still loses.** `block_select_lds_compact` gets the later
+passes down (pass 4 marginal 7.94 against 14.99) but pays +9.6us on pass 1 to do
+the compacting. At the shipped npasses=3 it is a net LOSS, 129.79 against 123.23,
+and only breaks even at 4 passes. With only two passes after the first there is
+not enough left to amortize the compaction. `--phase-a-compact 1` measuring
+"neutral" earlier was this, not an inert flag.
+
+Note the default is npasses=3, not RADIX_PASSES=4: `--phase-a-passes 4` measures
+72.61us where the default measures 64.72us.
+
+**How much is left.** At m=4096 n=262144 the three kernels total 975us and phase_b
+alone is 778us of it, reading 4.295GB at 5.52 TB/s against the 5.93 TB/s the
+load-only ablation reaches -- 93% of its own read floor. Against a pure
+read-the-input-once floor of 724us the pipeline is at 74%, and the 251us of
+difference is phase_a's read (60) and select (63), phase_c (72), and phase_b's own
+overhead (54). There is no large single item left at this shape.
