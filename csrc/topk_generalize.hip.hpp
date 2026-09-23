@@ -310,6 +310,31 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
       for (int j = lane; j < cnt; j += WAVE_SIZE) dst[j] = buf[j];
     }
   }
+#elif ABLATE_EPI == 90
+  // CORRECT. Both halves that measured something, together: each wave copies its
+  // own staged run so the eight runs go out at once (-12.8us alone), and the
+  // store is non-temporal so the candidate bytes stop evicting the row data the
+  // other blocks are still reading (-12.1us alone, on top of the walk form).
+  {
+    const int cnt = s_local[wid];
+    if (cnt > 0) {
+      uint64_t* dst = row_base + s_base + s_off[wid];
+      for (int j = lane; j < cnt; j += WAVE_SIZE)
+        __builtin_nontemporal_store(buf[j], &dst[j]);
+    }
+  }
+#elif ABLATE_EPI == 8
+  // CORRECT, not an ablation. The pricing says the copy pays to interleave with
+  // phase_b's read stream rather than for its own bytes, so the thing to change
+  // is not how the write is issued but whether it disturbs the reads. A
+  // non-temporal store bypasses the caches, so the candidate run stops evicting
+  // the row data the other blocks are still reading. Same bytes, same addresses.
+  for (int j = threadIdx.x; j < s_tot; j += blockDim.x) {
+    int w = 0;
+    while (w + 1 < nwaves && j >= s_off[w + 1]) w++;
+    __builtin_nontemporal_store(wbuf[(size_t)w * WSTAGE_CAP + (j - s_off[w])],
+                                &row_base[s_base + j]);
+  }
 #elif ABLATE_EPI == 7
   // Price halving the candidate record. Alignment, the thread map and the number
   // of passes are all closed, so the only lever left on the epilogue's 98.3us is
@@ -350,13 +375,49 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
     while (w + 1 < nwaves && j >= s_off[w + 1]) w++;
     row_base[s_base + j] = wbuf[(size_t)w * WSTAGE_CAP + (j - s_off[w])];
   }
-#elif ABLATE_EPI != 1
+#elif ABLATE_EPI == 91
+  // The block walking the eight staged runs one after another, which is what
+  // this shipped before. Kept so the 22.6us below stays reproducible.
   for (int w = 0; w < nwaves; w++) {
     const int cnt = s_local[w];
     if (cnt <= 0) continue;
     uint64_t* dst = row_base + s_base + s_off[w];
     const uint64_t* src = wbuf + (size_t)w * WSTAGE_CAP;
     for (int j = threadIdx.x; j < cnt; j += blockDim.x) dst[j] = src[j];
+  }
+#elif ABLATE_EPI != 1
+  // Each wave writes out its own staged run, with a non-temporal store.
+  //
+  // Both halves were priced against the block-serial walk this replaces
+  // (ABLATE_EPI=91), at m=4096 k=2048 --dist gaussian --seed 0, phase_b device
+  // time, upper three quartiles of 20 launches:
+  //
+  //                                          N=131072   N=262144
+  //   per-wave copy, ordinary store           -12.8us     -8.2us
+  //   block-wide walk, non-temporal store     -12.1us     -8.4us
+  //   both, which is this                     -22.6us    -21.3us
+  //
+  // against a run-to-run spread of 1.4us and 3.8us on the unchanged kernel.
+  //
+  // The serial half is the obvious one: s_off is a prefix sum, so the eight runs
+  // are already one contiguous block run, and walking it per wave lets the eight
+  // go out at once instead of one after another.
+  //
+  // The non-temporal half is there because of what the copy turned out to cost.
+  // N=131072 and N=262144 plan the same margin, cap and coop_g, so the epilogue
+  // writes the same 93.9MB at both -- and it measured 98.3us at one and 153.1us
+  // at the other. It is not paying for its own bytes, it is paying to interleave
+  // with the read stream, and the bill scales with the reads it interrupts.
+  // Bypassing the caches stops the candidate run evicting row data the other
+  // blocks are still reading. knowledge/known_bad.md has the full pricing,
+  // including the three levers that measured nothing.
+  {
+    const int cnt = s_local[wid];
+    if (cnt > 0) {
+      uint64_t* dst = row_base + s_base + s_off[wid];
+      for (int j = lane; j < cnt; j += WAVE_SIZE)
+        __builtin_nontemporal_store(buf[j], &dst[j]);
+    }
   }
 #endif
 }
