@@ -2215,3 +2215,32 @@ run-to-run spread, not regressions. That also sets the noise band at these sizes
 **The lesson to carry.** "Tried the intrinsic, it did nothing" is not a result
 about the intrinsic. Where the branch lives and which kernels inherit it decided
 the sign here.
+
+## The same intrinsic, one kernel later, is a 17% regression (gfx950, 2026-09-23)
+
+`arch_scope: gfx950`. Follows the entry above, which shipped non-temporal loads in
+phase_b behind a size gate. The obvious next step -- phase_c reads the candidate
+array once and never again, and phase_b now writes it non-temporally so it is not
+in cache anyway -- is WRONG.
+
+Three-kernel device total and phase_c alone, k=2048 --dist gaussian --seed 0:
+
+    M     N          phase_c cached   phase_c non-temporal
+    4096  131072        72.64us          72.85us
+    4096  1048576      125.81us         141.48us    +12.5%
+    1024  524288        31.18us          36.55us    +17.2%
+    128   1048576       13.95us          15.48us    +11.0%
+    128   131072        10.88us          10.53us
+
+Kept as NT_CAND, defaulting to 0.
+
+[unverified hypothesis] for the sign flip, and it is worth checking before reusing
+either result: phase_b's streaming load is a dwordx4, so a 64-lane wave covers
+1024B and every line it touches is fully consumed whether or not it is cached.
+phase_c's candidate read is 8B per lane, so a wave covers 512B and a cached fetch
+of a 128B line serves 16 lanes at once. Bypassing that is giving up the sharing,
+not avoiding pollution. Request counts would settle it; they were not measured.
+
+Either way the rule "this read is streamed, so make it non-temporal" does not
+survive contact: it won by up to 11.6% one kernel earlier and lost by up to 17.2%
+here, in the same pipeline, on the same data.

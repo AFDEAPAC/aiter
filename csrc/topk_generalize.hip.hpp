@@ -249,6 +249,10 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
 //       __syncthreads, the serial prefix over waves and the block atomicAdd stay.
 //   2 = return right after the filter loop: the whole epilogue goes.
 // Both give wrong results and exist only to price a half.
+#ifndef NT_CAND
+#define NT_CAND 0
+#endif
+
 #ifndef ABLATE_EPI
 #define ABLATE_EPI 0
 #endif
@@ -461,7 +465,14 @@ __global__ void phase_c_select_contig(const float* __restrict__ input, int pitch
   const uint64_t* base = cand_pack + (size_t)row * cap;
 
   for (int i = threadIdx.x; i < c; i += blockDim.x) {
+#if NT_CAND
+    // The candidate array is read once here and never again, and phase_b now
+    // writes it non-temporally so it is not in cache to begin with. Pricing
+    // knob: NT_CAND=0 puts the ordinary load back.
+    uint64_t p = __builtin_nontemporal_load(&base[i]);
+#else
     uint64_t p = base[i];
+#endif
     s_keys_ext[i] = fp32_to_sortable_bits((uint32_t)(p >> 32));
     if (!keys_only) s_idx[i] = (int)(uint32_t)p;
   }
