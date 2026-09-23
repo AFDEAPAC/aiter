@@ -2550,3 +2550,42 @@ cost is front-loaded: phase_c at m=512 n=131072 costs 4.38us for pass 1 and 1.62
 all c keys. Counting pass 0's digits during the read that already has the keys in
 registers removes most of it -- shipped for phase_a and then phase_c, worth 0.9611x
 to 0.9916x of the three-kernel total with no shape slower.
+
+## phase_b wants 1024 threads at small M, and --coop-g 1 is not how to test it
+## (gfx950, 2026-09-24)
+
+`arch_scope: gfx950`. Two things, one of them a trap.
+
+**The trap.** `--coop-g 1 --cf-block 1024` fails with HIP 719 and the sweep that
+uses it silently records the configuration as slow. It is not a coop_g=1 problem:
+`derive_shape_params` has `if (p.path == PATH_PREFILL) p.coop_g = 1`, so forcing
+coop_g to 1 reports `path=prefill`, and the prefill path runs
+`phase_b_filter_waveseg` instead of `phase_b_filter_coop`. That kernel's
+`seg_stride` layout assumes at most 8 waves. `--coop-g 2 --cf-block 1024` on the
+same shape runs fine and reports `path=decode`. Check the `path=` field the
+benchmark prints before concluding anything from a coop_g override.
+
+**The finding.** `scripts/bw_gx_floor.hip` prefers wg1024 at small M, and the
+shipped phase_b is capped at 512 threads by `WSTAGE_WAVES = 8`. With
+`WSTAGE_WAVES_OVERRIDE=16`, phase_b device time / three-kernel total:
+
+    m=8 n=1048576    shipped auto 12.8 / 35.7
+      coop_g=32      cf512 13.3 / 34.9      cf1024 10.8 / 32.4
+    m=32 n=1048576   shipped auto 26.4 / 49.4
+      coop_g=16      cf512 26.5 / 49.0      cf1024 23.5 / 46.5
+    m=128 n=131072   shipped auto 18.9 / 37.4
+      coop_g=8       cf512 19.0 / 37.3      cf1024 17.8 / 36.4
+
+0.908x, 0.941x and 0.973x on the total. It does NOT generalise upward: at m=4096
+n=131072 the same build measures 447.97us at coop_g=2 cf1024 against 417.22 at
+coop_g=8 cf512, so this has to be M-gated.
+
+**Why it is not shipped as-is.** `wbuf` is `__shared__ uint64_t[WSTAGE_WAVES *
+WSTAGE_CAP]`, so raising WSTAGE_WAVES to 16 reserves 40 KB in every block whether
+or not it runs 1024 threads -- a 512-thread block would pay 20 KB it cannot use.
+Doing this properly means a template parameter on the block width and the
+`choose_coop_g(M, N, n4, 512, ...)` rule re-derived for 1024, since that 512 is
+written into the coop_g choice as an assumption.
+
+**And it flips nothing on its own.** The three shapes above need 22.2, 14.8 and
+15.1us to reach 60% of the pipe101 floor; this is worth 3.3, 2.9 and 1.0.
