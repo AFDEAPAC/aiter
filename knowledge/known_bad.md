@@ -2287,3 +2287,29 @@ measured -- a block-start/end timestamp histogram would settle it.
 
 **Conclusion.** Fusion is closed at these widths. It would need a coop_g=1 read
 that costs less than 100us more than coop_g=8, and nothing tried here gets close.
+
+## phase_a is half read and half select, and the read is not the slow half
+## (gfx950, 2026-09-23)
+
+`arch_scope: gfx950`. ABLATE_PA=1 keeps phase_a's sample load and its LDS fill and
+drops the radix select. k=2048 --dist gaussian --seed 0, phase_a device time:
+
+    M     N         S       full    read only   select   read GB/s
+    4096  131072    8192     65.82     33.78     32.04     3973
+    4096  262144   16384    124.52     60.16     64.36     4462
+    4096  1048576  16384    116.36     57.29     59.07     4686
+    1024  524288   16384     35.95     15.80     20.15     4247
+    128   1048576  16384     14.13      5.91      8.22     1419
+
+Corrects an estimate made earlier in this session: dividing phase_a's whole 124us
+by its 268MB gave 2.16 TB/s and the conclusion that the sampler reads badly. Half
+that time is the select. The read alone is 4.46-4.69 TB/s against phase_b's 5.93
+on the same card, so the headroom there is about 25%, or ~15us at m=4096
+n=262144 -- not the 79us the bad arithmetic suggested.
+
+The select is 64.36us at m=4096 n=262144, 6.6% of the 975us three-kernel total.
+It is a multi-pass radix over S=16384 keys in LDS per row, and it is the larger
+half at every shape measured. OPEN as a direction; not attempted.
+
+m=128 n=1048576 reads at 1419 GB/s because 128 rows give 128 blocks, which is the
+same not-enough-blocks floor coop_g=1 hits in the fusion entry.

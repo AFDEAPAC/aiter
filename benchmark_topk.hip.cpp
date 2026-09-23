@@ -551,11 +551,25 @@ __global__ __launch_bounds__(1024) void phase_a_threshold(const float* __restric
 
   uint32_t pivot;
   int eq_needed;
+  // Splits phase_a into its read and its select. The sampler moves 268MB at
+  // m=4096 n=262144 and takes 124us, which is 2.16 TB/s against phase_b's 5.93
+  // on the same card -- but that 124us also contains a multi-pass radix select
+  // over LDS, so the read is not necessarily what is slow. ABLATE_PA=1 keeps the
+  // load and the LDS fill and drops the select. Wrong results; pricing only.
+#ifndef ABLATE_PA
+#define ABLATE_PA 0
+#endif
+#if ABLATE_PA
+  pivot = s_keys[threadIdx.x % S];
+  eq_needed = 1;
+  (void)rank_row; (void)npasses;
+#else
   if constexpr (COMPACT) {
     block_select_lds_compact(s_keys, S, rank_row, s_hist, s_red, s_scan, pivot, eq_needed, npasses);
   } else {
     block_select_lds(s_keys, S, rank_row, s_hist, s_red, s_scan, s_mm, pivot, eq_needed, npasses);
   }
+#endif
   if (threadIdx.x == 0) {
     threshold[row] = pivot;
     threshold_f[row] = sortable_to_fp32(pivot);
