@@ -181,6 +181,20 @@ void top_k_per_row_prefill_sampled(const aiter_tensor_t& logits,
     const int N = static_cast<int>(stride0);
     const int K = static_cast<int>(k);
 
+    // The non-ragged kernels take n4 as `pitch / FP32_EPT`, which TRUNCATES,
+    // while the ragged ones take `n4_cover(len)`, which rounds up and then
+    // predicates the tail on `< len`. The two agree only when the row width is
+    // a multiple of FP32_EPT; below that the plain path never reads the last
+    // one to three columns, and measurably worse -- at m=8 N=131077 it returns
+    // 72.5% of the wrong elements, which is more than the dropped tail can
+    // explain and is not yet understood.
+    //
+    // So `ragged = false` is honoured only where the two paths are provably the
+    // same kernel over the same elements. Every power-of-two width and every
+    // other multiple of four keeps the faster path; the rest go back to the
+    // bounds-checking one, which is what they did before the parameter existed.
+    const bool ragged_eff = ragged || (N % FP32_EPT) != 0;
+
     HipDeviceGuard device_guard(logits.device_id);
     const hipStream_t stream = aiter::getCurrentHIPStream();
 
@@ -193,7 +207,7 @@ void top_k_per_row_prefill_sampled(const aiter_tensor_t& logits,
 
     if(sp.path == PATH_SMALL_N)
     {
-        if(ragged)
+        if(ragged_eff)
         {
             if(val)
                 topk_small_n<true, true>(in, M, N, row_starts, row_ends, K, idx, val, stream);
@@ -216,7 +230,7 @@ void top_k_per_row_prefill_sampled(const aiter_tensor_t& logits,
                 workspace.value().numel() * workspace.value().element_size(),
                 L.total);
     Bufs b = sampled::bind_bufs(workspace.value().data_ptr(), L, sp.cap);
-    if(ragged)
+    if(ragged_eff)
     {
         if(val)
             topk_fused_impl<true, true>(in, M, N, row_starts, row_ends, K, idx, val, b, sp, stream);
