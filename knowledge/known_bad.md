@@ -2498,3 +2498,55 @@ The remaining 23.6% of phase_c is `s_barrier`, 16.1% of it the one inside
 `block_find_pivot_bucket_wave0` where fifteen of sixteen waves wait while wave 0
 walks 256 buckets. That scan is already four buckets per lane plus a six-step
 shuffle; the cost is the block-wide synchronisation, not the scan.
+
+## The gate that killed the multi-block plan, with the numbers (gfx950, 2026-09-24)
+
+`arch_scope: gfx950`. The N>=128K red cells are starved, not slow: at m=8 n=524288
+`phase_a` runs at 1.38% CU utilisation (rocprof-compute) because one block per row
+means 8 workgroups on 256 CUs. The obvious answer is to give each row more blocks.
+Three measurements say not to.
+
+**A kernel launch is cheap here.** `scripts/null_kernel_ramp.hip` times a kernel
+that stores one byte per block, swept over grid, block width and dynamic LDS:
+
+    blocks   wg256   wg512   wg1024      (us, and flat across 0/8/32/64 KB of LDS)
+         8   1.404   1.387    1.396
+       128   1.440   1.432    1.499
+       512   1.507   1.595    1.787
+      4096   2.261   3.099    4.797
+
+1.39us at 8 blocks, and the LDS reservation costs nothing -- 64 KB reads the same
+as 0. So three kernels are 4.2us of ramp at m=8, 15% of that shape's 28.55us, and
+"fewer kernels" is not where the time is.
+
+**Half of each selecting kernel is the select, and the other half does not split.**
+ABLATE_PA and ABLATE_PC keep the loads, the LDS fill and the gather and drop
+`block_select_lds`:
+
+    shape             phase_a  no-select  select | phase_c  no-select  select
+    m=8   n=524288       7.42      3.81    3.61  |  12.59      5.32     7.27
+    m=32  n=1048576     10.21      6.09    4.12  |  13.87      5.75     8.12
+    m=128 n=131072       9.17      4.99    4.18  |  10.10      4.44     5.66
+    m=512 n=131072         --        --      -- |  14.23      5.99     8.24
+
+**That arithmetic closes the two-stage split.** A `_stream_split_parts`-shaped
+split of phase_a pays the 1.39us ramp AND the ~2.4us non-select fixed cost TWICE,
+which is 7.6us of new floor, to save part of a 3.6-4.2us select. It cannot win at
+any of these shapes, and the barrier-based variant was already closed for a
+different reason (`knowledge/known_bad.md`: the spin barrier's price is 1.43us at
+G=16 with one concurrent group and 4.22us with eight, and the regime where a split
+is tempting is the one with many groups).
+
+For phase_c the split is not even arithmetically available: the stream pattern
+needs `width >= parts * k` and phase_c has `c ~= 1.4 * k_out`.
+
+**And aiter's own multi-block path is slower here.** `should_use_mulblocks` on
+MI355X selects it for `batch <= 128` at these widths, and `plain` measures 247.11us
+at m=8 n=1048576 where `sampled` measures 34.99.
+
+**What the gate pointed at instead.** The select is the addressable half, and its
+cost is front-loaded: phase_c at m=512 n=131072 costs 4.38us for pass 1 and 1.62 /
+1.16 / 1.12 for passes 2, 3 and 4, because pass 1 is the only unfiltered scan of
+all c keys. Counting pass 0's digits during the read that already has the keys in
+registers removes most of it -- shipped for phase_a and then phase_c, worth 0.9611x
+to 0.9916x of the three-kernel total with no shape slower.
