@@ -63,7 +63,7 @@ __global__ void phase_small_n_topk(const float* __restrict__ input, int pitch,
   }
 }
 
-template <bool RAGGED>
+template <bool RAGGED, bool NT>
 __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
                                     RowExtents<RAGGED> extents, int n4_per_row,
                                     const float* __restrict__ threshold_f, uint64_t* __restrict__ cand_pack,
@@ -172,7 +172,7 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
     const int i = i0 + it * stride + threadIdx.x;
     vfloat4 v = {0.f, 0.f, 0.f, 0.f};
     const bool live = (i < i1);
-    if (live) v = load_row_f4<RAGGED>(ri, i, len);
+    if (live) v = load_row_f4<RAGGED, NT>(ri, i, len);
     const int base_idx = i * FP32_EPT;
     const uint64_t b0 = __ballot(live && !(v[0] < th) && (!RAGGED || base_idx + 0 < len));
     const uint64_t b1 = __ballot(live && !(v[1] < th) && (!RAGGED || base_idx + 1 < len));

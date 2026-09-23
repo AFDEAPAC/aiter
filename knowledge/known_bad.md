@@ -2163,3 +2163,55 @@ fused at coop_g=1 would never put a candidate in global memory at all: it remove
 read stream pure. coop_g=1 means one block per row, which is 4096 blocks at M=4096
 (16 per CU) but ONE block for the whole row at M=1, so it has to be M-gated. NOT
 attempted -- recorded as the direction the pricing points at.
+
+## Non-temporal loads: the implementation is the whole result (gfx950, 2026-09-23)
+
+`arch_scope: gfx950`. This EXTENDS "Non-temporal loads in the streaming filter"
+near the top of this file, which measured 0.7930 against 0.7916 ms and closed the
+direction. That reading is right for what it tested and wrong as a general answer.
+
+The knob it tested, `--nt-load` / `g_use_nt_load`, flips a `__constant__` read
+inside `load_f4` (csrc/topk_common.hip.hpp:285). Two consequences: the branch sits
+in the innermost load, and `load_f4` is shared, so phase_a and phase_c's exact
+fallback get non-temporal loads too -- and those DO reuse what they read.
+
+Re-measured, three-kernel device total, k=2048 --dist gaussian --seed 0, all four
+arms back to back on one card:
+
+    M     N        cached   --nt-load 1   phase_b template   size gate
+    4096  131072   580.52     576.23        555.18            553.95
+    4096  1048576 3068.06    3084.03       2776.12           2765.43
+    128   1048576  129.11     127.31        114.12            114.51
+    128   131072    35.13      35.77         36.49             35.81
+    64    262144    39.49      38.72         41.11             38.70
+
+The runtime knob is 0.981x to 1.018x -- neutral, as the original entry found. The
+same intrinsic as a compile-time template parameter on phase_b_filter_coop alone
+is 0.884x to 0.956x on the wide cells.
+
+**It is not free everywhere.** Unconditional, it LOSES at small work: m=64
+n=262144 1.050x, m=128 n=131072 1.042x, m=16 n=1048576 1.031x, m=64 n=131073
+1.029x, m=1 n=1048576 1.020x. The winners and losers separate cleanly on input
+size and nothing else:
+
+    win  (0.884x-0.969x)   M*pitch >= 2^27   = 512MB and up
+    lose (1.020x-1.050x)   M*pitch <= 2^26   = 256MB and down
+
+2^27 elements is 512MB, the first size that cannot sit in gfx950's 256MB MALL.
+Below it the input CAN stay resident across calls and the caching is the whole
+benefit; above it nothing survives anyway and the cache line only evicts what the
+other blocks are still reading. Shipped as that gate, which is `--nt-gate` on
+benchmark_topk (-1 = gate, 0 = off, 1 = on).
+
+Measured over 27 shapes with the gate: every cell at or above 2^27 is 0.884x to
+0.969x, and every cell below it compiles the SAME device code as the gate-off arm
+(the same phase_b_filter_coop<RAGGED,false> instantiation, only the host-side
+branch differs), so the 1.045x at m=128 n=131072 and 1.033x at m=16 n=131072 are
+run-to-run spread, not regressions. That also sets the noise band at these sizes:
++-4.5% at 35us, which is worth remembering before reading a small-cell A/B.
+
+--mode verify is VERDICT PASS on all 245 of 7 M x 7 N x 5 distributions.
+
+**The lesson to carry.** "Tried the intrinsic, it did nothing" is not a result
+about the intrinsic. Where the branch lives and which kernels inherit it decided
+the sign here.
