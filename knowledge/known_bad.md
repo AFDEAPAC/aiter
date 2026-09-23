@@ -2313,3 +2313,51 @@ half at every shape measured. OPEN as a direction; not attempted.
 
 m=128 n=1048576 reads at 1419 GB/s because 128 rows give 128 blocks, which is the
 same not-enough-blocks floor coop_g=1 hits in the fusion entry.
+
+## The sample-count cliff is derive_cap halving, and rule 0 was never checked
+## against CAP_SAFE_FILL (gfx950, 2026-09-23)
+
+`arch_scope: gfx950`. Closes the OPEN item recorded earlier in this session, which
+said a forced sample count of 10240 at N=262144 cost up to 3.28x for reasons that
+were "unexplained".
+
+There is nothing unexplained. scripts/sp3.cpp prints the plan `derive_shape_params`
+produces for a forced S at M=4096 K=2048 (cand_hi is the three-sigma upper edge of
+the candidate count, sigma is how many of those fit between the expected count and
+the cap):
+
+    N=262144    S    margin   rank    cap   cand_hi  hi/cap  sigma
+              4096   2.129     68    8192     5945   0.726   7.25
+              6656   1.712     89    8192     4622   0.564  12.61
+              8192   1.600    102    8192     4248   0.519  15.18
+             10304   1.502    120    4096     3916   0.956   3.64
+             12480   1.436    140    4096     3688   0.900   4.64
+             14656   1.400    160    4096     3547   0.866   5.43
+             16384   1.400    179    4096     3510   0.857   5.74   <- shipped
+
+The cap HALVES between S=8192 and S=10304. A smaller S forces `auto_margin` up,
+and a larger margin is what buys the bigger cap; once the margin settles to 1.4-1.5
+the cap drops to PHASE_C_CAP and the headroom goes with it. S=10304 lands at 0.956
+of the cap with 3.64 sigma, which is the same corner CAP_SAFE_FILL was introduced
+to remove at N=524288 (3.09 sigma, 1.2% of rows to the exact fallback at ~350us
+flat). The 3.28x is that fallback, not a mystery.
+
+`sample_stride_exact` is NOT the discriminator -- all seven S above are exact --
+and neither is align_sample_s, which only rounds to a multiple of
+SAMPLE_CHUNK_ELEMS=64, so a request for 10240 is served as 10432.
+
+**What that leaves of the lever.** The only S below the shipped one that keeps the
+cap is 12480-14656. phase_a scales linearly with S and is 124.52us at this shape
+(60.16 read + 64.36 select), so S=12480 buys about 30us, and the margin it forces
+costs 2.6% more candidates for phase_b to write and phase_c to select. That
+matches the 0.9802x measured earlier by interleaved A/B. It is a 2% win bought with
+5.74 -> 4.64 sigma of fallback headroom, and one fallback row costs ~350us flat.
+Not taken.
+
+**Separate finding worth acting on.** The shipped rule-0 plans at N=131072 and
+N=262144 both sit at 0.857 of the cap -- ABOVE the CAP_SAFE_FILL = 0.85 that this
+repo already applies elsewhere. That constant was added to rule 1's acceptance in
+`derive_sample_s_for_n` only; rule 0, which serves every M > 32, has never been
+checked against it. bench/fbrate.py found no fallback rows at those widths, so
+this is a latent margin rather than a live bug, but the two paths disagree about
+what "safe fill" means and only one of them is enforced.
