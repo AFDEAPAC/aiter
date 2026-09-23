@@ -2426,3 +2426,43 @@ rows at those widths agrees.
 What this means for anyone touching `derive_cap` or `CAP_SAFE_FILL`: the invariant
 to preserve is the sigma, and 0.85 is only the fill that happens to produce ~4.9
 sigma at rule 1's operating point. Do not port the constant across rules.
+
+## A stale JIT module in ONE arm of a pair, and it is not the one you clear
+## (gfx950, 2026-09-23)
+
+`arch_scope: gfx950`. aiter's topk backends do not all live in the same JIT
+module. `top_k_per_row_prefill_sampled` is `module_top_k_per_row`; the `plain`
+backend is `module_topk_plain`. A sweep harness that clears only the first will
+happily measure a months-old `plain` kernel.
+
+How it showed up: after rebasing onto six new upstream commits, a paired sweep
+reported 41 cells at N <= 32769 running 1.30x to 1.47x SLOWER on the
+with-changes arm than on the baseline arm -- on a backend the changes do not
+touch. Both arms reported `pick=plain`, so it was not routing.
+
+It was the build. `module_topk_plain.so` in the with-changes worktree was dated
+23:15 the previous night; the baseline worktree had been recreated that afternoon
+and so built it fresh from the new upstream source. Three of the six upstream
+commits are exactly that kernel ("Hold short rows in registers instead of
+re-reading them each pass", "Stage pass 1 candidates during the pass 0 scan",
+"Find the crossing bucket without a block-wide prefix scan"), and they are worth
+1.3x-1.4x at those widths. The with-changes arm was running the code from BEFORE
+them while being compared against the code AFTER them.
+
+`csrc/kernels/topk_per_row_kernels.cu` was byte-identical between the two
+worktrees, which is what makes this one nasty: the source diff is clean and the
+binary is not.
+
+Two rules that follow:
+
+- Clear EVERY module the sweep can dispatch to, not the one under test:
+  `rm -rf $AITER/aiter/jit/build/module_top*k* $AITER/aiter/jit/module_top*k*.so`.
+  `ls` what is left afterwards and put it in the log.
+- A regression on a backend the change cannot reach is a harness bug until
+  proven otherwise. The tell here was that every run of the night, including all
+  three pre-change baselines, agreed with each other and ONLY the freshly built
+  worktree disagreed.
+
+This is the same class as the `.evo/config-v5.yaml` note about `make` reporting
+"Nothing to be done" and a stale binary being measured and then stored as a
+baseline. Different door, same room.
