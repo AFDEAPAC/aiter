@@ -2466,3 +2466,35 @@ Two rules that follow:
 This is the same class as the `.evo/config-v5.yaml` note about `make` reporting
 "Nothing to be done" and a stale binary being measured and then stored as a
 baseline. Different door, same room.
+
+## Unrolling phase_c's candidate read is worth nothing (gfx950, 2026-09-23)
+
+`arch_scope: gfx950`. An ATT trace of phase_c at m=4096 n=131072, decoded with
+line tables, attributes 20.8% of the kernel's latency to `s_waitcnt vmcnt(0)`
+feeding `s_keys_ext[i] = fp32_to_sortable_bits((uint32_t)(p >> 32))` -- the read
+of the candidate array. The same lever that paid in phase_a's sampler (PA_UNROLL,
+0.9875x) does nothing here:
+
+    PC_UNROLL      1       2       4       8
+    m=512  n=131072   14.24   14.27   14.40   14.31   (phase_c us)
+    m=256  n=262144   10.61   10.50   10.58   10.53
+    m=4096 n=131072   71.87   71.28   72.14   71.98
+
+Why the two differ: phase_a's sampler had ONE load per thread, so the block waited
+out a single round trip with nothing else issued. phase_c's loop already shows
+four distinct load sites in the trace, and c is about 2867 against a 1024-thread
+block, so it runs three iterations that the compiler has already overlapped. The
+20.8% is the latency of the read, not a missing overlap.
+
+Narrowing phase_c's block does not help either -- the auto width already matches
+the best explicit one at every shape measured, and 256 threads is much worse:
+
+    phase_c us       auto     256     512    1024
+    m=512  n=131072  14.33   20.13   14.96   14.36
+    m=64   n=1048576 12.84   26.70   17.17   12.85
+    m=4096 n=131072  71.86   92.28   72.02   92.92
+
+The remaining 23.6% of phase_c is `s_barrier`, 16.1% of it the one inside
+`block_find_pivot_bucket_wave0` where fifteen of sixteen waves wait while wave 0
+walks 256 buckets. That scan is already four buckets per lane plus a six-step
+shuffle; the cost is the block-wide synchronisation, not the scan.
