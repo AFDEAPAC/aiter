@@ -2244,3 +2244,46 @@ not avoiding pollution. Request counts would settle it; they were not measured.
 Either way the rule "this read is streamed, so make it non-temporal" does not
 survive contact: it won by up to 11.6% one kernel earlier and lost by up to 17.2%
 here, in the same pipeline, on the same data.
+
+## Fusing phase_b into phase_c: the prize is real and the entry price is higher
+## (gfx950, 2026-09-23)
+
+`arch_scope: gfx950`. Closes the direction the entry above pointed at. k=2048
+--dist gaussian --seed 0, three-kernel device total, upper three quartiles of 20
+launches, measured on top of the shipped non-temporal loads.
+
+**The prize, priced from both ends.** ABLATE_EPI=1 removes phase_b's candidate
+write; ABLATE_CREAD=1 removes phase_c's read of the same array. Both give wrong
+results and exist only to price the pair a fused kernel would delete:
+
+    M     N         shipped   no write   no read    neither
+    4096  131072    556.93     464.11     536.74     453.88   -103.1us  0.815x
+    4096  262144    974.84     852.62     954.56     840.78   -134.1us  0.862x
+    1024  524288    433.82     412.33     427.13     401.17    -32.7us  0.925x
+
+**The price.** Keeping candidates in LDS means one block owns the whole row, so
+coop_g=1. phase_b alone, against the shipped coop_g=8 at 512 threads:
+
+    M     N         g8 b512   g1 b512   g1 b1024   g2 b1024
+    4096  131072     417.22    505.72      n/a       447.97
+    4096  262144     778.65    982.00      n/a       852.06
+    1024  524288     365.89    546.36      n/a       391.08
+
+coop_g=1 costs +88.5us at N=131072 and +203.4us at N=262144, against prizes of
+103.1us and 134.1us. It is a wash at the first width and a clear loss at the
+second. 1024 threads with WSTAGE_WAVES raised to 16 does not launch at coop_g=1
+(it does at coop_g=2, so it is not the staging buffer); coop_g=2 is cheap
+(+30.8us, +73.4us) but splits a row's candidates across two blocks, which is
+exactly what fusion cannot have.
+
+Worse at small M: m=128 n=1048576 goes 86.54us to 351.84us at coop_g=1, 4.07x,
+because 128 rows give 128 blocks for 256 CUs.
+
+[unverified hypothesis] why coop_g=1 is slower when occupancy is full either way
+(4096 blocks is 16 per CU, and only 4 fit at once): granularity. coop_g=8 puts
+32768 blocks through 1024 concurrent slots, 32 waves of blocks, so the ragged
+last wave is 1/32 of the run; coop_g=1 gives 4 waves and a tail worth 1/4. Not
+measured -- a block-start/end timestamp histogram would settle it.
+
+**Conclusion.** Fusion is closed at these widths. It would need a coop_g=1 read
+that costs less than 100us more than coop_g=8, and nothing tried here gets close.

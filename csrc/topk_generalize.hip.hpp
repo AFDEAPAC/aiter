@@ -464,6 +464,17 @@ __global__ void phase_c_select_contig(const float* __restrict__ input, int pitch
   const int c = (int)c_raw;
   const uint64_t* base = cand_pack + (size_t)row * cap;
 
+  // Prices the other half of fusing phase_b into phase_c: if the candidates were
+  // already in this block's LDS, this read would not happen. Wrong results.
+#ifndef ABLATE_CREAD
+#define ABLATE_CREAD 0
+#endif
+#if ABLATE_CREAD
+  for (int i = threadIdx.x; i < c; i += blockDim.x) {
+    s_keys_ext[i] = (uint32_t)i;
+    if (!keys_only) s_idx[i] = i;
+  }
+#else
   for (int i = threadIdx.x; i < c; i += blockDim.x) {
 #if NT_CAND
     // The candidate array is read once here and never again, and phase_b now
@@ -476,6 +487,7 @@ __global__ void phase_c_select_contig(const float* __restrict__ input, int pitch
     s_keys_ext[i] = fp32_to_sortable_bits((uint32_t)(p >> 32));
     if (!keys_only) s_idx[i] = (int)(uint32_t)p;
   }
+#endif
   __syncthreads();
 
   uint32_t pivot;
