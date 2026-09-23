@@ -2062,3 +2062,59 @@ m=2048 from 59.3% of the pipe101 floor to 60.6% and m=4096 from 60.7% to 61.8%.
 At N=131072 the gains are real but 0.5-2%, and flip nothing. So this is worth
 perhaps two pow2 cells, not a regime change -- weigh that against the cliff
 before spending on it.
+
+## phase_b's 100us is the epilogue's candidate write, and neither alignment nor
+## the thread map can reach it (gfx950, 2026-09-23)
+
+`arch_scope: gfx950`. m=4096 k=2048 --dist gaussian --seed 0, phase_b device time
+from rocprofv3 --kernel-trace, upper three quartiles of 20 launches.
+
+Two earlier readings in this file are WRONG and are corrected here.
+
+**Correction 1 -- the ABLATE_COMPACT prices above are void.** `scripts/price_compact.sh`
+ran `EXTRA="-DABLATE_COMPACT=$A" make -j`, and the Makefile never reads `$EXTRA`.
+make succeeded, so the `||` hipcc fallback never fired and all three arms built the
+SAME binary. "prefix arithmetic free, compaction ds_write free" was three runs of
+the shipped kernel. Rebuilt with hipcc carrying the define, the staging ds_write is
+24.8us at n=131072 and 29.6us at n=262144 -- real, not free.
+
+**Correction 2 -- ABLATE_EPI=3 is not an alignment ceiling.** It points every wave's
+dst at `row_base`, which shrinks the footprint eightfold and lets the eight stores
+overwrite each other. Its 56.0us/128.9us prices a smaller write. The honest version
+(ABLATE_EPI=6: full footprint, same line count, head rounded down to 128B) is worth
+NOTHING -- 459.81 against 457.14 at n=131072.
+
+**Where the time is.** The cost lives in the epilogue, not in the filter loop. Every
+ABLATE_DRAIN variant missed it because COOP_DRAIN_WAVE is `#undef`'d before the
+epilogue and the epilogue carries its own inline copy loop.
+
+    variant                                     n=131072   n=262144
+    shipped                                       461.28     868.39
+    no epilogue copy loop        (ABLATE_EPI=1)   362.99     715.25
+    no epilogue at all           (ABLATE_EPI=2)   332.79     678.22
+    th=+inf, nothing passes      (ABLATE_TH=1)    340.63     694.65
+
+The copy loop is 98.3us and 153.1us. The rest of the epilogue -- two __syncthreads,
+the serial prefix over waves, one block atomicAdd -- is 30.2us and 37.0us.
+
+`--margin 0.02` is NOT a valid "nothing passes" control: derive_shape_params feeds
+margin into `rank` (:130) and `cap` (:131), so it moves the configuration as well as
+the branch. ABLATE_TH=1 sets `th = INFINITY` inside phase_b and leaves every
+host-side parameter alone; it reads 340.63 where --margin 0.02 read 363.42.
+
+**Two levers tried on the copy, both nearly worthless.**
+
+    one block-wide contiguous walk (ABLATE_EPI=5, CORRECT, 5-dist PASS)  -6.0us  -5.1us
+    per-wave parallel copy         (ABLATE_EPI=4, CORRECT)             -12.8us  -8.2us
+    head forced to a 128B boundary (ABLATE_EPI=6, wrong results)         +2.7us  -2.4us
+
+s_off is a prefix sum, so `row_base + s_base + s_off[w]` over consecutive w is
+already ONE contiguous run; the eight-chunk walk only restarts the thread-to-address
+map inside it. Collapsing that to a single walk is correct and measurable but small.
+
+**What is left is bytes.** ~2867 candidates per row (margin 1.4 x K=2048) x 4096 rows
+x 8B = 93.9MB in 98.3us = 0.96 TB/s, against 5.93 TB/s for phase_b's 2.148GB of
+reads. That is the same write-costs-5.6x-read-per-byte the anchor ledger recorded,
+so the copy is not mis-issued -- it is paying the box's write price for every byte.
+Alignment, the thread map, and the number of passes are all closed. Only fewer bytes
+move this: a narrower candidate record, or fewer candidates.

@@ -72,7 +72,15 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
   const int row = blockIdx.y;
   const int len = row_len_of<RAGGED>(row, pitch, extents);
   const float* ri = input + (size_t)row * pitch + (RAGGED ? extents.row_start(row, pitch) : 0);
+#if ABLATE_TH == 1
+  // Nothing passes, with EVERY host-side parameter left alone. The --margin 0.02
+  // reference reached the same branch outcome by moving the threshold from the
+  // host, which also moves rank and cap; this moves only the value phase_b
+  // compares against, so the two runs are the same code path on the same grid.
+  const float th = INFINITY;
+#else
   const float th = threshold_f[row];
+#endif
   const int lane = threadIdx.x & (WAVE_SIZE - 1);
   const int wid = threadIdx.x / WAVE_SIZE;
   const int nwaves = blockDim.x / WAVE_SIZE;
@@ -110,17 +118,53 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
 #define ABLATE_COMPACT 0
 #endif
 
+// Separating the drain. ABLATE_COMPACT below showed the compaction's prefix
+// arithmetic and its ds_write are both free, which leaves the drain as the whole
+// of the 100.35us (m=4096 n=131072) that disappears when nothing passes the
+// threshold. The drain does three things at once -- a global atomicAdd, an LDS
+// READ of the staged entry, and a global write -- so "it is the write" was an
+// inference from an older control kernel, not a measurement. These split it.
+//
+//   1 = write a constant instead of buf[_j]: the global write stays, the LDS
+//       read goes.  (shipped - this) = the LDS read.
+//   2 = skip the copy loop entirely: both go, the atomicAdd stays.
+//       (1 - this) = the global write.
+//
+// Both give wrong results and exist only to price a half.
+// 3 = replace the reservation atomic with a fixed offset (wrong results). The
+//     other three ablations each removed one job of the drain and NONE of them
+//     moved the clock: prefix arithmetic free, compaction ds_write free, drain
+//     LDS read free, drain global write free -- yet the 100.35us still vanishes
+//     when no candidate passes. This is what is left. `cand_reserved[row]` is
+//     ONE 4-byte address per row and coop_g=8 blocks x 8 waves = 64 waves
+//     contend for it.
+#ifndef ABLATE_DRAIN
+#define ABLATE_DRAIN 0
+#endif
+#if ABLATE_DRAIN == 3
+#define COOP_RESERVE(row, n) ((unsigned)0)
+#else
+#define COOP_RESERVE(row, n) atomicAdd(&cand_reserved[row], (unsigned)(n))
+#endif
+#if ABLATE_DRAIN == 1
+#define COOP_DRAIN_BODY(off)   for (int _j = lane; _j < bcnt; _j += WAVE_SIZE) row_base[(off) + _j] = 1ull
+#elif ABLATE_DRAIN == 2
+#define COOP_DRAIN_BODY(off) do { } while (0)
+#else
+#define COOP_DRAIN_BODY(off)   for (int _j = lane; _j < bcnt; _j += WAVE_SIZE) row_base[(off) + _j] = buf[_j]
+#endif
+
 #define COOP_DRAIN_WAVE()                                                          \
   do {                                                                             \
     unsigned _off = 0;                                                             \
-    if (lane == 0) _off = atomicAdd(&cand_reserved[row], (unsigned)bcnt);           \
+    if (lane == 0) _off = COOP_RESERVE(row, bcnt);                                   \
     _off = (unsigned)__shfl((int)_off, 0);                                          \
     if (_off + (unsigned)bcnt > (unsigned)cap) {                                    \
       if (lane == 0) atomicExch(&cand_bad[row], 1u);                                \
       bcnt = -1;                                                                    \
       break;                                                                        \
     }                                                                               \
-    for (int _j = lane; _j < bcnt; _j += WAVE_SIZE) row_base[_off + _j] = buf[_j];  \
+    COOP_DRAIN_BODY(_off);                                                          \
     bcnt = 0;                                                                       \
   } while (0)
 
@@ -138,6 +182,14 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
     const int t1 = t0 + __popcll(b1);
     const int t2 = t1 + __popcll(b2);
     const int wtotal = t2 + __popcll(b3);
+#if ABLATE_COMPACT == 3
+    // Everything the branch guards, gone -- with the REAL threshold and the real
+    // shape parameters. The 363.52us reading it is compared against came from
+    // --margin 0.02, which changes the threshold to get the same branch outcome;
+    // this reproduces the outcome without touching any parameter, so whatever
+    // separates 363 from 463 has nowhere else to hide.
+    (void)wtotal;
+#else
     if (wtotal > 0) {
 #if ABLATE_COMPACT == 1
       if (b0 & (1ull << lane))
@@ -169,16 +221,44 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
 #endif
       bcnt += wtotal;
     }
+#if ABLATE_DRAIN == 4
+    // The drain CHECK itself, gone: no wave_barrier, no drain. The 2x2 leaves
+    // 76us unaccounted after both the staging write and the drain copy are
+    // removed, and __builtin_amdgcn_wave_barrier() fires every ~11 iterations
+    // (bcnt passes 64 at ~5.6 passers per wave-iteration). It is a scheduling
+    // barrier, so it stops the compiler hoisting the next loads past it.
+    (void)0;
+#else
     if (bcnt > WSTAGE_CAP - 4 * WAVE_SIZE) {
       __builtin_amdgcn_wave_barrier();
       COOP_DRAIN_WAVE();
     }
+#endif
+#endif
   }
 #undef COOP_DRAIN_WAVE
 
+
+// The epilogue, priced. Every ABLATE_DRAIN variant above missed this block:
+// COOP_DRAIN_WAVE is #undef'd before it, so the epilogue carries its own copy
+// loop. It is also the only thing the ABLATE_TH=1 control removes that the
+// ablations did not -- with nothing passing, total==0 sets s_base to 0xFFFFFFFE
+// and every block returns at the guard below, skipping all of it.
+//
+//   1 = skip the final LDS->global copy loop: the candidate write goes, the two
+//       __syncthreads, the serial prefix over waves and the block atomicAdd stay.
+//   2 = return right after the filter loop: the whole epilogue goes.
+// Both give wrong results and exist only to price a half.
+#ifndef ABLATE_EPI
+#define ABLATE_EPI 0
+#endif
+#if ABLATE_EPI == 2
+  return;
+#endif
   __shared__ int s_local[MAX_WAVES_PER_BLOCK];
   __shared__ int s_off[MAX_WAVES_PER_BLOCK];
   __shared__ unsigned s_base;
+  __shared__ int s_tot;
   if (lane == 0) s_local[wid] = bcnt;
   __syncthreads();
   if (threadIdx.x == 0) {
@@ -197,6 +277,7 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
     } else if (total == 0) {
       s_base = 0xFFFFFFFEu;
     } else {
+      s_tot = total;
       s_base = atomicAdd(&cand_reserved[row], (unsigned)total);
       if (s_base + (unsigned)total > (unsigned)cap) {
         atomicExch(&cand_bad[row], 1u);
@@ -207,6 +288,56 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
   __syncthreads();
   if (s_base == 0xFFFFFFFFu || s_base == 0xFFFFFFFEu) return;
 
+#if ABLATE_EPI == 3
+  // Price the misalignment alone: same bytes, same passes, but every wave
+  // writes from the row base, which cap=4096 uint64 makes 32 KB aligned.
+  // Wrong results (the waves overwrite each other) -- pricing only.
+  for (int w = 0; w < nwaves; w++) {
+    const int cnt = s_local[w];
+    if (cnt <= 0) continue;
+    uint64_t* dst = row_base;
+    const uint64_t* src = wbuf + (size_t)w * WSTAGE_CAP;
+    for (int j = threadIdx.x; j < cnt; j += blockDim.x) dst[j] = src[j];
+  }
+#elif ABLATE_EPI == 4
+  // CORRECT, not an ablation: each wave copies its own staged run, so the eight
+  // runs go out at once instead of the block walking them one after another.
+  // Same bytes to the same addresses; only the thread-to-element map changes.
+  {
+    const int cnt = s_local[wid];
+    if (cnt > 0) {
+      uint64_t* dst = row_base + s_base + s_off[wid];
+      for (int j = lane; j < cnt; j += WAVE_SIZE) dst[j] = buf[j];
+    }
+  }
+#elif ABLATE_EPI == 6
+  // Alignment ONLY, priced honestly. ABLATE_EPI=3 was not a valid ceiling: it
+  // sent all eight waves to row_base, which shrinks the footprint eightfold and
+  // lets the stores overwrite each other, so its 56.0us/128.9us measured a
+  // smaller write, not an aligned one. This keeps the full footprint and the
+  // same number of distinct lines, and only rounds the head down to a 128-byte
+  // boundary. Wrong results (it shifts the run) -- pricing only.
+  for (int j = threadIdx.x; j < s_tot; j += blockDim.x) {
+    int w = 0;
+    while (w + 1 < nwaves && j >= s_off[w + 1]) w++;
+    row_base[(s_base & ~15u) + j] = wbuf[(size_t)w * WSTAGE_CAP + (j - s_off[w])];
+  }
+#elif ABLATE_EPI == 5
+  // CORRECT, not an ablation. s_off is a prefix sum, so row_base + s_base +
+  // s_off[w] for consecutive w is already one contiguous run of s_tot entries.
+  // Walking it in eight per-wave chunks restarts the thread-to-address map eight
+  // times, and each restart puts a 512-byte wave store on an arbitrary boundary.
+  // Aligning dst (ABLATE_EPI=3, wrong results) was worth 56.0us at m=4096
+  // n=131072 and 128.9us at n=262144, which is 57% and 84% of the whole copy.
+  // One block-wide walk leaves a single unaligned head instead of eight, writes
+  // the same bytes to the same addresses, and needs no padding, so phase_c's
+  // contiguous [0, cand_reserved[row]) scan is untouched.
+  for (int j = threadIdx.x; j < s_tot; j += blockDim.x) {
+    int w = 0;
+    while (w + 1 < nwaves && j >= s_off[w + 1]) w++;
+    row_base[s_base + j] = wbuf[(size_t)w * WSTAGE_CAP + (j - s_off[w])];
+  }
+#elif ABLATE_EPI != 1
   for (int w = 0; w < nwaves; w++) {
     const int cnt = s_local[w];
     if (cnt <= 0) continue;
@@ -214,6 +345,7 @@ __global__ void phase_b_filter_coop(const float* __restrict__ input, int pitch,
     const uint64_t* src = wbuf + (size_t)w * WSTAGE_CAP;
     for (int j = threadIdx.x; j < cnt; j += blockDim.x) dst[j] = src[j];
   }
+#endif
 }
 
 template <bool RAGGED, bool WRITE_VALUES>
