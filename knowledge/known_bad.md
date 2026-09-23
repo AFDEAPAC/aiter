@@ -2641,3 +2641,41 @@ could share one word, but `block_select_lds` is also called with `len` as the
 count (topk_generalize.hip.hpp:44), where `above` can exceed 65535. A bound check
 on that caller, or a second word only on the paths that need it, would make the
 exit free to evaluate and the large-M win real.
+
+## Correction: the non-power-of-two failure had ONE mechanism, not two
+## (gfx950, 2026-09-24)
+
+`arch_scope: gfx950`. The commit that gated the plain dispatch on
+`N % FP32_EPT == 0`, and the entry above, both say a second mechanism must exist
+because "dropping at most three columns cannot produce 72.5% wrong elements".
+That reasoning is wrong and so is the conclusion.
+
+`scripts/probe72.py` asks the output which story it tells, with the gate removed
+in a throwaway worktree:
+
+    N=131072  bad_vs_full=0    bad_vs_trunc=0  in_tail=0  dup=0  worst_rank=2048
+    N=131075  bad_vs_full=522  bad_vs_trunc=0  in_tail=0  dup=0  worst_rank=2049
+    N=131077  bad_vs_full=0    bad_vs_trunc=0  in_tail=0  dup=0  worst_rank=2048
+
+At N=131075 the answer is EXACTLY torch.topk over the first 131072 columns --
+`bad_vs_trunc` is 0 -- and the smallest value returned is the 2049th largest of
+the full row. One element of the true top-2048 fell in the three columns the
+plain path never read, so the answer is the true set minus that one plus rank
+2049.
+
+The 522 and the 72.5% are an artefact of the CHECK, not the kernel. It compared
+two sorted value sequences element by element; removing one element from the
+middle of a ranking shifts everything below it by one position, so a single
+missing element reports as hundreds of mismatches. `worst_rank` is the number
+that says what actually happened, and it says 2049.
+
+That also explains why the failures looked like they were not a function of
+`N mod 4`: whether a top-k element lands in the dropped tail is data-dependent.
+131079 and 524291 are 3 mod 4 and were correct for the same reason a coin can
+come up heads -- the tail happened to hold nothing worth keeping.
+
+**Consequences.** The gate is still correct and still the right thing to have
+shipped first. But it is more conservative than it needs to be: the row-width
+restriction can be lifted by reading the tail rather than by refusing the path.
+Do not repeat the "this magnitude is impossible, so there must be more" step
+without first asking the output what kind of wrong it is.
