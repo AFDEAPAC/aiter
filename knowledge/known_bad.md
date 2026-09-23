@@ -2399,3 +2399,30 @@ load-only ablation reaches -- 93% of its own read floor. Against a pure
 read-the-input-once floor of 724us the pipeline is at 74%, and the 251us of
 difference is phase_a's read (60) and select (63), phase_c (72), and phase_b's own
 overhead (54). There is no large single item left at this shape.
+
+### Correction to the rule-0 / CAP_SAFE_FILL flag above
+
+The entry above flagged that the shipped rule-0 plans at N=131072 and N=262144 sit
+at 0.857 of the cap, above the CAP_SAFE_FILL = 0.85 that rule 1 enforces, and
+called it a latent margin. That framing is wrong and the direction is backwards.
+
+Fill is a proxy for the quantity that actually decides whether a row falls back,
+which is how many standard deviations of the candidate count fit between its
+expected value and the cap. The same fill maps to a different sigma at a different
+operating point, so the two rules cannot share the constant:
+
+    plan                                    fill    sigma
+    rule 0, N=131072, S=8192   (shipped)    0.857    5.74
+    rule 0, N=262144, S=16384  (shipped)    0.857    5.74
+    rule 1, N=524288, after CAP_SAFE_FILL   0.849    4.94
+    rule 1, N=524288, before  (1.2% fell back) 0.991  3.09
+
+Rule 0's two points are SAFER in sigma than the rule-1 point CAP_SAFE_FILL
+explicitly accepts. Applying the constant to rule 0 would force the cap from 4096
+to 8192 -- doubling phase_c's LDS -- to fix a margin that is already wider than
+the one the constant was written to produce. bench/fbrate.py finding no fallback
+rows at those widths agrees.
+
+What this means for anyone touching `derive_cap` or `CAP_SAFE_FILL`: the invariant
+to preserve is the sigma, and 0.85 is only the fill that happens to produce ~4.9
+sigma at rule 1's operating point. Do not port the constant across rules.
