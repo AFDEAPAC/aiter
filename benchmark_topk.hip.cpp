@@ -1182,14 +1182,20 @@ static void topk_fused_impl(const float* d_in, int M, int pitch, const int* d_ro
       const bool nt = g_nt_load < 0
                           ? ((size_t)M * (size_t)pitch >= ((size_t)1 << 27))
                           : (g_nt_load != 0);
+      // One WSTAGE_CAP-entry staging slot per wave, and no more: see the
+      // declaration in phase_b_filter_coop for why this is not a constant.
+      const size_t wstage_bytes =
+          (size_t)(g_cf_block / WAVE_SIZE) * WSTAGE_CAP * sizeof(uint64_t);
       if (nt)
-        phase_b_filter_coop<RAGGED, true><<<dim3(sp.coop_g, M), g_cf_block, 0, s>>>(
-            d_in, pitch, ext, n4, b.threshold_f, b.cand_pack, b.cand_reserved, b.cand_bad,
-            cap);
+        phase_b_filter_coop<RAGGED, true>
+            <<<dim3(sp.coop_g, M), g_cf_block, wstage_bytes, s>>>(
+                d_in, pitch, ext, n4, b.threshold_f, b.cand_pack, b.cand_reserved,
+                b.cand_bad, cap);
       else
-        phase_b_filter_coop<RAGGED, false><<<dim3(sp.coop_g, M), g_cf_block, 0, s>>>(
-            d_in, pitch, ext, n4, b.threshold_f, b.cand_pack, b.cand_reserved, b.cand_bad,
-            cap);
+        phase_b_filter_coop<RAGGED, false>
+            <<<dim3(sp.coop_g, M), g_cf_block, wstage_bytes, s>>>(
+                d_in, pitch, ext, n4, b.threshold_f, b.cand_pack, b.cand_reserved,
+                b.cand_bad, cap);
     } else if (g_phase_b == 4) {
       phase_b_filter_wavestage<RAGGED><<<M, g_cf_block, 0, s>>>(
           d_in, pitch, ext, b.threshold_f, b.cand_pack, b.cand_seg, b.cand_count, seg_stride);
