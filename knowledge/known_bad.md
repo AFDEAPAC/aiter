@@ -2679,3 +2679,60 @@ shipped first. But it is more conservative than it needs to be: the row-width
 restriction can be lifted by reading the tail rather than by refusing the path.
 Do not repeat the "this magnitude is impossible, so there must be more" step
 without first asking the output what kind of wrong it is.
+
+## The parameter space at the near-green cells is exhausted (gfx950, 2026-09-24)
+
+`arch_scope: gfx950`. After the folds, 62 of 156 cells at N >= 131072 are at or
+above 60% of the pipe101 floor. The four closest red cells need very little --
+m=1024 n=131073 needs 0.1us, m=64 n=1048576 0.9, m=512 n=131072 1.2, m=1024
+n=131072 4.9 -- so a generic 1.7% would flip three of them. Every knob was tried
+at those exact shapes and none of them gives it.
+
+**A correction first.** An earlier entry reports 1024-thread phase_b blocks at
+0.908x / 0.941x / 0.973x for m=8 n=1048576, m=32 n=1048576 and m=128 n=131072.
+Those compared against a baseline built with `WSTAGE_WAVES_OVERRIDE=16`, which is
+not the shipped configuration -- a global WSTAGE_WAVES of 16 makes EVERY block
+reserve 40 KB of wbuf whether or not it runs 1024 threads, and that alone costs
+7 to 14%: m=4096 n=131072 goes 540.1 to 615.2us, m=128 n=262144 45.1 to 50.6.
+Against the real shipped build the same configurations read:
+
+    shape             W8 auto   W16 best cf1024   vs shipped
+    m=32   n=1048576     50.1      45.9 (g16)       0.9162
+    m=128  n=131072      35.4      34.3 (g4)        0.9689
+    m=1024 n=131072     145.9     145.3 (g4)        0.9959
+    m=8    n=1048576     34.2      34.1 (g32)       0.9971
+    m=64   n=1048576     66.3      66.4 (g8)        1.0015
+    m=2048 n=131072     258.3     267.6 (g4)        1.0360
+    m=512  n=131072      71.4      74.7 (g4)        1.0462
+
+It still wins at two shapes even carrying the penalty, so a template parameter
+would make those real -- but neither of them is near green, and at the four that
+are it gives 0.996x, 1.002x, 1.046x and 0.996x.
+
+**The NT gate's 2^27 is right, not conservative.** Forcing non-temporal loads on
+below it, interleaved three rounds:
+
+    m=512 n=131072 (2^26)  71.40 -> 79.49   1.1133
+    m=256 n=262144 (2^26)  66.05 -> 70.77   1.0715
+    m=128 n=262144 (2^25)  44.53 -> 46.56   1.0456
+    m=64  n=1048576 (2^26) 66.58 -> 67.83   1.0188
+    m=1024 n=131072 (2^27) 145.92 -> 146.07 1.0010  (already on, as a control)
+
+**phase_a's block width is already right.** `--phase-a-block` 256 / 512 / 1024
+against auto at the near-green shapes: auto ties or beats every explicit choice,
+and 256 is 15-70% worse on phase_a. The hope was that a narrower block would give
+PA_UNROLL something to unroll -- at S=8192 with 1024 threads the sample loop runs
+two iterations, so the unroll cannot apply -- but the narrower block costs more
+than the deeper pipeline returns.
+
+**The output gather is already wave-aggregated.** `block_gather_topk` ballots,
+takes ONE `atomicAdd` per wave per iteration for each of the greater-than and
+equal streams, and distributes with a lane prefix. There is no per-element atomic
+to remove.
+
+**What that leaves.** The four near-green cells need 0.07% to 3.4% and no
+parameter reaches them. The structural direction -- fewer kernels, or more blocks
+per row -- is priced in this file: a null kernel is 1.39us at 8 blocks, each
+selecting kernel is about half select and half ramp-plus-fixed-cost, and a
+two-stage split pays the fixed half twice. The remaining red cells need that
+structure to change, not a knob to move.
