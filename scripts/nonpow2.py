@@ -1,4 +1,5 @@
-import torch, aiter
+import aiter
+import torch
 
 print("AITER:", aiter.__file__)
 K = 2048

@@ -1,4 +1,5 @@
-import torch, aiter, os
+import aiter
+import torch
 
 print("AITER:", aiter.__file__)
 K = 2048
@@ -32,7 +33,7 @@ tot = 0
 print("%6s %9s %6s %11s" % ("M", "N", "N%4", "worst_bad"))
 for M in (4, 8, 64):
     for base in (131072, 262144, 524288, 1048576):
-        for off in range(0, 9):
+        for off in range(9):
             N = base + off
             w = check(M, N)
             tot += 1

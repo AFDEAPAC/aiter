@@ -1,4 +1,5 @@
-import torch, aiter
+import aiter
+import torch
 
 print("AITER:", aiter.__file__, flush=True)
 
@@ -35,9 +36,16 @@ for M, N in ((8, 131075), (512, 131072)):
     try:
         a = call(x, 2048, deterministic=True).clone()
         b = call(x, 2048, deterministic=True).clone()
-        print("   m=%-5d n=%-9d same order: %s" % (M, N, bool(torch.equal(a, b))), flush=True)
+        print(
+            "   m=%-5d n=%-9d same order: %s" % (M, N, bool(torch.equal(a, b))),
+            flush=True,
+        )
     except Exception as exc:
-        print("   m=%-5d n=%-9d deterministic=True raised %s" % (M, N, type(exc).__name__), flush=True)
+        print(
+            "   m=%-5d n=%-9d deterministic=True raised %s"
+            % (M, N, type(exc).__name__),
+            flush=True,
+        )
 
 print()
 print("and with sorted=True:")
@@ -48,6 +56,12 @@ for M, N in ((8, 131075),):
     try:
         a = call(x, 2048, sorted=True).clone()
         b = call(x, 2048, sorted=True).clone()
-        print("   m=%-5d n=%-9d same order: %s" % (M, N, bool(torch.equal(a, b))), flush=True)
+        print(
+            "   m=%-5d n=%-9d same order: %s" % (M, N, bool(torch.equal(a, b))),
+            flush=True,
+        )
     except Exception as exc:
-        print("   m=%-5d n=%-9d sorted=True raised %s" % (M, N, type(exc).__name__), flush=True)
+        print(
+            "   m=%-5d n=%-9d sorted=True raised %s" % (M, N, type(exc).__name__),
+            flush=True,
+        )

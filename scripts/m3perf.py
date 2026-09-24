@@ -1,4 +1,7 @@
-import torch, aiter, os
+import os
+
+import aiter
+import torch
 
 K = 2048
 M = int(os.environ.get("M", 512))

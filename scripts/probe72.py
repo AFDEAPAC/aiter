@@ -11,11 +11,9 @@ truncation cannot be the whole story. This asks the output which story it tells:
           more than once?
   spread  where do the returned columns sit -- uniformly, or clustered?
 """
-import os
-
-import torch
 
 import aiter
+import torch
 
 FP32_EPT = 4
 K = 2048
@@ -48,6 +46,8 @@ for N in (131072, 131073, 131075, 131077, 131079, 262147, 262151, 524291):
     allv = x[r].float()
     thresh = float(ref_full[0])
     rank_of_min = int((allv >= float(got[0])).sum())
-    print("N=%-9d n4x4=%-9d bad_vs_full=%-6d bad_vs_trunc=%-6d in_tail=%-3d dup=%-5d "
-          "worst_rank=%d"
-          % (N, n4, bad_full, bad_trunc, in_tail, dup, rank_of_min), flush=True)
+    print(
+        "N=%-9d n4x4=%-9d bad_vs_full=%-6d bad_vs_trunc=%-6d in_tail=%-3d dup=%-5d "
+        "worst_rank=%d" % (N, n4, bad_full, bad_trunc, in_tail, dup, rank_of_min),
+        flush=True,
+    )

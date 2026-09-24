@@ -5,9 +5,9 @@ three-column tail -- one lane inactive in the ballot, three columns staged, and
 the largest chance of an off-by-one at either end of the range. The 390-cell
 performance grid never reaches it: its width offsets are +0, +1 and +2 only.
 """
-import torch
 
 import aiter
+import torch
 
 K = 2048
 FAILS = []
@@ -72,17 +72,46 @@ def check(M, N, dist, ragged=False):
         got = x[r][gi].sort().values
         ref = torch.topk(x[r][:L].float(), take).values.sort().values
         if not torch.equal(got, ref):
-            FAILS.append((M, N, dist, ragged,
-                          "value mismatch row %d, %d of %d" % (r, int((got != ref).sum()), take)))
+            FAILS.append(
+                (
+                    M,
+                    N,
+                    dist,
+                    ragged,
+                    "value mismatch row %d, %d of %d"
+                    % (r, int((got != ref).sum()), take),
+                )
+            )
             return
 
 
 print("AITER:", aiter.__file__, flush=True)
-W3 = [n for n in
-      (131075, 131079, 131083, 131199, 132099, 139267, 163839, 196611,
-       262147, 262151, 262271, 299999, 393215, 524291, 524299, 699999,
-       786431, 999999, 1048579, 1048583)
-      if n % 4 == 3]
+W3 = [
+    n
+    for n in (
+        131075,
+        131079,
+        131083,
+        131199,
+        132099,
+        139267,
+        163839,
+        196611,
+        262147,
+        262151,
+        262271,
+        299999,
+        393215,
+        524291,
+        524299,
+        699999,
+        786431,
+        999999,
+        1048579,
+        1048583,
+    )
+    if n % 4 == 3
+]
 print("widths with N %% 4 == 3 under test: %d" % len(W3), flush=True)
 for N in W3:
     for d in ("gaussian", "all_equal", "tail_is_best", "tail_is_worst"):
@@ -106,7 +135,9 @@ print("  after k sweep: %d cases, %d failures" % (CASES[0], len(FAILS)), flush=T
 for N in (131075, 262147, 524291):
     for d in ("gaussian", "tail_is_best", "with_inf"):
         check(8, N, d, ragged=True)
-print("  after ragged sweep: %d cases, %d failures" % (CASES[0], len(FAILS)), flush=True)
+print(
+    "  after ragged sweep: %d cases, %d failures" % (CASES[0], len(FAILS)), flush=True
+)
 print()
 print("=" * 70)
 print("N %% 4 == 3 focused stress: %d cases, %d FAILURES" % (CASES[0], len(FAILS)))

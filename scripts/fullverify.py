@@ -11,12 +11,12 @@ Three invariants per (M, N, k, distribution, dispatch path):
 The path matters as much as the shape: the regression this gate exists for was
 correct on the ragged path and wrong on the plain one at the same width.
 """
+
 import os
 import sys
 
-import torch
-
 import aiter
+import torch
 
 FAILS = []
 CASES = [0]
@@ -43,7 +43,9 @@ def make(M, N, dist, seed=0):
     if dist == "ascending":
         return torch.arange(N, device="cuda", dtype=torch.float32).repeat(M, 1)
     if dist == "descending":
-        return torch.arange(N - 1, -1, -1, device="cuda", dtype=torch.float32).repeat(M, 1)
+        return torch.arange(N - 1, -1, -1, device="cuda", dtype=torch.float32).repeat(
+            M, 1
+        )
     if dist == "negative":
         return -torch.rand(M, N, device="cuda", dtype=torch.float32) - 1.0
     if dist == "with_inf":
@@ -72,7 +74,9 @@ def check(M, N, k, dist, ragged):
     try:
         idx = call(x, k, end)
     except Exception as exc:
-        FAILS.append((M, N, k, dist, ragged, "raised " + type(exc).__name__, str(exc)[:80]))
+        FAILS.append(
+            (M, N, k, dist, ragged, "raised " + type(exc).__name__, str(exc)[:80])
+        )
         return
     if idx.dtype is not torch.int32:
         FAILS.append((M, N, k, dist, ragged, "dtype", str(idx.dtype)))
@@ -81,23 +85,50 @@ def check(M, N, k, dist, ragged):
         take = min(k, L)
         gi = idx[r][:take].to(torch.int64)
         if int(gi.min()) < 0 or int(gi.max()) >= L:
-            FAILS.append((M, N, k, dist, ragged, "index outside [0,%d) row %d" % (L, r),
-                          "min %d max %d" % (int(gi.min()), int(gi.max()))))
+            FAILS.append(
+                (
+                    M,
+                    N,
+                    k,
+                    dist,
+                    ragged,
+                    "index outside [0,%d) row %d" % (L, r),
+                    "min %d max %d" % (int(gi.min()), int(gi.max())),
+                )
+            )
             return
         if int(torch.unique(gi).numel()) != take:
-            FAILS.append((M, N, k, dist, ragged, "duplicate index row %d" % r,
-                          "%d distinct of %d" % (int(torch.unique(gi).numel()), take)))
+            FAILS.append(
+                (
+                    M,
+                    N,
+                    k,
+                    dist,
+                    ragged,
+                    "duplicate index row %d" % r,
+                    "%d distinct of %d" % (int(torch.unique(gi).numel()), take),
+                )
+            )
             return
         got = x[r][gi].sort().values
         ref = torch.topk(x[r][:L].float(), take).values.sort().values
         if not torch.equal(got, ref):
-            FAILS.append((M, N, k, dist, ragged, "value mismatch row %d" % r,
-                          "%d of %d" % (int((got != ref).sum()), take)))
+            FAILS.append(
+                (
+                    M,
+                    N,
+                    k,
+                    dist,
+                    ragged,
+                    "value mismatch row %d" % r,
+                    "%d of %d" % (int((got != ref).sum()), take),
+                )
+            )
             return
 
 
 def banner(t):
-    print("\n=== %s ===" % t, flush=True)
+    print(f"\n=== {t} ===", flush=True)
     print("   %d cases, %d failures so far" % (CASES[0], len(FAILS)), flush=True)
 
 
@@ -106,16 +137,53 @@ S = os.environ.get("STAGE", "all")
 
 if S in ("all", "1"):
     banner("1. every residue mod 4 near each routing-relevant width, 9 distributions")
-    for N in (131072, 131073, 131074, 131075, 131076, 131077, 131078, 131079,
-              262144, 262147, 262151, 524288, 524291, 1048576, 1048579):
-        for d in ("gaussian", "uniform", "all_equal", "two_values", "ascending",
-                  "descending", "negative", "with_inf", "tiny_spread"):
+    for N in (
+        131072,
+        131073,
+        131074,
+        131075,
+        131076,
+        131077,
+        131078,
+        131079,
+        262144,
+        262147,
+        262151,
+        524288,
+        524291,
+        1048576,
+        1048579,
+    ):
+        for d in (
+            "gaussian",
+            "uniform",
+            "all_equal",
+            "two_values",
+            "ascending",
+            "descending",
+            "negative",
+            "with_inf",
+            "tiny_spread",
+        ):
             check(8, N, 2048, d, False)
 
 if S in ("all", "2"):
     banner("2. widths nowhere near a power of two")
-    for N in (130000, 131071, 133337, 150001, 199999, 262143, 300007, 500009,
-              524287, 700001, 999983, 1000000, 1048575):
+    for N in (
+        130000,
+        131071,
+        133337,
+        150001,
+        199999,
+        262143,
+        300007,
+        500009,
+        524287,
+        700001,
+        999983,
+        1000000,
+        1048575,
+    ):
         for d in ("gaussian", "all_equal", "with_inf"):
             check(8, N, 2048, d, False)
 
@@ -146,9 +214,19 @@ if S in ("all", "6"):
 
 if S in ("all", "7"):
     banner("7. large M, the shapes the customer grid uses")
-    for M, N in ((1024, 131072), (1024, 131075), (2048, 131072), (2048, 262147),
-                 (4096, 131072), (4096, 131075), (512, 524288), (512, 524291),
-                 (256, 1048576), (256, 1048579), (128, 1048576)):
+    for M, N in (
+        (1024, 131072),
+        (1024, 131075),
+        (2048, 131072),
+        (2048, 262147),
+        (4096, 131072),
+        (4096, 131075),
+        (512, 524288),
+        (512, 524291),
+        (256, 1048576),
+        (256, 1048579),
+        (128, 1048576),
+    ):
         for d in ("gaussian", "all_equal"):
             check(M, N, 2048, d, False)
 
@@ -166,15 +244,33 @@ if S in ("all", "8"):
         b = call(x, 2048).clone().to(torch.int64)
         CASES[0] += 1
         if not torch.equal(a.sort(dim=1).values, b.sort(dim=1).values):
-            FAILS.append((M, N, 2048, "gaussian", False, "column set not stable",
-                          "%d rows differ" % int((a.sort(dim=1).values
-                                                  != b.sort(dim=1).values).any(1).sum())))
+            FAILS.append(
+                (
+                    M,
+                    N,
+                    2048,
+                    "gaussian",
+                    False,
+                    "column set not stable",
+                    "%d rows differ"
+                    % int((a.sort(dim=1).values != b.sort(dim=1).values).any(1).sum()),
+                )
+            )
             continue
         va = torch.gather(x, 1, a).sort(dim=1).values
         vb = torch.gather(x, 1, b).sort(dim=1).values
         if not torch.equal(va, vb):
-            FAILS.append((M, N, 2048, "gaussian", False, "value multiset not stable",
-                          "%d of %d differ" % (int((va != vb).sum()), va.numel())))
+            FAILS.append(
+                (
+                    M,
+                    N,
+                    2048,
+                    "gaussian",
+                    False,
+                    "value multiset not stable",
+                    "%d of %d differ" % (int((va != vb).sum()), va.numel()),
+                )
+            )
 
 print()
 print("=" * 78)

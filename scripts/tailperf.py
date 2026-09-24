@@ -1,4 +1,7 @@
-import torch, aiter, collections, csv, glob, os, subprocess
+import os
+
+import aiter
+import torch
 
 K = 2048
 M = int(os.environ.get("M", 512))

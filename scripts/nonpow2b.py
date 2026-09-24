@@ -1,4 +1,7 @@
-import torch, aiter, os
+import os
+
+import aiter
+import torch
 
 print("AITER:", aiter.__file__)
 K = 2048
@@ -33,4 +36,6 @@ for base in (131072, 262144, 524288, 1048576):
     for off in (0, 1, 2, 3, 5, 7):
         N = base + off
         w = check(M, N)
-        print("%6d %9d %6d %11.4f %s" % (M, N, N % 4, w, "  <-- WRONG" if w > 0 else ""))
+        print(
+            "%6d %9d %6d %11.4f %s" % (M, N, N % 4, w, "  <-- WRONG" if w > 0 else "")
+        )
