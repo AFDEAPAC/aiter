@@ -61,8 +61,8 @@ from aiter.ops.flydsl.topk.topk_per_row_small_k import (
     topk_per_row_small_k_serves,
 )
 from aiter.ops.topk import (
-    _SAMPLED_MIN_K,
     _device_arch,
+    _sampled_min_k,
     _sampled_on_device,
     _sampled_run,
     _sampled_supports_cached,
@@ -90,26 +90,20 @@ _PLAIN_MAX_K = 2048
 # ...] against a canonical [128, 132, 136, ...]. Serving "low" needs the chunk
 # tie-break made column-aware first.
 _BACKENDS_BY_TIE = {
-    # `sampled` is listed under no promise only. Its tie direction has not been
-    # measured, and `topk_select_backend` below records what happens when a
-    # backend is declared for a tie mode it does not honour: `tie='high'` once
-    # fell through to `decode`, which ties the opposite way, silently. Declaring
-    # it for `low` or `high` on a guess would repeat that.
+    # `sampled` serves "low" through its stable mode, which `_dispatch` turns on
+    # for it as it does for `decode`; without it its ties follow wave timing.
     None: ("argmax", "small_k", "plain", "decode", "stream", "sampled"),
-    "low": ("argmax", "decode", "stream"),
+    "low": ("argmax", "decode", "stream", "sampled"),
     "high": ("small_k",),
 }
 # `plain` selects a different set of tied columns from one call to the next:
 # measured, 2 of 512 slots differed on a repeat, 18 for one row across a batch of
-# 100. Every other backend is a pure function of the row -- the property a
-# tensor-parallel caller needs, and weaker than promising a direction.
-# `sampled` is in here because its repeat-stability has NOT been measured, not
-# because it was found unstable. The conservative direction: a caller asking
-# for `deterministic` never reaches it. Measure it and remove it from this set
-# -- `op_tests/test_topk_per_row_stable.py` is the model, and `decode` is the
-# cautionary tale, since a radix select being a pure function of the row is
-# the obvious guess and it is wrong.
-_NONDETERMINISTIC = frozenset({"plain", "sampled"})
+# 100. Every other backend is a pure function of the row once `_dispatch` asks
+# for it -- the property a tensor-parallel caller needs, and weaker than
+# promising a direction. `decode` and `sampled` are that only in their stable
+# mode: without it, both select a different set of tied columns from one call
+# to the next.
+_NONDETERMINISTIC = frozenset({"plain"})
 # Order to fall back in when the shape rules name nothing that is available.
 # Streaming first because it takes a row length natively and scales with rows;
 # `plain` last for the reasons below.
@@ -625,6 +619,10 @@ def _choose(
     if deterministic:
         allowed -= _NONDETERMINISTIC
     sampled_ok = allow_sampled and _sampled_on_device(device)
+    if (tie is not None or deterministic) and not _sampled_stable_takes(
+        rows, stride0, k
+    ):
+        sampled_ok = False
     arch = _device_arch(device)
     available = (
         _available(width, k, wave_size, ragged, fp32, sampled_ok, arch) & allowed
@@ -733,9 +731,10 @@ def _sampled_takes(
     width), and the few-row band's rows past its width, which decode served
     1.47x-2.56x slower. See `_PLAIN_K2048_LDS_TAIL_MIN_ROWS`.
 
-    Nothing below `_SAMPLED_MIN_K`, whatever the shape: see its definition.
+    Nothing below `_sampled_min_k` of the row pitch, whatever the shape: see
+    its definition.
     """
-    if k < _SAMPLED_MIN_K:
+    if k < _sampled_min_k(width if stride0 is None else stride0):
         return False
     if device is None:
         device = torch.cuda.current_device()
@@ -751,6 +750,26 @@ def _sampled_takes(
     if not (rows * width >= _SAMPLED_MIN_WORK or width >= _SAMPLED_MIN_WIDTH):
         return False
     return _sampled_supports_cached(rows, width, k, device)
+
+
+# Under `tie` or `deterministic`, `sampled` runs its stable emit, which costs
+# it 3-10% of a call at many rows of a mid k, where its default emit leads the
+# `stream` these calls had before by about as much: stable `sampled` measured
+# 0.90x-0.99x of `stream` at 512..4096 rows, k 128..384, N 131072..262144
+# (torch.randn, MI355X, two processes). Those rows keep `stream`; the width
+# bound is the first one measured clear of it, N=524288.
+_SAMPLED_STABLE_MANY_ROWS = 512
+_SAMPLED_STABLE_MAX_K = 384
+_SAMPLED_STABLE_MIN_WIDTH = 524288
+
+
+def _sampled_stable_takes(rows: int, width: int, k: int) -> bool:
+    """Whether a call asking for `tie` or `deterministic` may run `sampled`."""
+    return not (
+        rows >= _SAMPLED_STABLE_MANY_ROWS
+        and k <= _SAMPLED_STABLE_MAX_K
+        and width < _SAMPLED_STABLE_MIN_WIDTH
+    )
 
 
 def _stream_small_reject(rows: int, rejects: int) -> bool:
@@ -1316,6 +1335,10 @@ def _dispatch(
         # entry's validation would only repeat it. The one thing not checked is
         # the device of a caller's `end` (the default one is built on input's);
         # the entry reports that one.
+        #
+        # `stable` for the same reason as decode's below: smallest-column ties
+        # and a set that is a function of the row, with every NaN one value.
+        stable = tie == "low" or deterministic
         if not ragged or ends.get_device() == input.get_device():
             _sampled_run(
                 input,
@@ -1330,6 +1353,7 @@ def _dispatch(
                 None,
                 ragged,
                 True,
+                stable,
             )
         else:
             top_k_per_row_prefill_sampled(
@@ -1344,6 +1368,7 @@ def _dispatch(
                 k=topk,
                 ragged=ragged,
                 nan_high=True,
+                stable=stable,
             )
     elif backend == "small_k":
         topk_per_row_small_k(input, row_lens, idx, topk)

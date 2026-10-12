@@ -7,7 +7,7 @@ import torch
 
 import aiter
 from aiter.jit.utils.chip_info import get_gfx_runtime
-from aiter.ops.topk import _SAMPLED_MIN_K, _SAMPLED_MIN_STRIDE0
+from aiter.ops.topk import _SAMPLED_MIN_STRIDE0, _sampled_min_k
 
 
 def _random_logits(num_rows, width):
@@ -71,20 +71,38 @@ def test_prefill_sampled_dispatch_routing():
 
         sampled_fn.reset_mock()
         run_prefill(at_or_above, stable=True)
-        assert not sampled_fn.called, "stable=True must not use `sampled`"
+        assert sampled_fn.called, "stable=True at the floor must use `sampled`"
+        assert (
+            sampled_fn.call_args.args[-1] is True
+        ), "stable=True must reach its stable mode"
 
+        k_floor = _sampled_min_k(at_or_above)
         sampled_fn.reset_mock()
-        run_prefill(at_or_above, k=_SAMPLED_MIN_K - 1)
+        run_prefill(at_or_above, k=k_floor - 1)
         assert (
             not sampled_fn.called
-        ), f"k={_SAMPLED_MIN_K - 1} is below the k floor and must not use `sampled`"
+        ), f"k={k_floor - 1} is below the k floor and must not use `sampled`"
+
+        # Past _SAMPLED_MIN_K_WIDTH columns the floor rises with the pitch.
+        wide = 4 * at_or_above
+        assert _sampled_min_k(wide) > k_floor
+        sampled_fn.reset_mock()
+        run_prefill(wide, k=_sampled_min_k(wide) - 1)
+        assert (
+            not sampled_fn.called
+        ), f"k below the floor at stride0={wide} must not use `sampled`"
+        sampled_fn.reset_mock()
+        run_prefill(wide, k=_sampled_min_k(wide))
+        assert sampled_fn.called, f"k at the floor at stride0={wide} must use `sampled`"
 
         sampled_fn.reset_mock()
         with mock.patch.dict(os.environ, {"AITER_DISABLE_TOPK_SAMPLED": "1"}):
             run_prefill(at_or_above)
         assert not sampled_fn.called, "AITER_DISABLE_TOPK_SAMPLED must withdraw it"
 
-    print("[prefill_sampled_dispatch] PASS: routing by stride0 / stable / env")
+    print(
+        "[prefill_sampled_dispatch] PASS: routing by stride0 / stable / k floor / env"
+    )
 
 
 if __name__ == "__main__":
