@@ -45,7 +45,6 @@ def fused_clamp_act_mul(
         dtype_quant: if ``None``, no quantization; output is written in ``inp.dtype``
             (or the dtype of a pre-allocated ``out``) and ``scale`` is unused. Otherwise
             the result is FP8-group-quantized with ``dtype_quant`` and per-128 scales.
-
     Constraints:
         ``N`` must be a power of two, ``N >= 128``, and ``N % 128 == 0`` so each row
         uses one ``_fp8_quant_op`` tile (``BLOCK_SIZE_M=1``, ``BLOCK_SIZE_N=N``).

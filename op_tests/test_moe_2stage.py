@@ -42,9 +42,11 @@ except ModuleNotFoundError as e:
 
 from aiter.ops.shuffle import (
     shuffle_weight,
+    shuffle_scale,
     shuffle_scale_a16w4,
     shuffle_weight_a16w4,
     pack_int8_to_packed_int4,
+    repack_mxfp4_for_gfx942_fp4_bf16,
     shuffle_scale_for_int4,
 )
 
@@ -98,7 +100,11 @@ def test_fmoe(
     reference_intermediate_pad=0,
     ref_dtype="bf16",
 ):
-    if get_gfx() not in ["gfx950"] and qType in [aiter.QuantType.per_1x32]:
+    if (
+        get_gfx() not in ["gfx950"]
+        and qType in [aiter.QuantType.per_1x32]
+        and os.environ.get("AITER_RUN_GFX942_MOE_TEST", "0") != "1"
+    ):
         return
     torch_quant = aiter.get_torch_quant(qType)
     # mxfp8 (a8w8): per-1x32 e8m0 microscale on both fp8 activation and fp8 weight.
@@ -153,7 +159,13 @@ def test_fmoe(
     else:
         score = torch.randn((token, E), dtype=dtype)
 
-    topk_weights, topk_ids = fused_topk(input, score, topk, True)
+    if os.environ.get("AITER_RUN_GFX942_MOE_TEST", "0") == "1":
+        routing = torch.softmax(score.float(), dim=-1)
+        topk_weights, topk_ids = torch.topk(routing, topk, dim=-1)
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+        topk_ids = topk_ids.to(torch.int32)
+    else:
+        topk_weights, topk_ids = fused_topk(input, score, topk, True)
 
     if qType == aiter.QuantType.per_Tensor:
         w1_qt, w1_scale = aiter.pertoken_quant(w1.view(E, -1), quant_dtype=WQDType)
@@ -301,10 +313,51 @@ def test_fmoe(
         and (AQDType in [dtypes.bf16, dtypes.fp16, dtypes.fp8])
         and (WQDType == dtypes.fp4x2)
     ):  # a16w4 / a8w4
-        w1_qt_aiter = shuffle_weight_a16w4(w1_qt_aiter, 16, True)
-        w1_scale_aiter = shuffle_scale_a16w4(w1_scale, E, True)
-        w2_qt_aiter = shuffle_weight_a16w4(w2_qt_aiter, 16, False)
-        w2_scale_aiter = shuffle_scale_a16w4(w2_scale, E, False)
+        if (
+            os.environ.get("AITER_RUN_GFX942_MOE_TEST", "0") == "1"
+            and os.environ.get(
+                "AITER_GFX942_DSV41_EXACT_MXFP4_A16W4", "0"
+            )
+            == "1"
+        ):
+            w1_qt_aiter = shuffle_weight(
+                w1_qt_aiter, is_guinterleave=True, gate_up=False
+            )
+            w2_qt_aiter = shuffle_weight(
+                w2_qt_aiter, is_guinterleave=True, gate_up=False
+            )
+            w1_scale_aiter = shuffle_scale(
+                w1_scale.reshape(-1, w1_scale.shape[-1]),
+                experts_cnt=E,
+                is_guinterleave=True,
+                gate_up=False,
+            )
+            w2_scale_aiter = shuffle_scale(
+                w2_scale.reshape(-1, w2_scale.shape[-1]),
+                experts_cnt=E,
+                is_guinterleave=True,
+                gate_up=False,
+            )
+        elif os.environ.get("AITER_RUN_GFX942_MOE_TEST", "0") == "1":
+            w1_qt_aiter, w1_scale_aiter = repack_mxfp4_for_gfx942_fp4_bf16(
+                w1_qt_aiter,
+                w1_scale,
+                E,
+                w1.shape[1],
+                w1.shape[2],
+            )
+            w2_qt_aiter, w2_scale_aiter = repack_mxfp4_for_gfx942_fp4_bf16(
+                w2_qt_aiter,
+                w2_scale,
+                E,
+                w2.shape[1],
+                w2.shape[2],
+            )
+        else:
+            w1_qt_aiter = shuffle_weight_a16w4(w1_qt_aiter, 16, True)
+            w1_scale_aiter = shuffle_scale_a16w4(w1_scale, E, True)
+            w2_qt_aiter = shuffle_weight_a16w4(w2_qt_aiter, 16, False)
+            w2_scale_aiter = shuffle_scale_a16w4(w2_scale, E, False)
     elif is_mxfp8:  # mxfp8 (a8w8): gate-up interleaved fp8 weight + e8m0 scale
         w1_qt_aiter = shuffle_weight_a16w4(w1_qt_aiter, 16, True)
         w1_scale_aiter = shuffle_scale_a16w4(w1_scale, E, True)
@@ -375,11 +428,6 @@ def test_fmoe(
         w1_bias=exp_bias1,
         doweight=doweight_stage1,
         swiglu_limit=swiglu_limit,
-        # pr1 torch_moe_stage1 exposes situ_beta/situ_linear_beta (no None
-        # handling); mirror the kernel's None -> 1.0 mapping so the reference
-        # matches fused_moe for SiTUv2 (harmless for other activations).
-        situ_beta=1.0 if beta is None else float(beta),
-        situ_linear_beta=1.0 if linear_beta is None else float(linear_beta),
     )
 
     # ######################## stage 2 start ###########
@@ -442,8 +490,6 @@ def test_fmoe(
         "bias1": exp_bias1_aiter,
         "bias2": exp_bias2_aiter,
         "swiglu_limit": swiglu_limit,
-        "beta": beta,
-        "linear_beta": linear_beta,
         "gate_mode": gateMode,
     }
 
@@ -960,6 +1006,7 @@ def _iter_legacy_cases():
         act_type,
         **over,
     ):
+        gate_mode = over.pop("gateMode", _effective_gate_mode(aq_dtype, wq_dtype))
         return dict(
             dtype=dtype,
             token=m,
@@ -968,7 +1015,7 @@ def _iter_legacy_cases():
             E=args.expert,
             topk=args.topk,
             actType=act_type,
-            gateMode=_effective_gate_mode(aq_dtype, wq_dtype),
+            gateMode=gate_mode,
             qType=quant_type,
             AQDType=aq_dtype,
             WQDType=wq_dtype,
@@ -993,6 +1040,9 @@ def _iter_legacy_cases():
         if triple == _PER1X32_BF16_FP4:
             for hidden_pad, intermediate_pad in args.hidden_intermediate_pad:
                 for m in args.tokenNum:
+                    gfx942_target = (
+                        os.environ.get("AITER_RUN_GFX942_MOE_TEST", "0") == "1"
+                    )
                     yield _kw(
                         dtype,
                         m,
@@ -1002,7 +1052,16 @@ def _iter_legacy_cases():
                         aq_dtype,
                         wq_dtype,
                         doweight_stage1,
-                        aiter.ActivationType.Swiglu,
+                        (
+                            aiter.ActivationType.Silu
+                            if gfx942_target
+                            else aiter.ActivationType.Swiglu
+                        ),
+                        gateMode=(
+                            GateMode.SEPARATED.value
+                            if gfx942_target
+                            else _effective_gate_mode(aq_dtype, wq_dtype)
+                        ),
                         hidden_pad=hidden_pad,
                         intermediate_pad=intermediate_pad,
                     ), extras
@@ -1174,10 +1233,14 @@ for kwargs, extras in case_iter:
     seen += 1
     _old_moe_bound = os.environ.get("AITER_BF16_FP8_MOE_BOUND")
     _force_moe_bound_zero = (
-        kwargs["qType"],
-        kwargs["AQDType"],
-        kwargs["WQDType"],
-    ) in (_PER1X32_BF16_FP4, _PER1X32_FP8_FP4)
+        (
+            kwargs["qType"],
+            kwargs["AQDType"],
+            kwargs["WQDType"],
+        )
+        in (_PER1X32_BF16_FP4, _PER1X32_FP8_FP4)
+        and os.environ.get("AITER_RUN_GFX942_MOE_TEST", "0") != "1"
+    )
     if _force_moe_bound_zero:
         os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
     try:

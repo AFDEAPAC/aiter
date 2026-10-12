@@ -72,12 +72,6 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import scf
 from flydsl.expr import buffer_ops, vector
 
-from aiter.ops.flydsl.kernels.tensor_shim import (
-    ptr_rsrc,
-    AITER_FLYDSL_KERNARG_PRELOAD,
-    AITER_FLYDSL_KERNARG_PRELOAD_COUNT,
-)
-
 BLOCK_THREADS = 256
 
 
@@ -158,9 +152,9 @@ def build_moe_scatter_copy_preshuffle_scale_module(
 
     @flyc.kernel(name=module_name)
     def scatter_preshuffle_kernel(
-        src: fx.Pointer,  # (num_src, row_bytes) uint8
-        dst: fx.Pointer,  # (E*(max_m//wmma_rep), row_bytes*wmma_rep) uint8
-        rows_to_tokens: fx.Pointer,  # (E*max_m,) int32  -- -1 = skip (gather only)
+        src: fx.Tensor,  # (num_src, row_bytes) uint8
+        dst: fx.Tensor,  # (E*(max_m//wmma_rep), row_bytes*wmma_rep) uint8
+        rows_to_tokens: fx.Tensor,  # (E*max_m,) int32  -- -1 = skip (gather only)
         max_m: Int32,
     ):
         i32 = T.i32
@@ -191,9 +185,9 @@ def build_moe_scatter_copy_preshuffle_scale_module(
 
         # Created unconditionally (no in-body `if`): for gather=False the launcher
         # passes a placeholder for rows_to_tokens and the helper never reads it.
-        map_rsrc = ptr_rsrc(rows_to_tokens)
-        src_rsrc = ptr_rsrc(src)
-        dst_rsrc = ptr_rsrc(dst)
+        map_rsrc = buffer_ops.create_buffer_resource(rows_to_tokens, max_size=True)
+        src_rsrc = buffer_ops.create_buffer_resource(src, max_size=True)
+        dst_rsrc = buffer_ops.create_buffer_resource(dst, max_size=True)
 
         for it in range_constexpr(
             (units_per_tile + BLOCK_THREADS - 1) // BLOCK_THREADS
@@ -238,9 +232,9 @@ def build_moe_scatter_copy_preshuffle_scale_module(
 
         @flyc.jit
         def launch_scatter_preshuffle(
-            src: fx.Pointer,
-            dst: fx.Pointer,
-            rows_to_tokens: fx.Pointer,
+            src: fx.Tensor,
+            dst: fx.Tensor,
+            rows_to_tokens: fx.Tensor,
             max_m: fx.Int32,
             E: fx.Int32,
             tiles_per_expert: fx.Int32,
@@ -259,18 +253,12 @@ def build_moe_scatter_copy_preshuffle_scale_module(
                 stream=stream,
             )
 
-        launch_scatter_preshuffle.compile_hints = {
-            "llvm_options": {
-                "amdgpu-kernarg-preload": AITER_FLYDSL_KERNARG_PRELOAD,
-                "amdgpu-kernarg-preload-count": AITER_FLYDSL_KERNARG_PRELOAD_COUNT,
-            },
-        }
         return launch_scatter_preshuffle
 
     @flyc.jit
     def launch_preshuffle(
-        src: fx.Pointer,
-        dst: fx.Pointer,
+        src: fx.Tensor,
+        dst: fx.Tensor,
         max_m: fx.Int32,
         E: fx.Int32,
         tiles_per_expert: fx.Int32,
@@ -290,10 +278,4 @@ def build_moe_scatter_copy_preshuffle_scale_module(
             stream=stream,
         )
 
-    launch_preshuffle.compile_hints = {
-        "llvm_options": {
-            "amdgpu-kernarg-preload": AITER_FLYDSL_KERNARG_PRELOAD,
-            "amdgpu-kernarg-preload-count": AITER_FLYDSL_KERNARG_PRELOAD_COUNT,
-        },
-    }
     return launch_preshuffle
