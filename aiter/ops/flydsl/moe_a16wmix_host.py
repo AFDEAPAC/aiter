@@ -28,7 +28,12 @@ import torch
 
 from .kernels.tensor_shim import _run_compiled
 from .kernels.moe_2stage_a16wmix.gemm1 import compile_gemm1_a16w4_port, gemm1_a16w4_grid
-from .kernels.moe_2stage_a16wmix.gemm2 import compile_gemm2_a16w4_port, gemm2_a16w4_grid
+from .kernels.moe_2stage_a16wmix.gemm2 import (
+    LDS_LIMIT_BYTES as _LDS_LIMIT,
+    compile_gemm2_a16w4_port,
+    gemm2_a16w4_grid,
+)
+from .kernels.moe_2stage_a16wmix.utils import lds_acc_bytes_for
 
 __all__ = [
     "compile_gemm1_a16w4_port",
@@ -62,6 +67,7 @@ def _get_compiled_gemm1_a16w4(
     waves_per_eu,
     w_dtype="mxfp4",
     w_layout="standard",
+    a_dtype="bf16",
     k_wave=1,
 ):
     return compile_gemm1_a16w4_port(
@@ -78,6 +84,7 @@ def _get_compiled_gemm1_a16w4(
         waves_per_eu=waves_per_eu,
         w_dtype=w_dtype,
         w_layout=w_layout,
+        a_dtype=a_dtype,
         k_wave=k_wave,
     )
 
@@ -94,6 +101,7 @@ def _get_compiled_gemm2_a16w4(
     xcd_swizzle=1,
     waves_per_eu=None,
     w_dtype="mxfp4",
+    a_dtype="bf16",
     persist=False,
 ):
     return compile_gemm2_a16w4_port(
@@ -107,6 +115,7 @@ def _get_compiled_gemm2_a16w4(
         xcd_swizzle=xcd_swizzle,
         waves_per_eu=waves_per_eu,
         w_dtype=w_dtype,
+        a_dtype=a_dtype,
         persist=persist,
     )
 
@@ -183,7 +192,23 @@ def _resolve_ours_tuned(*, w_dtype, model_dim, inter_dim, experts, topk, tokens,
     if not path or not os.path.isfile(path):
         return None
     table = _load_ours_tuned_csv(path)
-    return table.get((w_dtype, model_dim, inter_dim, experts, topk, int(tokens), stage))
+    tok = int(tokens)
+    hit = table.get((w_dtype, model_dim, inter_dim, experts, topk, tok, stage))
+    if hit is not None:
+        return hit
+    # Serving sees far more token counts than anyone tunes, so fall back to the nearest
+    # tuned row rather than dropping to the built-in default: the largest tuned token at
+    # or below the request, else the smallest tuned token.
+    cands = [
+        (t, cfg)
+        for (wd, md, inter, e, tk, t, st), cfg in table.items()
+        if (wd, md, inter, e, tk, st) == (w_dtype, model_dim, inter_dim, experts, topk, stage)
+    ]
+    if not cands:
+        return None
+    cands.sort()
+    below = [c for c in cands if c[0] <= tok]
+    return (below[-1] if below else cands[0])[1]
 
 
 def _default_tiles_fallback(*, D_HIDDEN, D_INTER, tokens, w_dtype, tile_m, stage):
@@ -239,7 +264,39 @@ def _default_tiles_fallback(*, D_HIDDEN, D_INTER, tokens, w_dtype, tile_m, stage
     }
 
 
-def resolve_a16wmix_gemm1_config(*, w_dtype, model_dim, inter_dim, experts, topk, tokens, tile_m, csv_path=None):
+
+def _fp8_tile_override(cfg, *, stage, tile_m):
+    """Tiles chosen while A was bf16 are not the fp8 optimum.
+
+    a16wmix_tuned.csv predates the fp8 path and has no a_dtype column, so the fp8 arm has
+    always inherited bf16's tiles. Swept against the fp8 kernels at production dims
+    (3584/384/896, topk 16), the two that move are:
+
+      stage 2  tile_n 256 -> 128, xcd 1 -> 0.  tile_n=128 won at every token count tried
+               (1, 2, 8, 16, 32, 8192) and the gap to 256 is a cliff, not a slope: at
+               prefill the four best configs are all tile_n=128 (3523-3792 us) and the
+               best 256 is 5660 us. Gains where the CSV picks 256 -- which is the decode
+               band -- are 1.13x / 1.17x / 1.11x / 1.06x at token 1 / 2 / 8 / 16. Token
+               counts whose CSV row already says 128 are unaffected.
+      stage 1  tile_k 128 -> 256 at BM<=16, worth 1.06-1.08x at the decode shape. Prefill
+               (BM=32) measured no gain, so it keeps 128.
+
+    bf16 is untouched: this runs only when a_dtype == "fp8".
+    """
+    cfg = dict(cfg)
+    if stage == 2:
+        cfg["tile_n"] = 128
+        cfg["xcd_swizzle"] = 0
+    elif int(tile_m) <= 16:
+        cfg["tile_k"] = 256
+        # fp8 bumps K-tile 128->256; k_wave=4 slice-K needs K % (4*128)==0 and
+        # breaks once TILE_K becomes 256 (3584 % 1024 != 0).
+        if int(cfg.get("k_wave", 1)) > 1:
+            cfg["k_wave"] = 1
+    return cfg
+
+
+def resolve_a16wmix_gemm1_config(*, w_dtype, model_dim, inter_dim, experts, topk, tokens, tile_m, csv_path=None, a_dtype="bf16"):
     """Resolve the ours-tuned gemm1 tile-config: exact CSV row if present, else the
     slim documented fallback. Never returns None (arbitrary shapes still run)."""
     cfg = _resolve_ours_tuned(
@@ -253,9 +310,10 @@ def resolve_a16wmix_gemm1_config(*, w_dtype, model_dim, inter_dim, experts, topk
         csv_path=csv_path,
     )
     if cfg is None:
-        return _default_tiles_fallback(
+        cfg = _default_tiles_fallback(
             D_HIDDEN=model_dim, D_INTER=inter_dim, tokens=tokens, w_dtype=w_dtype, tile_m=tile_m, stage=1
         )
+        return _fp8_tile_override(cfg, stage=1, tile_m=tile_m) if a_dtype == "fp8" else cfg
     # int4 gemm1 tile_n is tile_m-dependent (the BM==64 W1-reuse occupancy gate), while
     # the CSV row assumes the recommended tile_m. Re-derive tile_n from the ACTUAL BM so
     # an explicit caller tile_m stays correct; the CSV row still owns the other fields.
@@ -263,10 +321,10 @@ def resolve_a16wmix_gemm1_config(*, w_dtype, model_dim, inter_dim, experts, topk
     if w_dtype == "int4" and inter_dim % 64 == 0:
         cfg["tile_n"] = 64 if int(tile_m) == 64 else _default_tile_n(inter_dim, w_dtype=w_dtype)
     cfg["tile_m"] = int(tile_m)
-    return cfg
+    return _fp8_tile_override(cfg, stage=1, tile_m=tile_m) if a_dtype == "fp8" else cfg
 
 
-def resolve_a16wmix_gemm2_config(*, w_dtype, model_dim, inter_dim, experts, topk, tokens, tile_m, csv_path=None):
+def resolve_a16wmix_gemm2_config(*, w_dtype, model_dim, inter_dim, experts, topk, tokens, tile_m, csv_path=None, a_dtype="bf16"):
     """Resolve the ours-tuned gemm2 tile-config: exact CSV row if present, else the
     slim documented fallback. Never returns None."""
     cfg = _resolve_ours_tuned(
@@ -279,11 +337,11 @@ def resolve_a16wmix_gemm2_config(*, w_dtype, model_dim, inter_dim, experts, topk
         stage=2,
         csv_path=csv_path,
     )
-    if cfg is not None:
-        return cfg
-    return _default_tiles_fallback(
-        D_HIDDEN=model_dim, D_INTER=inter_dim, tokens=tokens, w_dtype=w_dtype, tile_m=tile_m, stage=2
-    )
+    if cfg is None:
+        cfg = _default_tiles_fallback(
+            D_HIDDEN=model_dim, D_INTER=inter_dim, tokens=tokens, w_dtype=w_dtype, tile_m=tile_m, stage=2
+        )
+    return _fp8_tile_override(cfg, stage=2, tile_m=tile_m) if a_dtype == "fp8" else cfg
 
 
 def a16wi4_recommend_block_m(tokens, experts, topk, *, base_block_m=32):
@@ -350,11 +408,20 @@ def flydsl_a16w4_gemm1(
     swiglu_limit=float("inf"),
     w_dtype="mxfp4",
     w_layout="standard",
+    a_dtype="bf16",
+    a_scale=None,
+    w1_sref=None,
     use_csv_config=False,  # opt-in: default uses our tuned tile_n; CSV params for aiter-compare / when requested
     csv_path=None,
     stream=None,
 ):
     """a16w4/a16wi4/a16w16 fused stage1: gate+up GEMM + SiLU -> bf16 intermediate.
+
+    ``a_dtype="fp8"`` switches the MFMA to ``mfma_f32_16x16x32_fp8_fp8``: ``a_bf16``
+    then carries e4m3fnuz bytes, ``a_scale`` is the f32 per-token quantization scale,
+    and ``w1_sref`` is the per-(expert, output column) E8M0 reference exponent from
+    ``a16wmix_fp8_prep``. The weight and its scale tensor are unchanged -- the kernel
+    forms the residual itself as ``sref - scale_byte``.
 
     ``w_dtype="mxfp4"`` (default): W1 mxfp4, ``w1_scale_u8`` = shuffled e8m0. ``"int4"``:
     W1 packed signed int4 (same preshuffle as mxfp4), ``w1_scale_u8`` groupwise bf16 in
@@ -408,8 +475,12 @@ def flydsl_a16w4_gemm1(
     # FLYDSL_A16WMIX_TUNED_CSV). Fills only the tile args the caller left at default;
     # explicit caller overrides always win. The aiter-compare CSV path (use_csv_config,
     # resolved above) takes precedence when enabled.
-    if not use_csv_config:
+    # A16WMIX_FORCE_TILES=1 makes the caller's explicit tiles final: the tuner
+    # sweeps geometries the resolver has never heard of, and silently rewriting
+    # them from a tuned row would make it measure the wrong kernel.
+    if not use_csv_config and os.environ.get("A16WMIX_FORCE_TILES", "0") != "1":
         _o = resolve_a16wmix_gemm1_config(
+            a_dtype=a_dtype,
             w_dtype=w_dtype,
             model_dim=D_HIDDEN,
             inter_dim=D_INTER,
@@ -458,9 +529,29 @@ def flydsl_a16w4_gemm1(
         waves_per_eu,
         w_dtype,
         w_layout,
+        a_dtype,
         k_wave,
     )
-    max_m_blocks = int(sorted_expert_ids.numel())
+    if a_dtype == "fp8":
+        if a_scale is None or w1_sref is None:
+            raise ValueError("a_dtype='fp8' needs both a_scale and w1_sref")
+        _a_scale_ptr = a_scale.data_ptr()
+        _sref_ptr = w1_sref.data_ptr()
+    else:
+        # Unused by the bf16 kernel (const_expr'd out), but the launcher signature is
+        # shared, so pass something addressable rather than a null.
+        _a_scale_ptr = a_bf16.data_ptr()
+        _sref_ptr = a_bf16.data_ptr()
+    max_m_blocks = min(int(sorted_expert_ids.numel()), int(m_indices.numel()) // BM)
+    # AITER_A16WMIX_GEMM1_GRID_CAP: upper-bound by tokens*topk (aiter #3987).
+    # NOT ceil(routes/BM) — that under-launches when routes are sparse across experts
+    # (GSM8K=0.000 regression 2026-09-30).
+    import os as _os_grid_cap
+    if _os_grid_cap.environ.get("AITER_A16WMIX_GEMM1_GRID_CAP", "1") not in ("0", "false", "False"):
+        _cap = min(max_m_blocks, max(1, int(n_tokens) * int(topk)))
+        if _cap < max_m_blocks:
+            print(f"[k3-gemm1-grid-cap] effective={_cap} (was {max_m_blocks} routes={int(n_tokens)*int(topk)})", flush=True)
+            max_m_blocks = _cap
     grid = gemm1_a16w4_grid(BM, INTER=D_INTER, TILE_N=TILE_N, max_m_blocks=max_m_blocks)
     # SiTUv2 beta/linear_beta + swiglu_limit -> runtime f32 scalars (host precomputes
     # reciprocals; no device rcp). swiglu_limit is the SiTUv2 clamp bound (+inf = no
@@ -484,6 +575,8 @@ def flydsl_a16w4_gemm1(
         _lbeta,
         1.0 / _lbeta,
         float(swiglu_limit),
+        _a_scale_ptr,
+        _sref_ptr,
         inter_sorted_bf16.data_ptr(),
         torch.cuda.current_stream() if stream is None else stream,
     )
@@ -514,6 +607,9 @@ def flydsl_a16w4_gemm2(
     b_nt=None,
     xcd_swizzle=1,
     w_dtype="mxfp4",
+    a_dtype="bf16",
+    a_scale=None,
+    w2_sref=None,
     use_csv_config=False,  # opt-in: default uses our tuned tile_n; CSV params for aiter-compare / when requested
     csv_path=None,
     persist=None,
@@ -529,6 +625,18 @@ def flydsl_a16w4_gemm2(
     """
     if k_batch != 1:
         raise NotImplementedError(f"a16w4 gemm2 only supports k_batch=1, got {k_batch}")
+    if a_dtype == "fp8":
+        # inter_sorted is fp8 here and its scale is per SORTED ROW, so it must be as long
+        # as the padded sorted dimension -- a per-token array would be indexed with a
+        # sorted position and read the wrong scale for every route past the first.
+        if a_scale is None or w2_sref is None:
+            raise ValueError("a_dtype='fp8' needs both a_scale and w2_sref")
+        _rows = int(inter_sorted_bf16.shape[0])
+        if int(a_scale.numel()) < _rows:
+            raise ValueError(
+                f"fp8 gemm2 a_scale has {int(a_scale.numel())} entries but the sorted "
+                f"intermediate has {_rows} rows"
+            )
 
     # CSV-driven per-token config (mxfp4 only, opt-in). Falls back to adaptive default
     # on no match / divisibility violation; explicit caller overrides win.
@@ -555,8 +663,12 @@ def flydsl_a16w4_gemm2(
     # explicit caller overrides always win. gemm2 defaults are tile_n=256/tile_k=256/
     # xcd_swizzle=1 (fixed 4-wave N-split, no k_wave). The aiter-compare CSV path
     # (use_csv_config, resolved above) takes precedence when enabled.
-    if not use_csv_config:
+    # A16WMIX_FORCE_TILES=1 makes the caller's explicit tiles final: the tuner
+    # sweeps geometries the resolver has never heard of, and silently rewriting
+    # them from a tuned row would make it measure the wrong kernel.
+    if not use_csv_config and os.environ.get("A16WMIX_FORCE_TILES", "0") != "1":
         _o = resolve_a16wmix_gemm2_config(
+            a_dtype=a_dtype,
             w_dtype=w_dtype,
             model_dim=D_HIDDEN,
             inter_dim=D_INTER,
@@ -565,33 +677,66 @@ def flydsl_a16w4_gemm2(
             tokens=_m,
             tile_m=BM,
         )
-        # gemm2 tile_n is not token-dependent (fixed 256 default; explicit tile_n=None
-        # means adaptive _default_tile_n, handled below), so only tile_k/b_nt/xcd are
-        # filled from the resolver here.
+        # gemm2's tile_n IS token-dependent, so take it from the resolver like the
+        # other fields. The adaptive default below stays as the fallback for shapes the
+        # resolver has no row for.
         if tile_k == 256:
             TILE_K = _o["tile_k"]
         if b_nt is None:
             b_nt = _o["b_nt"]
         if xcd_swizzle == 1:
             xcd_swizzle = _o["xcd_swizzle"]
+        if TILE_N is None:
+            TILE_N = _o["tile_n"]
     if TILE_N is None:
         # Adaptive default: largest N tile dividing model_dim (int4 prefers 128).
         TILE_N = _default_tile_n(D_HIDDEN, w_dtype=w_dtype)
     if D_INTER % TILE_K != 0:
-        raise NotImplementedError(f"a16w4 gemm2 requires D_INTER (K) % {TILE_K} == 0, got D_INTER={D_INTER}")
+        # gemm2 contracts over D_INTER, which at Kimi-K3 TP=8 is 384 -- not a multiple
+        # of the 256 default. Step down rather than refuse: the caller's tile_k is a
+        # preference, and a K tile that does not divide K is simply unusable.
+        for cand in (256, 128, 64):
+            if D_INTER % cand == 0:
+                TILE_K = cand
+                break
+        else:
+            raise NotImplementedError(f"a16w4 gemm2 requires D_INTER (K) % {TILE_K} == 0, got D_INTER={D_INTER}")
     if D_HIDDEN % TILE_N != 0:
         raise NotImplementedError(f"a16w4 gemm2 requires D_HIDDEN (model_dim) % {TILE_N} == 0, got H={D_HIDDEN}")
+    # LDS = A tile (BM x TILE_K x elem) + f32 accumulator (BM x TILE_N x 4), and the
+    # accumulator dominates. BM=64 with the usual TILE_N=256 needs 82 KB on fp8 / 98 KB
+    # on bf16 against a 64 KB limit, so it would build a kernel that cannot launch.
+    # Step TILE_N down instead: BM=64 is perfectly usable at 128, and fp8 makes it more
+    # attractive than before (it drops VGPR back under the 256 ceiling).
+    _elem = 1 if a_dtype == "fp8" else 2
+    def _lds_need(tn):
+        return BM * TILE_K * _elem + lds_acc_bytes_for(BM, tn)
+    if _lds_need(TILE_N) > _LDS_LIMIT:
+        for _cand in (256, 128, 64):
+            if _cand <= TILE_N and D_HIDDEN % _cand == 0 and _lds_need(_cand) <= _LDS_LIMIT:
+                TILE_N = _cand
+                break
+        else:
+            raise NotImplementedError(
+                f"a16w4 gemm2 cannot fit LDS for BM={BM} TILE_K={TILE_K} "
+                f"a_dtype={a_dtype}: needs {_lds_need(TILE_N)} B > {_LDS_LIMIT} B and no "
+                f"smaller TILE_N divides model_dim={D_HIDDEN}. Reduce tile_m."
+            )
 
     # B cache modifier per-token U-shape: cached (0) at both ends (small M reuse / large
     # M L2 residency), nt (2) mid-band (32..1024). Caller may override via b_nt.
     _b_cache_mod = (0 if (_m <= 16 or _m >= 2048) else 2) if b_nt is None else b_nt
-    max_m_blocks = int(sorted_expert_ids.numel())
-    # Persistent CU-limited grid (opt-in, default OFF; byte-identical when off): does NOT
-    # close the E896 gap (padded launch's empty CTAs early-return ~free), kept as an
-    # opt-in building block.
-    _persist = False if persist is None else bool(persist)
+    max_m_blocks = min(int(sorted_expert_ids.numel()), int(sorted_token_ids.numel()) // BM)
+    # Persistent CU-limited grid, on by default. The earlier reading -- that this does
+    # not help because a padded launch's empty CTAs early-return for free -- holds for
+    # the empty CTAs but not for the conclusion: trimming sorted_expert_ids so the grid
+    # covers only the valid blocks is worth 1.00x, while making the CTAs persistent over
+    # the same grid is worth 2.0-3.4x. What pays is CTA reuse, not launch count.
+    # It reorders the atomic scatter, which is already order-dependent run to run.
+    _persist = True if persist is None else bool(persist)
     launch = _get_compiled_gemm2_a16w4(
-        BM, NE, D_HIDDEN, D_INTER, TILE_N, TILE_K, _b_cache_mod, xcd_swizzle, waves_per_eu, w_dtype, _persist
+        BM, NE, D_HIDDEN, D_INTER, TILE_N, TILE_K, _b_cache_mod, xcd_swizzle, waves_per_eu,
+        w_dtype, a_dtype, _persist,
     )
     grid = gemm2_a16w4_grid(BM, N_OUT=D_HIDDEN, TILE_N=TILE_N, max_m_blocks=max_m_blocks, persist=_persist)
     _run_compiled(
@@ -607,6 +752,8 @@ def flydsl_a16w4_gemm2(
         int(max_m_blocks),
         int(grid),
         flat_out.data_ptr(),
+        a_scale.data_ptr() if a_dtype == "fp8" else 0,
+        w2_sref.data_ptr() if a_dtype == "fp8" else 0,
         torch.cuda.current_stream() if stream is None else stream,
     )
     return flat_out

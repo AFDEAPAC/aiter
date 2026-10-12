@@ -182,6 +182,7 @@ def _moe_sorting_impl(
     return_local_topk_ids=False,
     accumulate=True,
     output_aux=False,
+    moe_buf_out=None,
 ):
     device = topk_ids.device
     M, topk = topk_ids.shape
@@ -214,7 +215,9 @@ def _moe_sorting_impl(
     #  - accumulate (or EP w/ expert_mask): stage2 atomically accumulates into [M, model_dim].
     #  - else (FlyDSL stage2 reduce mode without mask): caller owns the
     #    [M, topk, model_dim] intermediate; allocate a placeholder here.
-    if (expert_mask is not None) or accumulate:
+    if moe_buf_out is not None:
+        moe_buf = moe_buf_out
+    elif (expert_mask is not None) or accumulate:
         moe_buf = torch.empty((M, model_dim), dtype=moebuf_dtype, device=device)
     else:
         moe_buf = torch.empty((0, 0), dtype=moebuf_dtype, device=device)
@@ -348,6 +351,7 @@ def moe_sorting(
     accumulate=True,
     flat=False,
     output_aux=False,
+    moe_buf_out=None,
 ):
     if (
         not _USE_CK_MOE_SORTING
@@ -357,6 +361,7 @@ def moe_sorting(
         and not flat
         and not output_aux
         and dispatch_policy == 0
+        and moe_buf_out is None
     ):
         return _flydsl_moe_sorting(
             topk_ids,
@@ -389,6 +394,7 @@ def moe_sorting(
             return_local_topk_ids=return_local_topk_ids,
             accumulate=accumulate,
             output_aux=output_aux,
+            moe_buf_out=moe_buf_out,
         )
     except Exception as e:
         logger.error(f"Error in moe_sorting: {e}")
@@ -727,7 +733,10 @@ def _fused_moe_impl(
         and q_dtype_w == dtypes.fp4x2
         and hidden_states.dtype == dtypes.bf16
         and isShuffled
-        and expert_mask is None
+        and (
+            expert_mask is None
+            or os.environ.get("AITER_A16W4_ALLOW_EP", "0") == "1"
+        )
         and not doweight_stage1
         and num_local_tokens is None
         and bias1 is None
@@ -752,6 +761,7 @@ def _fused_moe_impl(
             # interleaved shuffle solely on its a8w4 path, so W1 is the separated
             # layout. Verified by layout A/B against a torch reference.
             w1_layout="standard",
+            expert_mask=expert_mask,
         )
     # If input is already FP8-quantized (e.g. from FP8 dispatch) with block scale,
     # use FP8 as activation dtype to skip redundant re-quantization
@@ -863,7 +873,11 @@ def _fused_moe_impl(
                 ),
             ),
             (bias1 is not None or bias2 is not None, "per-expert bias"),
-            (expert_mask is not None, "expert-parallel masking"),
+            (
+                expert_mask is not None
+                and os.environ.get("AITER_A16W4_ALLOW_EP", "0") != "1",
+                "expert-parallel masking",
+            ),
             (
                 not (isShuffled and isG1U1 and not doweight_stage1),
                 "non-preshuffled / non-g1u1 weights or doweight_stage1=True",

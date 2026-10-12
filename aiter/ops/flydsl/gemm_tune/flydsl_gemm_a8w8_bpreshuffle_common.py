@@ -293,7 +293,12 @@ _base_tiles_950_extra = [
 # ---------------------------------------------------------------------------
 # Combo sweep: lds_stage x waves_per_eu x async_copy x xcd_swizzle
 # ---------------------------------------------------------------------------
-_ASYNC_COPY_VALS = (0, 1)
+# FLYDSL_A8W8_NO_ASYNC_COPY_GFX942: acp=1 aborts the compiler on gfx942 with
+# 'LLVM ERROR: Do not know how to expand this operator's operand!' on
+# llvm.amdgcn.raw.ptr.buffer.load.lds. acp=0 is fine (verified: max rel err
+# 2.644e-03 vs fp32 reference). Under --mp 8 the abort is misreported as a GPU
+# hang and the tuner looks deadlocked, so leaving acp=1 in yields nothing at all.
+_ASYNC_COPY_VALS = (0,)
 _WAVES_PER_EU    = (0, 1, 2, 3, 4)
 _XCD_SWIZZLE_VALS = (0, 4)  # 0=off, >0=XCD remap group size
 _LDS_STAGES      = (2, 1)  # 2=double-buffer ping-pong, 1=single A-LDS buffer

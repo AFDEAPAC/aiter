@@ -134,7 +134,9 @@
             "f'{AITER_CSRC_DIR}/pybind/custom_all_reduce_gfx1250_pybind.cu'",
             "f'{AITER_CSRC_DIR}/kernels/custom_all_reduce_gfx1250.cu'"
         ],
-        "flags_extra_cc": ["'-DENABLE_CK=0'"],
+        "flags_extra_cc": [
+            "'-DENABLE_CK=0'"
+        ],
         "flags_extra_hip": [],
         "extra_ldflags": "None",
         "extra_include": [],
@@ -1667,12 +1669,17 @@
             "f'{AITER_CSRC_DIR}/kernels/mla/hk/mi35x_v32_fwd_decode_m16x4_fp8_fp8.cuh'"
         ],
         "flags_extra_cc": [],
-        "flags_extra_hip": ["'-DKITTENS_CDNA4'"],
+        "flags_extra_hip": [
+            "'-DKITTENS_CDNA4'"
+        ],
         "extra_ldflags": "None",
         "extra_include": [],
         "verbose": "False",
         "blob_gen_cmd": "''",
-        "third_party": ["'HipKittens'", "'ComposableKernel'"],
+        "third_party": [
+            "'HipKittens'",
+            "'ComposableKernel'"
+        ],
         "is_experimental": "True"
     },
     "module_hk_mla_v40_fwd_mi3xx": {
@@ -1685,7 +1692,9 @@
             "f'{AITER_CSRC_DIR}/kernels/mla/hk/mi35x_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1.cuh'"
         ],
         "flags_extra_cc": [],
-        "flags_extra_hip": ["'-DKITTENS_CDNA4'"],
+        "flags_extra_hip": [
+            "'-DKITTENS_CDNA4'"
+        ],
         "extra_ldflags": "None",
         "extra_include": [],
         "verbose": "False",
@@ -1866,6 +1875,22 @@
         "flags_extra_cc": [],
         "flags_extra_hip": [
             "'-ffast-math'"
+        ],
+        "extra_ldflags": "None",
+        "extra_include": [],
+        "verbose": "False",
+        "blob_gen_cmd": "''"
+    },
+    "module_k3_route_prep": {
+        "srcs": [
+            "f'{AITER_CSRC_DIR}/kernels/k3_route_prep.cu'"
+        ],
+        "flags_extra_cc": [
+            "'-DENABLE_CK=0'"
+        ],
+        "flags_extra_hip": [
+            "'-DENABLE_CK=0'",
+            "'-DENABLE_FP8'"
         ],
         "extra_ldflags": "None",
         "extra_include": [],
