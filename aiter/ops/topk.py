@@ -489,16 +489,29 @@ def _sampled_on_device(device: int) -> bool:
 # Below this k the sampled threshold rests on a handful of sample hits, and
 # enough rows land under k that some fall back to the exact full-row select:
 # still correct, but a call with one such row ran up to 5.3x slower than the
-# path it replaced. Measured on gfx950, bs 1..2048, N 131072..524288,
+# path it replaced. Measured on gfx950, bs 1..2048, N 131072..262144,
 # torch.randn: no row fell back at k >= 96 and `sampled` was faster through
 # both top_k_per_row_prefill and topk_select on every shape; at k = 64 two
 # shapes were slower through topk_select, and at k <= 48 most had fallback
 # rows. topk_select applies the same floor.
 _SAMPLED_MIN_K = 96
+# Past this width the sample no longer grows with the row, so the hits behind
+# the threshold fall as k / width, and the floor rises with the width to hold
+# them at what k = 96 has at this width. Rows that fell back, torch.randn, six
+# seeds each, MI355X: N=1048576 M=256, 5 of 1536 at k=96, 1 at k=128, none at
+# k=192..384; N=524288 M=1024, 2 of 6144 at k=96, none at k=128..384;
+# N=262144 M=1024, none at k=96..384. One such row is the long pole of its
+# call: N=1048576 M=512 k=96 ran 504us against `stream`'s 377us.
+_SAMPLED_MIN_K_WIDTH = 262144
+
+
+def _sampled_min_k(width: int) -> int:
+    """The smallest k `sampled` serves at this row pitch."""
+    return _SAMPLED_MIN_K * max(1, -(-width // _SAMPLED_MIN_K_WIDTH))
 
 
 def _should_use_sampled_prefill(
-    numRows: int, stride0: int, stride1: int, k: int, stable: bool, device: int
+    numRows: int, stride0: int, stride1: int, k: int, device: int
 ) -> bool:
     """Whether top_k_per_row_prefill hands this call to `sampled`.
 
@@ -507,11 +520,17 @@ def _should_use_sampled_prefill(
     while the `sampled` entry rejects stride1 != 1; routing such a call there
     would turn a working call into an error purely because `sampled` became
     available.
+
+    `stable` is not a term: `sampled` has a stable mode, and the paths it
+    replaces under stable=True are slower than the ones the floors below were
+    measured against.
     """
-    if stable or stride1 != 1 or k < _SAMPLED_MIN_K or device < 0:
+    if stride1 != 1 or k < _SAMPLED_MIN_K or device < 0:
         return False
     floor = _SAMPLED_MIN_STRIDE0.get(_device_arch(device))
     if floor is None or stride0 < floor:
+        return False
+    if stride0 > _SAMPLED_MIN_K_WIDTH and k < _sampled_min_k(stride0):
         return False
     # Last: the environment lookup costs more than every test above together.
     if os.environ.get("AITER_DISABLE_TOPK_SAMPLED", "0") == "1":
@@ -543,16 +562,14 @@ def top_k_per_row_prefill(
     the workspace for the ob path in that case.
 
     Shapes _should_use_sampled_prefill accepts go to top_k_per_row_prefill_sampled
-    instead. Set AITER_DISABLE_TOPK_SAMPLED=1 to keep every call on the paths
-    below."""
+    instead, in its stable mode when stable=True, which emits the same.
+    Set AITER_DISABLE_TOPK_SAMPLED=1 to keep every call on the paths below."""
     # Ahead of the FlyDSL check: behind it this was unreachable, since FlyDSL
     # served every shape tested, M=4096 N=65536 included.
     # No layout check on this path: the paths below take the same raw data
     # pointers, rows of k and dense int32 bounds, so a malformed tensor reaches
     # the same memory either way. top_k_per_row_prefill_sampled validates.
-    if _should_use_sampled_prefill(
-        numRows, stride0, stride1, k, stable, logits.get_device()
-    ):
+    if _should_use_sampled_prefill(numRows, stride0, stride1, k, logits.get_device()):
         # Reached with the caller's own bounds, so the ragged kernels stay.
         return _sampled_run(
             logits,
@@ -567,6 +584,7 @@ def top_k_per_row_prefill(
             None,
             True,
             False,
+            stable,
         )
 
     use_mulblocks = not stable and _use_mulblocks(numRows, stride0)
@@ -637,6 +655,7 @@ def _top_k_per_row_prefill_sampled(
     workspace: torch.Tensor | None = None,
     ragged: bool = True,
     nan_high: bool = False,
+    stable: bool = False,
 ) -> None: ...
 
 
@@ -764,6 +783,7 @@ def _sampled_run(
     workspace: torch.Tensor | None,
     ragged: bool,
     nan_high: bool,
+    stable: bool,
 ) -> None:
     """The sampled launch on arguments already validated."""
     if workspace is None:
@@ -788,6 +808,7 @@ def _sampled_run(
         workspace,
         ragged,
         nan_high,
+        stable,
     )
 
 
@@ -813,6 +834,10 @@ def top_k_per_row_prefill_sampled(
     # as top_k_per_row_prefill's other paths do. True ranks every NaN above
     # +inf, topk_select's contract. Indices only: values must be None.
     nan_high: bool = False,
+    # Ascending column order, a tie going to the smaller column: what
+    # top_k_per_row_prefill gives under stable=True, and with nan_high what
+    # topk_select gives under tie='low', where every NaN is one value.
+    stable: bool = False,
 ) -> None:
     """Per-row top-k (prefill) via the sampled kernels.
 
@@ -910,6 +935,7 @@ def top_k_per_row_prefill_sampled(
         workspace,
         ragged,
         nan_high,
+        stable,
     )
 
 

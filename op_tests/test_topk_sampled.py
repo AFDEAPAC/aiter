@@ -269,9 +269,98 @@ def test_select_decisions_follow_device_arch():
     print("[select_arch_per_device] PASS")
 
 
+def _stable_ref(x, starts, ends, k, key):
+    """The stable contract (op_tests/test_topk_per_row_stable.py): rank by key, a
+    tie to the smaller column, the selected columns ascending; a window of at most
+    k columns whole, -1 padded."""
+    cols = torch.arange(x.shape[1], device=x.device)
+    live = (cols >= starts[:, None].long()) & (cols < ends[:, None].long())
+    kk = key(x).masked_fill(~live, -1)
+    top = torch.sort(-kk, dim=1, stable=True).indices[:, :k]
+    out = torch.sort(top, dim=1).values.to(torch.int32)
+    n = (ends - starts).long()
+    pad = torch.arange(k, device=x.device)[None] >= n[:, None]
+    ident = (starts[:, None].long() + torch.arange(k, device=x.device)).to(torch.int32)
+    out = torch.where((n <= k)[:, None], ident, out)
+    return torch.where(pad, torch.full_like(out, -1), out)
+
+
+def _tie_heavy(rows, width, g):
+    """bf16-rounded scores with +-0 and NaNs of either sign mixed in."""
+    x = torch.randn(rows, width, generator=g, device="cuda").to(torch.bfloat16).float()
+    z = torch.rand(rows, width, generator=g, device="cuda")
+    x = torch.where(z < 0.02, torch.zeros_like(x), x)
+    x = torch.where((z >= 0.02) & (z < 0.04), -torch.zeros_like(x), x)
+    nan = torch.full_like(x, float("nan"))
+    x = torch.where((z >= 0.04) & (z < 0.042), nan, x)
+    return torch.where((z >= 0.042) & (z < 0.044), -nan, x)
+
+
+def _prefill_stable(x, rs, re, k, on, values):
+    _use_sampled(on)
+    rows, width = x.shape
+    idx = torch.empty(rows, k, dtype=torch.int32, device="cuda")
+    val = torch.empty(rows, k, device="cuda") if values else None
+    T.top_k_per_row_prefill(x, rs, re, idx, val, rows, width, 1, k, stable=True)
+    return idx, val
+
+
+def test_sampled_stable_contract():
+    """stable=True and tie='low' served by `sampled` give exactly what the
+    deterministic paths give: smallest-column ties, ascending columns, and the
+    same answer for a row wherever it sits in a batch of any size."""
+    if not aiter.topk_sampled_supports(8, N, K):
+        print("[sampled_stable] SKIP: `sampled` does not serve this shape here")
+        return
+    g = torch.Generator(device="cuda").manual_seed(3)
+    rows = 8
+    for k in (96, K):
+        x = _tie_heavy(rows, N, g)
+        lens = torch.tensor([N, N - 3, k, k - 5, 70001, 4099, N // 2, 1], device="cuda")
+        rs = (torch.rand(rows, generator=g, device="cuda") * (N - lens + 1)).int()
+        re = (rs + lens).int()
+
+        assert T._should_use_sampled_prefill(rows, N, 1, k, 0)
+        ref = _stable_ref(x, rs, re, k, _sign_key)
+        idx, val = _prefill_stable(x, rs, re, k, True, True)
+        assert torch.equal(idx, ref), f"k={k}: prefill stable=True vs the contract"
+        orig = _prefill_stable(x, rs, re, k, False, False)[0]
+        assert torch.equal(orig, idx), f"k={k}: vs the stable path"
+        want = torch.where(idx >= 0, x.gather(1, idx.clamp(min=0).long()), -torch.inf)
+        assert torch.equal(val.view(torch.int32), want.view(torch.int32)), "values"
+
+        _use_sampled(True)
+        assert (
+            S._choose(rows, N, N, k, 64, False, "low", False, True, 0, True)
+            == "sampled"
+        )
+        full = _bounds(rows, N)
+        got = aiter.topk_select(x, k, tie="low")[1]
+        assert torch.equal(
+            got, _stable_ref(x, *full, k, _nan_high_key)
+        ), f"k={k}: tie='low'"
+
+        # One row, three batch sizes, first and last place: one answer.
+        probe = x[3:4]
+        outs = []
+        for m in (1, 5, 33):
+            for pos in (0, m - 1):
+                b = torch.randn(m, N, generator=g, device="cuda")
+                b[pos] = probe[0]
+                s, e = _bounds(m, N)
+                idx = torch.empty(m, k, dtype=torch.int32, device="cuda")
+                T.top_k_per_row_prefill(b, s, e, idx, None, m, N, 1, k, stable=True)
+                outs.append((idx[pos], aiter.topk_select(b, k, tie="low")[1][pos]))
+        for a, b in outs[1:]:
+            assert torch.equal(a, outs[0][0]) and torch.equal(b, outs[0][1]), "batch"
+    _use_sampled(True)
+    print("[sampled_stable] PASS")
+
+
 if __name__ == "__main__":
     test_sampled_layout_contract()
     test_sampled_nan_order()
     test_sampled_overflow_all_equal()
     test_sampled_eligibility_per_device()
     test_select_decisions_follow_device_arch()
+    test_sampled_stable_contract()
