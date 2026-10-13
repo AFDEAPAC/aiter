@@ -1410,10 +1410,38 @@ def get_2stage_cfgs(
         return result
 
     cfg = _lookup_cfg(cfg_2stages)
+    _dsv41_ep1_tuned_flydsl = (
+        _dsv41_ep1_largem_requested
+        and os.environ.get("AITER_GFX942_DSV41_EP1_TUNED_FLYDSL", "0") == "1"
+    )
     if _dsv41_ep1_largem_requested:
-        # The generic tuned rows describe FP4 activations. This dedicated path
-        # must stay on the BF16-activation split-K FlyDSL family.
-        cfg = None
+        if not _dsv41_ep1_tuned_flydsl:
+            # Generic rows from other models may use FP4 activations or mixed
+            # backends. Preserve the validated BF16-activation split-K default.
+            cfg = None
+        elif cfg is not None:
+            kernel_name1 = str(cfg.get("kernelName1", ""))
+            kernel_name2 = str(cfg.get("kernelName2", ""))
+            if not (
+                kernel_name1.startswith("flydsl_moe1_abf16_wfp4_bf16_")
+                and kernel_name2.startswith("flydsl_moe2_abf16_wfp4_bf16_")
+                and int(cfg.get("ksplit", 0)) >= 2
+                and int(cfg.get("block_m", 0)) in (16, 32)
+            ):
+                raise RuntimeError(
+                    "DSV4.1 EP1 tuned path only accepts homogeneous BF16xFP4 "
+                    f"FlyDSL split-K rows, got {kernel_name1=}, {kernel_name2=}, "
+                    f"ksplit={cfg.get('ksplit')}, block_m={cfg.get('block_m')}"
+                )
+            # Loader padding is already zero-valued. The dedicated production
+            # path computes all 640 columns because the pad-skip specialization
+            # is invalid for this packed gfx942 layout; tuned rows must preserve
+            # that exact contract.
+            intermediate_pad = 0
+            logger.info(
+                "[dsv41-ep1-tuned] homogeneous FlyDSL config enabled: "
+                f"token={token} stage1={kernel_name1} stage2={kernel_name2}"
+            )
     if (
         cfg is None
         and not _dsv41_ep1_largem_requested
