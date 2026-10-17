@@ -12,7 +12,31 @@
 
 namespace aiter {
 
-template <typename DTYPE_I, typename DTYPE_O, int BlockSize, int thread_data_size, bool ADD_RESIDUAL=true, bool FUSE_QUANT=true, bool interleave = false, int num_row = 1>
+// Correctly rounded f32 n / d: the sequence LLVM emits for fdiv without fast-math, which is what Triton's
+// per-token quant runs. The module builds with -ffast-math, under which n / d becomes v_rcp_f32 and a multiply.
+// No denormal-mode switch: for the quant's operands (|n| >= 1e-10 or n = 1, 224 or a scale) the residuals stay
+// far above the f32 denormal range.
+__device__ __forceinline__ float ptq_div_rn(float n, float d)
+{
+    float q, d_s, n_s, rcp, e;
+    asm volatile("v_div_scale_f32 %1, vcc, %6, %6, %5\n\t"
+                 "v_rcp_f32 %3, %1\n\t"
+                 "v_div_scale_f32 %2, vcc, %5, %6, %5\n\t"
+                 "v_fma_f32 %4, -%1, %3, 1.0\n\t"
+                 "v_fma_f32 %3, %4, %3, %3\n\t"
+                 "v_mul_f32 %4, %2, %3\n\t"
+                 "v_fma_f32 %0, -%1, %4, %2\n\t"
+                 "v_fma_f32 %4, %0, %3, %4\n\t"
+                 "v_fma_f32 %1, -%1, %4, %2\n\t"
+                 "v_div_fmas_f32 %1, %1, %3, %4\n\t"
+                 "v_div_fixup_f32 %0, %1, %6, %5"
+                 : "=&v"(q), "=&v"(d_s), "=&v"(n_s), "=&v"(rcp), "=&v"(e)
+                 : "v"(n), "v"(d)
+                 : "vcc");
+    return q;
+}
+
+template <typename DTYPE_I, typename DTYPE_O, int BlockSize, int thread_data_size, bool ADD_RESIDUAL=true, bool FUSE_QUANT=true, bool interleave = false, int num_row = 1, bool DUAL_PTQ = false>
 __global__ void add_rmsnorm_quant_kernel(
     DTYPE_O* out,
     DTYPE_I* residual_out,
@@ -29,8 +53,11 @@ __global__ void add_rmsnorm_quant_kernel(
     int residual_out_stride,
     int out_stride,
     int group_size,
-    bool shuffle_scale=false,
-    bool emit_e8m0_scale=false)
+    bool shuffle_scale,
+    bool emit_e8m0_scale,
+    opus::fp8_t* ptq_out,
+    float* ptq_scale,
+    int ptq_stride)
     {
         static constexpr int32_t load_chunk_bytes = sizeof(DTYPE_I) * thread_data_size % 16 == 0 ? 16 : 8;
         static_assert(thread_data_size * sizeof(DTYPE_I) % load_chunk_bytes == 0, "thread_data_size * sizeof(DTYPE_I) must be a multiple of load_chunk_bytes");
@@ -304,6 +331,29 @@ __global__ void add_rmsnorm_quant_kernel(
             else
             {
                 store_vector<DTYPE_O_STORE, float, thread_data_size, RT, interleave, interleave_size, num_load_inst, DTYPE_O>(buffer_out, thread_data_float, row_offset);
+                if constexpr(DUAL_PTQ)
+                {
+                    // per-token fp8 of the bf16 row just stored, as SGLang's _per_token_group_quant_8bit
+                    // computes it from that row (eps 1e-10, fp8 max 224)
+                    vec_f thread_data_ptq;
+                    float thread_max = 0.0f;
+                    for(int i = 0; i < thread_data_size; i++)
+                    {
+                        thread_data_ptq[i] = static_cast<float>(opus::cast<DTYPE_O>(thread_data_float[i]));
+                        thread_max = fmaxf(thread_max, fabsf(thread_data_ptq[i]));
+                    }
+                    const float row_max = block_reduce<float, hipcub::Max, BlockSize, true>(thread_max, hipcub::Max());
+                    const float ptq_s   = ptq_div_rn(fmaxf(row_max, 1e-10f), 224.0f);
+                    const float ptq_inv = ptq_div_rn(1.0f, ptq_s);
+                    if(threadIdx.x == 0)
+                    {
+                        ptq_scale[idx] = ptq_s;
+                    }
+                    const int oob_q = (n + 3) / 4 * 4;
+                    auto buffer_ptq = opus::make_gmem<opus::fp8_t>(ptq_out + idx * static_cast<int64_t>(ptq_stride), oob_q * sizeof(opus::fp8_t));
+                    // |x * ptq_inv| <= 224 * (1 + 2^-22), which rounds to the same fp8 as its clamp to 224
+                    store_vector<opus::fp8_t, float, thread_data_size, RT, interleave, interleave_size, num_load_inst, opus::fp8_t>(buffer_ptq, thread_data_ptq, row_offset, ptq_inv);
+                }
             }
         };
         #pragma nounroll
@@ -335,7 +385,7 @@ __global__ void add_rmsnorm_quant_kernel(
                                                                                                      reinterpret_cast<DTYPE_I*>(input.data_ptr()), \
                                                                                                      reinterpret_cast<DTYPE_I*>(residual_in.data_ptr()), \
                                                                                                      reinterpret_cast<DTYPE_I*>(weight.data_ptr()), \
-                                                                                                     epsilon, gemma_norm, m, n, input_stride, residual_in_stride, residual_out_stride, out_stride, group_size, shuffle_scale, emit_e8m0_scale); \
+                                                                                                     epsilon, gemma_norm, m, n, input_stride, residual_in_stride, residual_out_stride, out_stride, group_size, shuffle_scale, emit_e8m0_scale, nullptr, nullptr, 0); \
                                                                                                      });
 
 #define ADD_RMSNORM_QUANT_KERNEL_IMPL(DTYPE_O, BlockSize, thread_data_size, ADD_RESIDUAL, FUSE_QUANT) \
@@ -608,6 +658,69 @@ __global__ void add_rmsnorm_quant_kernel(
         else
         {
             TORCH_CHECK(false, __func__, " not support output type: ", out.dtype());
+        }
+    }
+
+#define RMSNORM_DUAL_PTQ_KERNEL_IMPL(BlockSize, thread_data_size)                                                 \
+    add_rmsnorm_quant_kernel<DTYPE_I, DTYPE_I, BlockSize, thread_data_size, false, false, true, 1, true>          \
+        <<<dim3(m), dim3(BlockSize), 0, stream>>>(reinterpret_cast<DTYPE_I*>(out.data_ptr()),                     \
+                                                  nullptr,                                                        \
+                                                  nullptr,                                                        \
+                                                  reinterpret_cast<DTYPE_I*>(input.data_ptr()),                   \
+                                                  nullptr,                                                        \
+                                                  reinterpret_cast<DTYPE_I*>(weight.data_ptr()),                  \
+                                                  epsilon, false, m, n, input_stride, 0, 0, out_stride, 0,        \
+                                                  false, false,                                                   \
+                                                  reinterpret_cast<opus::fp8_t*>(q_out.data_ptr()),               \
+                                                  reinterpret_cast<float*>(q_scale.data_ptr()),                   \
+                                                  q_stride);
+
+    void rmsnorm_dual_ptq(
+        torch::Tensor& out,
+        torch::Tensor& q_out,
+        torch::Tensor& q_scale,
+        torch::Tensor& input,
+        torch::Tensor& weight,
+        double epsilon
+    )
+    {
+        TORCH_CHECK(input.dim() == 2 && input.stride(1) == 1, __func__, " needs a 2-D input with contiguous rows");
+        TORCH_CHECK(input.scalar_type() == torch::kBFloat16 && out.scalar_type() == torch::kBFloat16 &&
+                        weight.scalar_type() == torch::kBFloat16, __func__, " supports bf16 only");
+        TORCH_CHECK(q_out.dtype() == torch_fp8 && q_scale.scalar_type() == torch::kFloat32, __func__,
+                    " needs fp8 q_out and fp32 q_scale");
+        const int m = input.size(0);
+        const int n = input.size(1);
+        TORCH_CHECK(out.dim() == 2 && out.size(0) == m && out.size(1) == n && out.stride(1) == 1, __func__, " bad out");
+        TORCH_CHECK(q_out.dim() == 2 && q_out.size(0) == m && q_out.size(1) == n && q_out.stride(1) == 1, __func__,
+                    " bad q_out");
+        TORCH_CHECK(q_scale.numel() == m && q_scale.is_contiguous(), __func__, " q_scale needs one value per row");
+        TORCH_CHECK(weight.numel() == n, __func__, " bad weight");
+        if (m == 0)
+        {
+            return;
+        }
+        const int input_stride = input.stride(0);
+        const int out_stride = out.stride(0);
+        const int q_stride = q_out.stride(0);
+
+        const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(input));
+        const hipStream_t stream = at::hip::getCurrentHIPStream();
+        using DTYPE_I = typename t2opus<c10::BFloat16>::type;
+        if (n <= 512) {
+            RMSNORM_DUAL_PTQ_KERNEL_IMPL(64, 8);
+        } else if (n <= 1024) {
+            RMSNORM_DUAL_PTQ_KERNEL_IMPL(128, 8);
+        } else if (n <= 2048) {
+            RMSNORM_DUAL_PTQ_KERNEL_IMPL(256, 8);
+        } else if (n <= 4096) {
+            RMSNORM_DUAL_PTQ_KERNEL_IMPL(256, 16);
+        } else if (n <= 6144) {
+            RMSNORM_DUAL_PTQ_KERNEL_IMPL(256, 24);
+        } else if (n <= 8192) {
+            RMSNORM_DUAL_PTQ_KERNEL_IMPL(256, 32);
+        } else {
+            TORCH_CHECK(false, __func__, " not support n: ", n);
         }
     }
 }

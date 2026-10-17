@@ -34,6 +34,13 @@ void rmsnorm_quant(torch::Tensor& out,
                    bool shuffle_scale = false,
                    bool gemma_norm    = false);
 
+void rmsnorm_dual_ptq(torch::Tensor& out,
+                      torch::Tensor& q_out,
+                      torch::Tensor& q_scale,
+                      torch::Tensor& input,
+                      torch::Tensor& weight,
+                      double epsilon);
+
 void rmsnorm(torch::Tensor& out,
              torch::Tensor& input,
              torch::Tensor& weight,

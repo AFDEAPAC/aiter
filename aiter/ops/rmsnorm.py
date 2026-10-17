@@ -623,6 +623,17 @@ def rmsnorm_quant(
 
 
 @compile_ops("module_rmsnorm_quant")
+def rmsnorm_dual_ptq(
+    out: Tensor,
+    q_out: Tensor,
+    q_scale: Tensor,
+    input: Tensor,
+    weight: Tensor,
+    epsilon: float,
+) -> None: ...
+
+
+@compile_ops("module_rmsnorm_quant")
 def rmsnorm(
     out: Tensor,
     input: Tensor,

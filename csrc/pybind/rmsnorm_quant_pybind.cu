@@ -6,4 +6,12 @@
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     RMSNORM_QUANT_PYBIND;
+    m.def("rmsnorm_dual_ptq",
+          &aiter::rmsnorm_dual_ptq,
+          py::arg("out"),
+          py::arg("q_out"),
+          py::arg("q_scale"),
+          py::arg("input"),
+          py::arg("weight"),
+          py::arg("epsilon"));
 }
