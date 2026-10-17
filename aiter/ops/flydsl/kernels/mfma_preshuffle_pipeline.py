@@ -354,7 +354,30 @@ def load_b_raw_w4a16(
     return packed32
 
 
-def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_val=None, defer_scale16=False):
+def _trunc_f32_pair_to_bf16x2(lo_bits, hi_bits, fast_pack: bool):
+    """Pack the high halves of two f32 bit patterns into one bf16x2 dword.
+
+    Computes ``(hi_bits & 0xFFFF0000) | (lo_bits >> 16)``. fast_pack=False keeps the and/or
+    form (v_and_b32 + v_or_b32_sdwa); fast_pack=True emits one v_perm_b32 selecting bytes
+    {hi.b3, hi.b2, lo.b3, lo.b2}, bit-for-bit the same dword in 1 VALU.
+    """
+    if fast_pack:
+        from flydsl.expr import rocdl as _perm_rocdl
+
+        return _perm_rocdl.perm_b32(hi_bits, lo_bits, fx.Int32(0x07060302))
+    return (lo_bits >> fx.Int32(16)) | (hi_bits & fx.Int32(0xFFFF0000))
+
+
+def _int4_to_bf16x4_i64_gfx950(
+    packed32,
+    nibble_offsets,
+    arith,
+    vector,
+    scale_val=None,
+    defer_scale16=False,
+    fast_pack=False,
+    pk_bf16_cvt=True,
+):
     """Convert 4 int4 nibbles to 4 bf16 packed as i64 using gfx950 instructions.
 
     Uses v_cvt_off_f32_i4_sdwa with byte_sel to avoid per-nibble shifts.
@@ -387,9 +410,16 @@ def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_va
         if scale_val is not None:
             raw_scale = _uw(scale_val)
             f32_vals = [_MulFOp(v, raw_scale).result for v in f32_vals]
-        # Use v_cvt_pk_bf16_f32 for proper f32→bf16 (no bit-shift trick needed).
-        i32_lo = rocdl.cvt_pk_bf16_f32(f32_vals[0], f32_vals[1])
-        i32_hi = rocdl.cvt_pk_bf16_f32(f32_vals[2], f32_vals[3])
+        if pk_bf16_cvt:
+            # Use v_cvt_pk_bf16_f32 for proper f32→bf16 (no bit-shift trick needed).
+            i32_lo = rocdl.cvt_pk_bf16_f32(f32_vals[0], f32_vals[1])
+            i32_hi = rocdl.cvt_pk_bf16_f32(f32_vals[2], f32_vals[3])
+        else:
+            # gfx942 has no v_cvt_pk_bf16_f32; truncation is exact because the deferred-scale
+            # value n/16 (n in [-8, 7]) has at most 3 mantissa bits.
+            bf16_vals = [arith.bitcast(T.i32, _av(v)) for v in f32_vals]
+            i32_lo = _trunc_f32_pair_to_bf16x2(bf16_vals[0], bf16_vals[1], fast_pack)
+            i32_hi = _trunc_f32_pair_to_bf16x2(bf16_vals[2], bf16_vals[3], fast_pack)
     else:
         c16 = fx.Float32(16.0)
         if scale_val is not None:
@@ -399,18 +429,25 @@ def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_va
         raw_scale = _uw(effective_scale)
         f32_vals = [_MulFOp(v, raw_scale).result for v in f32_vals]
         # Truncate f32→bf16 via bit-shift (exact for scaled int values).
-        c16_shift = fx.Int32(16)
-        c_ffff0000 = fx.Int32(0xFFFF0000)
         bf16_vals = [arith.bitcast(T.i32, _av(v)) for v in f32_vals]
-        i32_lo = (bf16_vals[0] >> c16_shift) | (bf16_vals[1] & c_ffff0000)
-        i32_hi = (bf16_vals[2] >> c16_shift) | (bf16_vals[3] & c_ffff0000)
+        i32_lo = _trunc_f32_pair_to_bf16x2(bf16_vals[0], bf16_vals[1], fast_pack)
+        i32_hi = _trunc_f32_pair_to_bf16x2(bf16_vals[2], bf16_vals[3], fast_pack)
 
     v2 = vector.from_elements(T.vec(2, T.i32), [i32_lo, i32_hi])
     v64 = vector.bitcast(T.vec(1, T.i64), v2)
     return vector.extract(v64, static_position=[0], dynamic_position=[])
 
 
-def unpack_b_w4a16(packed32, arith, vector, scale_val=None, use_gfx950_cvt=False, defer_scale16=False):
+def unpack_b_w4a16(
+    packed32,
+    arith,
+    vector,
+    scale_val=None,
+    use_gfx950_cvt=False,
+    defer_scale16=False,
+    fast_pack=False,
+    pk_bf16_cvt=True,
+):
     """Phase 2 of W4A16 B load: unpack int4->int8 + convert int8->bf16.
 
     Takes raw packed32 from load_b_raw_w4a16 and produces (b0, b1) --
@@ -424,8 +461,14 @@ def unpack_b_w4a16(packed32, arith, vector, scale_val=None, use_gfx950_cvt=False
     in the epilogue.
     """
     if use_gfx950_cvt:
-        b0 = _int4_to_bf16x4_i64_gfx950(packed32, [0, 2, 4, 6], arith, vector, scale_val, defer_scale16=defer_scale16)
-        b1 = _int4_to_bf16x4_i64_gfx950(packed32, [1, 3, 5, 7], arith, vector, scale_val, defer_scale16=defer_scale16)
+        b0 = _int4_to_bf16x4_i64_gfx950(
+            packed32, [0, 2, 4, 6], arith, vector, scale_val,
+            defer_scale16=defer_scale16, fast_pack=fast_pack, pk_bf16_cvt=pk_bf16_cvt,
+        )
+        b1 = _int4_to_bf16x4_i64_gfx950(
+            packed32, [1, 3, 5, 7], arith, vector, scale_val,
+            defer_scale16=defer_scale16, fast_pack=fast_pack, pk_bf16_cvt=pk_bf16_cvt,
+        )
         return (b0, b1)
     even, odd = _unpack_int4_to_int8_pair(packed32)
     b0 = _i8x4_in_i32_to_bf16x4_i64(even, arith, vector, scale_val=scale_val)

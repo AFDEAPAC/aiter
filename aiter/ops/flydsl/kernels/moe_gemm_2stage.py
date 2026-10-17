@@ -66,6 +66,25 @@ from .mfma_preshuffle_pipeline import (
 )
 
 
+def _moe_a16wi4_opt_mode() -> int:
+    """``AITER_MOE_A16WI4_OPT`` bit mask for the W4A16 (a16wi4) dequant; default 0 = stock kernel.
+
+      bit 0 (1): pack f32 halves into bf16x2 with one v_perm_b32 (bit-identical).
+      bit 1 (2): apply the per-32 group scale once to the f32 MFMA partial instead of per weight
+                 (deferred-scale pipeline); needs bit 2 on gfx942.
+      bit 2 (4): use v_cvt_off_f32_i4 for the int4 -> f32 convert on gfx942.
+    """
+    raw = os.environ.get("AITER_MOE_A16WI4_OPT", "0").strip().lower()
+    if raw in ("", "0", "false", "no", "off"):
+        return 0
+    if raw in ("true", "yes", "on"):
+        return 7
+    try:
+        return int(raw, 0)
+    except ValueError:
+        return 0
+
+
 @contextmanager
 def _if_then(if_op):
     """Compat helper for SCF IfOp then-region across old/new Python APIs."""
@@ -217,6 +236,10 @@ def compile_moe_gemm1(
     _has_cvt_off_f32_i4 = hasattr(rocdl, "cvt_off_f32_i4")
     # gfx950 int4 fast cvt path; FP4 never uses it (pure-ALU dequant on all archs).
     use_gfx950_cvt = is_int4_bf16 and _is_gfx950 and _has_cvt_off_f32_i4
+    _a16wi4_opt = _moe_a16wi4_opt_mode() if is_int4_bf16 else 0
+    use_cvt_off_i4 = use_gfx950_cvt or (bool(_a16wi4_opt & 4) and is_int4_bf16 and _has_cvt_off_f32_i4)
+    use_fast_bf16_pack = bool(_a16wi4_opt & 1)
+    use_defer_scale = use_gfx950_cvt or (bool(_a16wi4_opt & 2) and use_cvt_off_i4)
 
     # Split-K validation
     _is_splitk = k_batch > 1
@@ -1185,7 +1208,7 @@ def compile_moe_gemm1(
                                     else:
                                         packed_g, sc_g = b_gate_raw[ni], None
                                         packed_u, sc_u = b_up_raw[ni], None
-                                    if const_expr(is_int4_bf16_groupwise and use_gfx950_cvt):
+                                    if const_expr(is_int4_bf16_groupwise and use_defer_scale):
                                         # Defer group scale to post-MFMA FMA with pipeline:
                                         # Issue current MFMA, then apply FMA for previous iteration's result.
                                         bg0, bg1 = unpack_b_w4a16(
@@ -1195,6 +1218,8 @@ def compile_moe_gemm1(
                                             scale_val=None,
                                             use_gfx950_cvt=True,
                                             defer_scale16=True,
+                                            fast_pack=use_fast_bf16_pack,
+                                            pk_bf16_cvt=use_gfx950_cvt,
                                         )
                                         tmp_g = mfma_k64(zero_f32_acc, a0, a1, bg0, bg1)
                                         bu0, bu1 = unpack_b_w4a16(
@@ -1204,6 +1229,8 @@ def compile_moe_gemm1(
                                             scale_val=None,
                                             use_gfx950_cvt=True,
                                             defer_scale16=True,
+                                            fast_pack=use_fast_bf16_pack,
+                                            pk_bf16_cvt=use_gfx950_cvt,
                                         )
                                         tmp_u = mfma_k64(zero_f32_acc, a0, a1, bu0, bu1)
                                         # Apply FMA for previous pending result (MFMA already completed).
@@ -1238,8 +1265,10 @@ def compile_moe_gemm1(
                                             arith,
                                             vector,
                                             scale_val=sc_g,
-                                            use_gfx950_cvt=use_gfx950_cvt,
-                                            defer_scale16=use_gfx950_cvt,
+                                            use_gfx950_cvt=use_cvt_off_i4,
+                                            defer_scale16=use_defer_scale,
+                                            fast_pack=use_fast_bf16_pack,
+                                            pk_bf16_cvt=use_gfx950_cvt,
                                         )
                                         gate_list[acc_idx] = mfma_k64(gate_list[acc_idx], a0, a1, bg0, bg1)
                                         bu0, bu1 = unpack_b_w4a16(
@@ -1247,8 +1276,10 @@ def compile_moe_gemm1(
                                             arith,
                                             vector,
                                             scale_val=sc_u,
-                                            use_gfx950_cvt=use_gfx950_cvt,
-                                            defer_scale16=use_gfx950_cvt,
+                                            use_gfx950_cvt=use_cvt_off_i4,
+                                            defer_scale16=use_defer_scale,
+                                            fast_pack=use_fast_bf16_pack,
+                                            pk_bf16_cvt=use_gfx950_cvt,
                                         )
                                         up_list[acc_idx] = mfma_k64(up_list[acc_idx], a0, a1, bu0, bu1)
                         # Drain last pending FMA.
@@ -1562,7 +1593,7 @@ def compile_moe_gemm1(
 
                 # When defer_scale16 was used, the x16 correction for v_cvt_off_f32_i4
                 # was omitted from the hot loop.  Fold it into the epilogue scale.
-                if const_expr(use_gfx950_cvt):
+                if const_expr(use_defer_scale):
                     _c16 = fx.Float32(16.0)
                     sw_gate_vals = [v * _c16 for v in sw_gate_vals]
                     sw_up_vals = [v * _c16 for v in sw_up_vals]
@@ -2154,6 +2185,10 @@ def compile_moe_gemm2(
     _is_gfx950 = "gfx95" in get_hip_arch()
     _has_cvt_off_f32_i4 = hasattr(rocdl, "cvt_off_f32_i4")
     use_gfx950_cvt = is_int4_bf16 and _is_gfx950 and _has_cvt_off_f32_i4
+    _a16wi4_opt = _moe_a16wi4_opt_mode() if is_int4_bf16 else 0
+    use_cvt_off_i4 = use_gfx950_cvt or (bool(_a16wi4_opt & 4) and is_int4_bf16 and _has_cvt_off_f32_i4)
+    use_fast_bf16_pack = bool(_a16wi4_opt & 1)
+    use_defer_scale = use_gfx950_cvt or (bool(_a16wi4_opt & 2) and use_cvt_off_i4)
 
     mfma_i32_k32 = None
     if is_int8:
@@ -3196,7 +3231,7 @@ def compile_moe_gemm2(
                                             sc = extract_bf16_scale(arith, sc, ku)
                                     else:
                                         packed, sc = b_raw[ni], None
-                                    if const_expr(is_int4_bf16_groupwise and use_gfx950_cvt):
+                                    if const_expr(is_int4_bf16_groupwise and use_defer_scale):
                                         b0, b1 = unpack_b_w4a16(
                                             packed,
                                             arith,
@@ -3204,6 +3239,8 @@ def compile_moe_gemm2(
                                             scale_val=None,
                                             use_gfx950_cvt=True,
                                             defer_scale16=True,
+                                            fast_pack=use_fast_bf16_pack,
+                                            pk_bf16_cvt=use_gfx950_cvt,
                                         )
                                         tmp = mfma_k64(zero_f32_acc, a0, a1, b0, b1)
                                         if _pending_acc is not None:
@@ -3225,8 +3262,10 @@ def compile_moe_gemm2(
                                             arith,
                                             vector,
                                             scale_val=sc,
-                                            use_gfx950_cvt=use_gfx950_cvt,
-                                            defer_scale16=use_gfx950_cvt,
+                                            use_gfx950_cvt=use_cvt_off_i4,
+                                            defer_scale16=use_defer_scale,
+                                            fast_pack=use_fast_bf16_pack,
+                                            pk_bf16_cvt=use_gfx950_cvt,
                                         )
                                         acc_list[acc_idx] = mfma_k64(acc_list[acc_idx], a0, a1, b0, b1)
                         # Drain last pending FMA.
@@ -3561,7 +3600,7 @@ def compile_moe_gemm2(
 
                 # When defer_scale16 was used, the x16 correction for v_cvt_off_f32_i4
                 # was omitted from the hot loop.  Fold it into the epilogue scale.
-                if const_expr(use_gfx950_cvt):
+                if const_expr(use_defer_scale):
                     _c16 = fx.Float32(16.0)
                     sw_vals = [v * _c16 for v in sw_vals]
 
