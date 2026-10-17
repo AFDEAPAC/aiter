@@ -5271,7 +5271,7 @@ def compile_mixed_moe_gemm1_a16w4(
         module_name = (
             f"mfma_a16w4_moe1_mxfp4_{out_dtype}_{_mode_tag}_{epilog_tag}"
             f"_t{tile_m}x{tile_n}x{tile_k}_kb{k_batch}"
-            f"{_wpe_tag}{_ski_tag}{_bias_tag}{_act_tag}{_pad_tag}_abi1"
+            f"{_wpe_tag}{_ski_tag}{_bias_tag}{_act_tag}{_pad_tag}_abi1{'_lutdq' if os.environ.get('AITER_GFX942_FP4_LUT_DEQUANT', '0') == '1' else ''}"
         ).replace("-", "_")
     else:
         _fp4q_tag = "_fp4q" if _need_fp4 else ""
@@ -7598,7 +7598,7 @@ def compile_mixed_moe_gemm2_a16w4(
         f"mfma_moe2_a{a_dtype}_w{b_dtype}_{out_s}_cshuffle"
         f"_t{tile_m}x{tile_n}x{tile_k}"
         f"_vscale_fix3"
-        f"{_pm_tag}{_sbm_tag}{_xcd_tag}{_kb_tag}{_wpe_tag}{_bias_tag}{_pad_tag}"
+        f"{_pm_tag}{_sbm_tag}{_xcd_tag}{_kb_tag}{_wpe_tag}{_bias_tag}{_pad_tag}{'_lutdq' if os.environ.get('AITER_GFX942_FP4_LUT_DEQUANT', '0') == '1' else ''}"
     ).replace("-", "_")
 
     # ---- A16W4 k_batch validation ----

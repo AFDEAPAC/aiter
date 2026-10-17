@@ -9,6 +9,7 @@ Key primitives:
 """
 
 from __future__ import annotations
+import os
 from dataclasses import dataclass
 from flydsl._mlir import ir
 from flydsl._mlir.dialects.arith import CmpIPredicate
@@ -1261,6 +1262,53 @@ def _unpack_b_mxfp4_bf16_sw(packed32, arith, vector, scale_f32):
     return (b0, b1)
 
 
+def _unpack_b_mxfp4_bf16_lut(packed32, arith, vector, scale_f32):
+    """Table-lookup form of _unpack_b_mxfp4_bf16_sw, bit-identical to it for finite scales.
+
+    The 8 nibbles share *scale_f32*: the 8 magnitudes are scaled with the f32 multiply and bf16
+    truncation the software path applies per element, split into 8-entry low-byte and high-byte
+    tables, and each nibble is decoded with v_perm_b32 lookups. A negative nibble flips the bf16
+    sign bit, which is the bit pattern of the negated f32 product.
+    """
+    from flydsl.expr import rocdl as _rocdl
+
+    def c32(v):
+        return arith.constant(v, type=T.i32)
+
+    def perm(hi, lo, sel):
+        return _rocdl.perm_b32(hi, lo, c32(sel) if isinstance(sel, int) else sel)
+
+    prods = [
+        arith.bitcast(T.i32, arith.constant(m, type=T.f32) * scale_f32)
+        for m in (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+    ]
+    pairs = [perm(prods[2 * i + 1], prods[2 * i], 0x07060302) for i in range(4)]
+    lut_lo_a = perm(pairs[1], pairs[0], 0x06040200)
+    lut_hi_a = perm(pairs[1], pairs[0], 0x07050301)
+    lut_lo_b = perm(pairs[3], pairs[2], 0x06040200)
+    lut_hi_b = perm(pairs[3], pairs[2], 0x07050301)
+
+    c4 = c32(4)
+    even_mag = arith.andi(packed32, c32(0x07070707))
+    odd_mag = arith.andi(arith.shrui(packed32, c4), c32(0x07070707))
+    odd_sgn = arith.andi(packed32, c32(0x80808080))
+    even_sgn = arith.andi(arith.shli(packed32, c4), c32(0x80808080))
+
+    vec2_i32 = T.i32x2
+    vec1_i64 = T.vec(1, T.i64)
+    halves = []
+    for spread in (0x05010400, 0x07030602):
+        mag = perm(odd_mag, even_mag, spread)
+        sgn = perm(odd_sgn, even_sgn, spread)
+        lo4 = perm(lut_lo_b, lut_lo_a, mag)
+        hi4 = arith.xori(perm(lut_hi_b, lut_hi_a, mag), sgn)
+        lo_dw = perm(hi4, lo4, 0x05010400)
+        hi_dw = perm(hi4, lo4, 0x07030602)
+        v64 = vector.bitcast(vec1_i64, vector.from_elements(vec2_i32, [lo_dw, hi_dw]))
+        halves.append(vector.extract(v64, static_position=[0], dynamic_position=[]))
+    return halves[0], halves[1]
+
+
 def unpack_b_mxfp4_bf16(packed32, arith, vector, scale_f32=None, use_hw_cvt=True):
     """Unpack 8 FP4 E2M1 nibbles (packed in i32) to 2 x i64 (8 bf16).
 
@@ -1282,4 +1330,6 @@ def unpack_b_mxfp4_bf16(packed32, arith, vector, scale_f32=None, use_hw_cvt=True
     """
     if use_hw_cvt and scale_f32 is not None:
         return _unpack_b_mxfp4_bf16_hw(packed32, arith, vector, scale_f32)
+    if scale_f32 is not None and os.environ.get("AITER_GFX942_FP4_LUT_DEQUANT", "0") == "1":
+        return _unpack_b_mxfp4_bf16_lut(packed32, arith, vector, scale_f32)
     return _unpack_b_mxfp4_bf16_sw(packed32, arith, vector, scale_f32)
