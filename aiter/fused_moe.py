@@ -445,6 +445,41 @@ def fused_moe_(
     quant_type = quant_remap.get(quant_type, quant_type)
     q_dtype_w = w1.dtype
     q_dtype_a = w1.dtype if w1.dtype != torch.uint32 else dtypes.fp8
+
+    # gfx942 DSV4.1 TP4/EP1 (E=384, inter 640): run the a16wmix pair instead of the
+    # split-K exact path. Requires the loader's w2 scale in e8m0_shuffle layout
+    # (sglang fp8.py, same env); w1/w2 and the w1 scale layouts are unchanged.
+    if (
+        os.environ.get("AITER_GFX942_DSV41_A16WMIX", "0") == "1"
+        and get_gfx() == "gfx942"
+        and (model_dim, inter_dim, E, topk) == (5120, 640, 384, 6)
+        and activation == ActivationType.Silu
+        and quant_type == QuantType.per_1x32
+        and q_dtype_w == dtypes.fp4x2
+        and hidden_states.dtype == dtypes.bf16
+        and dtype == dtypes.bf16
+        and isShuffled
+        and (expert_mask is None or expert_mask.numel() == E)
+        and not doweight_stage1
+        and num_local_tokens is None
+        and bias1 is None
+        and bias2 is None
+    ):
+        from aiter.ops.flydsl.a16wmix_fused_moe import fused_moe_a16wmix
+
+        return fused_moe_a16wmix(
+            hidden_states,
+            w1,
+            w2,
+            topk_weight,
+            topk_ids,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            act="silu",
+            swiglu_limit=swiglu_limit if swiglu_limit > 0 else float("inf"),
+            block_m=32 if block_size_M is None else int(block_size_M),
+            w1_layout="standard",
+        )
     # If input is already FP8-quantized (e.g. from FP8 dispatch) with block scale,
     # use FP8 as activation dtype to skip redundant re-quantization
     if (
