@@ -449,10 +449,20 @@ def fused_moe_(
     # gfx942 DSV4.1 TP4/EP1 (E=384, inter 640): run the a16wmix pair instead of the
     # split-K exact path. Requires the loader's w2 scale in e8m0_shuffle layout
     # (sglang fp8.py, same env); w1/w2 and the w1 scale layouts are unchanged.
+    # TP8/EP1 shards the intermediate to 288 -> round_up(128)=384 (pad 96); the
+    # a16wmix kernel is inter_dim-parameterized (_pick_tile(384)=128), so extend
+    # the shape set behind a dedicated default-OFF env so the TP4 (640) path and
+    # every non-TP8 dispatch stay byte-for-byte unchanged.
     if (
         os.environ.get("AITER_GFX942_DSV41_A16WMIX", "0") == "1"
         and get_gfx() == "gfx942"
-        and (model_dim, inter_dim, E, topk) == (5120, 640, 384, 6)
+        and (
+            (model_dim, inter_dim, E, topk) == (5120, 640, 384, 6)
+            or (
+                os.environ.get("AITER_GFX942_DSV41_A16WMIX_TP8EP1", "0") == "1"
+                and (model_dim, inter_dim, E, topk) == (5120, 384, 384, 6)
+            )
+        )
         and activation == ActivationType.Silu
         and quant_type == QuantType.per_1x32
         and q_dtype_w == dtypes.fp4x2
@@ -920,9 +930,19 @@ def get_ksplit(token, topk, expert, inter_dim, model_dim):
         return 0
     tilek = 256
     split_max = (cu_num + tg_num - 1) // tg_num
+    # gfx942 DSV4.1 TP8-EP1 wint4: only kb in {1,2,4} have compiled FlyDSL kernels
+    # (kb5, selected by the generic divisor search, aborts with "Invalid FlyDSL
+    # kernel name ..._kb5"). Behind a dedicated default-OFF env so every other
+    # dispatch, including TP4, keeps the exact same split selection.
+    compiled_only = (
+        os.environ.get("AITER_GFX942_DSV41_TP8_KSPLIT_COMPILED", "0") == "1"
+        and get_gfx() == "gfx942"
+    )
     # at least split = 2
     for i in reversed(range(2, split_max + 1)):
         if (model_dim % i == 0) and ((model_dim // i) % tilek == 0):
+            if compiled_only and i not in (2, 4):
+                continue
             return i
     return 0
 
