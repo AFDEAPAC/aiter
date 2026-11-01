@@ -36,6 +36,13 @@ void rmsnorm_quant(aiter_tensor_t& out,
                    bool gemma_norm         = false,
                    bool scale_layout_m32k4 = false); // fp8 + e8m0 + group 32: ASM GEMM A-scale layout
 
+void rmsnorm_dual_ptq(aiter_tensor_t& out,
+                      aiter_tensor_t& q_out,
+                      aiter_tensor_t& q_scale,
+                      aiter_tensor_t& input,
+                      aiter_tensor_t& weight,
+                      double epsilon);
+
 void rmsnorm(aiter_tensor_t& out,
              aiter_tensor_t& input,
              aiter_tensor_t& weight,

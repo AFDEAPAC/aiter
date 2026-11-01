@@ -10,7 +10,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
-from .moe_2stage_a16wmix.utils import make_a_loader, make_b_loader
+from .moe_2stage_a16wmix.utils_upstream import make_a_loader, make_b_loader
 from .mxfp4_gemm_common import lds_typed_ptr
 
 _NUM_WAVES = 4

@@ -633,6 +633,23 @@ def rmsnorm_quant(
 
 
 @compile_ops("module_rmsnorm_quant", develop=True)
+def rmsnorm_dual_ptq(
+    out: Tensor,
+    q_out: Tensor,
+    q_scale: Tensor,
+    input: Tensor,
+    weight: Tensor,
+    epsilon: float,
+) -> None:
+    """Fused RMSNorm writing both the bf16 norm and its per-token fp8 quant.
+
+    ``q_out``/``q_scale`` receive the same values a separate per-token quant of
+    ``out`` would produce, so a consumer can take the pair in place of quantizing
+    the norm itself.
+    """
+
+
+@compile_ops("module_rmsnorm_quant", develop=True)
 def rmsnorm(
     out: Tensor,
     input: Tensor,

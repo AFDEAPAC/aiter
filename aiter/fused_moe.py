@@ -1521,6 +1521,73 @@ def _fused_moe_impl(
     elif _q_dtype_a is not None:
         q_dtype_a = _q_dtype_a
 
+    # gfx942 DSV4.1 TP4/EP1 (E=384, inter 640): run the a16wmix pair instead of the
+    # split-K exact path. Requires the loader's w2 scale in e8m0_shuffle layout
+    # (sglang fp8.py, same env); w1/w2 and the w1 scale layouts are unchanged.
+    # TP8/EP1 shards the intermediate to 288 -> round_up(128)=384 (pad 96); the
+    # a16wmix kernel is inter_dim-parameterized (_pick_tile(384)=128), so extend
+    # the shape set behind a dedicated default-OFF env so the TP4 (640) path and
+    # every non-TP8 dispatch stay byte-for-byte unchanged.
+    # Ported from the ali-private aiter (sglang 0.5.20 image). The upstream
+    # _fused_moe_impl grew parameters the a16wmix pair does not implement
+    # (output=, stage2_scatter=, hidden/intermediate padding, beta/linear_beta,
+    # the quant_dtype_a* overrides and the private _metadata/_stage hooks), so
+    # each one is required to be at its default here rather than silently ignored.
+    if (
+        os.environ.get("AITER_GFX942_DSV41_A16WMIX", "0") == "1"
+        and get_gfx() == "gfx942"
+        and (
+            (model_dim, inter_dim, E, topk) == (5120, 640, 384, 6)
+            or (
+                os.environ.get("AITER_GFX942_DSV41_A16WMIX_TP8EP1", "0") == "1"
+                and (model_dim, inter_dim, E, topk) == (5120, 384, 384, 6)
+            )
+        )
+        and activation == ActivationType.Silu
+        and quant_type == QuantType.per_1x32
+        and q_dtype_w == dtypes.fp4x2
+        and hidden_states.dtype == dtypes.bf16
+        and dtype == dtypes.bf16
+        and isShuffled
+        and (expert_mask is None or expert_mask.numel() == E)
+        and not doweight_stage1
+        and num_local_tokens is None
+        and bias1 is None
+        and bias2 is None
+        # Matches AMD d7a268177's gate exactly. Earlier ports of this block also
+        # required output/stage2_scatter/hidden_pad/intermediate_pad/beta/
+        # linear_beta/quant_dtype_a*/the private _metadata and _stage hooks to be
+        # at their defaults, reasoning that the a16wmix pair does not implement
+        # them. In the real serving path at least one of those is non-default, so
+        # the arm never fired and the MoE fell through to upstream's generic
+        # kernel, which aborts on gfx942 with "not support output type: fp4x2".
+        # intermediate_pad in particular is EXPECTED to be non-zero: the sglang
+        # loader rounds the TP-sharded intermediate up (576 -> 640 at TP4,
+        # 288 -> 384 at TP8) and pads the weights, so fused_moe_a16wmix recovers
+        # the padded inter_dim from w2's byte count.
+    ):
+        from aiter.ops.flydsl.a16wmix_fused_moe import fused_moe_a16wmix
+
+        return fused_moe_a16wmix(
+            hidden_states,
+            w1,
+            w2,
+            topk_weight,
+            topk_ids,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            act="silu",
+            # upstream defaults swiglu_limit to None where the source image
+            # defaulted it to 0.0; both mean "no limit" to the kernel.
+            swiglu_limit=(
+                swiglu_limit
+                if swiglu_limit is not None and swiglu_limit > 0
+                else float("inf")
+            ),
+            block_m=32 if block_size_M is None else int(block_size_M),
+            w1_layout="standard",
+        )
+
     grouped_a8w4_out = None
     from aiter.ops.flydsl.grouped_moe_gfx1250 import grouped_gemm_gfx1250_a8w4
 
@@ -2200,9 +2267,19 @@ def get_ksplit(token, topk, expert, inter_dim, model_dim):
         return 0
     tilek = 256
     split_max = (cu_num + tg_num - 1) // tg_num
+    # gfx942 DSV4.1 TP8-EP1 wint4: only kb in {1,2,4} have compiled FlyDSL kernels
+    # (kb5, selected by the generic divisor search, aborts with "Invalid FlyDSL
+    # kernel name ..._kb5"). Behind a dedicated default-OFF env so every other
+    # dispatch, including TP4, keeps the exact same split selection.
+    compiled_only = (
+        os.environ.get("AITER_GFX942_DSV41_TP8_KSPLIT_COMPILED", "0") == "1"
+        and get_gfx() == "gfx942"
+    )
     # at least split = 2
     for i in reversed(range(2, split_max + 1)):
         if (model_dim % i == 0) and ((model_dim // i) % tilek == 0):
+            if compiled_only and i not in (2, 4):
+                continue
             return i
     return 0
 
