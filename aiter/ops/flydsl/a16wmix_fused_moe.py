@@ -20,12 +20,13 @@ import os
 import torch
 
 from .moe_a16wmix_host import flydsl_a16w4_gemm1, flydsl_a16w4_gemm2, _resolve_ours_tuned
+from aiter.ops.flydsl._dsv41_defaults import dsv41_on
 
 logger = logging.getLogger(__name__)
 _ANNOUNCED = False
 _FP8_FALLBACK_WARNED = False
-_SORT_MP_SMALL = os.environ.get("AITER_A16WMIX_SORT_MP_SMALL", "0") == "1"
-_SKIP_BUF_ZERO = os.environ.get("AITER_A16WMIX_SKIP_BUF_ZERO", "0") == "1"
+_SORT_MP_SMALL = os.environ.get("AITER_A16WMIX_SORT_MP_SMALL", dsv41_on()) == "1"
+_SKIP_BUF_ZERO = os.environ.get("AITER_A16WMIX_SKIP_BUF_ZERO", dsv41_on()) == "1"
 _FP8_S2_FALLBACK_WARNED = False
 
 
@@ -52,7 +53,7 @@ def _fp8_enabled():
     compile. NOTE: an A/B in one process also needs FLYDSL_RUNTIME_ENABLE_CACHE=0 only
     if the kernel *name* collides -- it does not here, a_dtype is in the name.
     """
-    return os.environ.get("AITER_A16WMIX_FP8", "0") not in ("0", "", "false", "False")
+    return os.environ.get("AITER_A16WMIX_FP8", dsv41_on()) not in ("0", "", "false", "False")
 
 
 def _fp8_s2_enabled():
@@ -63,7 +64,7 @@ def _fp8_s2_enabled():
     the two to cost accuracy -- keeping the gates independent makes "stage1 only" and
     "both stages" separately measurable instead of one all-or-nothing switch.
     """
-    return os.environ.get("AITER_A16WMIX_FP8_S2", "0") not in ("0", "", "false", "False")
+    return os.environ.get("AITER_A16WMIX_FP8_S2", dsv41_on()) not in ("0", "", "false", "False")
 
 
 def _pick_tile(dim, candidates=(256, 128, 64)):

@@ -60,6 +60,7 @@ from aiter.ops.opus import moe_stage2_a8w4 as _opus_a8w4
 from aiter.ops.opus.moe_stage1_a8w4 import (
     opus_a8w4_stage1_wrapper as _opus_a8w4_stage1_wrapper,
 )
+from aiter.ops.flydsl._dsv41_defaults import dsv41_on
 
 
 @functools.lru_cache(maxsize=1)
@@ -1534,12 +1535,12 @@ def _fused_moe_impl(
     # the quant_dtype_a* overrides and the private _metadata/_stage hooks), so
     # each one is required to be at its default here rather than silently ignored.
     if (
-        os.environ.get("AITER_GFX942_DSV41_A16WMIX", "0") == "1"
+        os.environ.get("AITER_GFX942_DSV41_A16WMIX", dsv41_on()) == "1"
         and get_gfx() == "gfx942"
         and (
             (model_dim, inter_dim, E, topk) == (5120, 640, 384, 6)
             or (
-                os.environ.get("AITER_GFX942_DSV41_A16WMIX_TP8EP1", "0") == "1"
+                os.environ.get("AITER_GFX942_DSV41_A16WMIX_TP8EP1", dsv41_on()) == "1"
                 and (model_dim, inter_dim, E, topk) == (5120, 384, 384, 6)
             )
         )
@@ -2272,7 +2273,7 @@ def get_ksplit(token, topk, expert, inter_dim, model_dim):
     # kernel name ..._kb5"). Behind a dedicated default-OFF env so every other
     # dispatch, including TP4, keeps the exact same split selection.
     compiled_only = (
-        os.environ.get("AITER_GFX942_DSV41_TP8_KSPLIT_COMPILED", "0") == "1"
+        os.environ.get("AITER_GFX942_DSV41_TP8_KSPLIT_COMPILED", dsv41_on()) == "1"
         and get_gfx() == "gfx942"
     )
     # at least split = 2
