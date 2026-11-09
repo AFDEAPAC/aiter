@@ -282,7 +282,16 @@ def _default_tiles_fallback(*, D_HIDDEN, D_INTER, tokens, w_dtype, tile_m, stage
 
 
 
-def _fp8_tile_override(cfg, *, stage, tile_m):
+
+def _FP8_OVR_ENV(name, default):
+    """Integer env override for the fp8 tile constants; default keeps today's value."""
+    import os as _os
+
+    v = _os.environ.get(name)
+    return default if v is None or v == "" else int(v)
+
+
+def _fp8_tile_override(cfg, *, stage, tile_m, tokens=None):
     """Tiles chosen while A was bf16 are not the fp8 optimum.
 
     a16wmix_tuned.csv predates the fp8 path and has no a_dtype column, so the fp8 arm has
@@ -301,15 +310,22 @@ def _fp8_tile_override(cfg, *, stage, tile_m):
     bf16 is untouched: this runs only when a_dtype == "fp8".
     """
     cfg = dict(cfg)
+    if _FP8_OVR_ENV("AITER_FP8_OVR_OFF", 0):
+        return cfg
     if stage == 2:
-        cfg["tile_n"] = 128
-        cfg["xcd_swizzle"] = 0
+        _min_tok = _FP8_OVR_ENV("AITER_FP8_OVR_S2_TILE_N_MIN_TOKENS", 0)
+        if tokens is None or int(tokens) >= _min_tok:
+            cfg["tile_n"] = _FP8_OVR_ENV("AITER_FP8_OVR_S2_TILE_N", 128)
+        else:
+            cfg["tile_n"] = 128
+        cfg["xcd_swizzle"] = _FP8_OVR_ENV("AITER_FP8_OVR_S2_XCD", 0)
     elif int(tile_m) <= 16:
-        cfg["tile_k"] = 256
+        cfg["tile_k"] = _FP8_OVR_ENV("AITER_FP8_OVR_S1_TILE_K", 256)
         # fp8 bumps K-tile 128->256; k_wave=4 slice-K needs K % (4*128)==0 and
-        # breaks once TILE_K becomes 256 (3584 % 1024 != 0).
-        if int(cfg.get("k_wave", 1)) > 1:
-            cfg["k_wave"] = 1
+        # breaks once TILE_K becomes 256 (3584 % 1024 != 0). That constraint is
+        # on K, so it only forces k_wave once tile_k is actually 256.
+        if int(cfg.get("k_wave", 1)) > 1 and int(cfg["tile_k"]) >= 256:
+            cfg["k_wave"] = _FP8_OVR_ENV("AITER_FP8_OVR_S1_KWAVE", 1)
     return cfg
 
 
@@ -358,7 +374,11 @@ def resolve_a16wmix_gemm2_config(*, w_dtype, model_dim, inter_dim, experts, topk
         cfg = _default_tiles_fallback(
             D_HIDDEN=model_dim, D_INTER=inter_dim, tokens=tokens, w_dtype=w_dtype, tile_m=tile_m, stage=2
         )
-    return _fp8_tile_override(cfg, stage=2, tile_m=tile_m) if a_dtype == "fp8" else cfg
+    return (
+        _fp8_tile_override(cfg, stage=2, tile_m=tile_m, tokens=tokens)
+        if a_dtype == "fp8"
+        else cfg
+    )
 
 
 def a16wi4_recommend_block_m(tokens, experts, topk, *, base_block_m=32):
