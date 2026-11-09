@@ -58,6 +58,10 @@ MAX_NEG_RESIDUAL = 6
 # Remaining assumption, documented rather than defended: nobody mutates a weight-scale
 # tensor in place. Quantized scales are produced once at load time here.
 _SREF_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+# Keys whose residual range was rejected, with the message to re-raise. Kept
+# separate from _SREF_CACHE because there is no sref to hand back -- only the
+# verdict, so the decision is not recomputed on a capturing stream.
+_SREF_REJECT: "OrderedDict[tuple, str]" = OrderedDict()
 _SREF_CACHE_MAX = 512  # a 92-layer model needs 2 per layer; this covers it several times
 
 
@@ -169,6 +173,11 @@ def get_sref_u8(scale_u8, *, experts, n_out, k_groups, shuffle_fn=None, strict=T
     how bad it would be rather than refusing to run.
     """
     key = (scale_u8.data_ptr(), tuple(scale_u8.shape), experts, n_out, k_groups)
+    rejected = _SREF_REJECT.get(key)
+    if rejected is not None and strict:
+        # Decided already, on these exact bytes. Raise without touching the
+        # device so the caller's bf16 fallback is reachable during capture.
+        raise ValueError(rejected)
     hit = _SREF_CACHE.get(key)
     if hit is not None:
         src, sref = hit
@@ -195,6 +204,9 @@ def get_sref_u8(scale_u8, *, experts, n_out, k_groups, shuffle_fn=None, strict=T
             f"maximum would be scaled wrong, so these weights need the bf16 path."
         )
         if strict:
+            _SREF_REJECT[key] = msg
+            while len(_SREF_REJECT) > _SREF_CACHE_MAX:
+                _SREF_REJECT.popitem(last=False)
             raise ValueError(msg)
         import warnings
 
@@ -208,3 +220,4 @@ def get_sref_u8(scale_u8, *, experts, n_out, k_groups, shuffle_fn=None, strict=T
 
 def clear_cache():
     _SREF_CACHE.clear()
+    _SREF_REJECT.clear()
