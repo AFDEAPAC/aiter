@@ -768,12 +768,22 @@ def get_asm_dir():
     return os.path.join(AITER_ASM_DIR, get_gfx())
 
 
+# True when the JIT directory is somewhere other than the installed package,
+# so built modules are importable only as top-level names off sys.path. Set by
+# get_user_jit_dir, read by get_module_custom_op -- the two must agree, and the
+# environment alone does not say, because the read-only-install fallback picks
+# an external directory without anyone asking for it.
+_jit_dir_is_external = False
+
+
 @functools.lru_cache(maxsize=1)
 def get_user_jit_dir() -> str:
+    global _jit_dir_is_external
     if "AITER_JIT_DIR" in os.environ:
         path = os.getenv("AITER_JIT_DIR", "")
         os.makedirs(path, exist_ok=True)
         sys.path.insert(0, path)
+        _jit_dir_is_external = True
         return path
     else:
         if os.access(this_dir, os.W_OK):
@@ -781,6 +791,10 @@ def get_user_jit_dir() -> str:
     home_jit_dir = f"{os.path.expanduser('~')}/.aiter/{os.path.basename(this_dir)}"
     if not os.path.exists(home_jit_dir):
         shutil.copytree(this_dir, home_jit_dir)
+    # Same deal as the explicit AITER_JIT_DIR branch: modules built here are
+    # not under the aiter package, so they load as top-level names.
+    sys.path.insert(0, home_jit_dir)
+    _jit_dir_is_external = True
     return home_jit_dir
 
 
@@ -1009,7 +1023,10 @@ __mds = {}
 @torch_compile_guard()
 def get_module_custom_op(md_name: str) -> None:
     if md_name not in __mds:
-        if "AITER_JIT_DIR" in os.environ:
+        # get_user_jit_dir has already run (bd_dir is built from it at import
+        # time), so this reflects where the modules actually are.
+        get_user_jit_dir()
+        if _jit_dir_is_external:
             __mds[md_name] = importlib.import_module(md_name)
         else:
             __mds[md_name] = importlib.import_module(f"{__package__}.{md_name}")
