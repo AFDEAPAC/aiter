@@ -43,6 +43,34 @@ from .utils import (
     lds_acc_bytes_for,
 )
 
+
+def _WPE_ENV(default):
+    """waves_per_eu override for gemm2; unset keeps the caller's value."""
+    import os as _os
+
+    v = _os.environ.get("AITER_GEMM2_WAVES_PER_EU", "")
+    if not v:
+        return default
+    try:
+        n = int(v)
+    except ValueError:
+        return default
+    return n if n >= 1 else None
+
+
+
+
+def _CTA_CAP_ENV() -> int:
+    """CTAs per CU for the persistent gemm2 grid; default 8 as measured."""
+    import os as _os
+
+    try:
+        n = int(_os.environ.get("AITER_GEMM2_CTA_PER_CU", "8"))
+    except ValueError:
+        return 8
+    return n if n >= 1 else 8
+
+
 # Caps the persistent gemm2 grid. Sized from the device rather than hardcoded: the
 # previous value was gfx950's 256 CUs, which over-subscribes an 80-CU MI308X unevenly
 # (12642 tiles over 256 CTAs is 49.4 each, and that cap measured slower at bs=8 than
@@ -57,7 +85,8 @@ def _persistent_cta_cap():
     try:
         import torch
 
-        return torch.cuda.get_device_properties(0).multi_processor_count * 8
+        _cu = torch.cuda.get_device_properties(0).multi_processor_count
+        return _cu * _CTA_CAP_ENV()
     except Exception:
         return NUM_CU
 
@@ -785,6 +814,7 @@ def compile_gemm2_a16w4_port(
         _name += f"_bcm{b_cache_mod}"
     if xcd_swizzle > 0:
         _name += f"_xcd{xcd_swizzle}"
+    waves_per_eu = _WPE_ENV(waves_per_eu)
     if waves_per_eu:
         _name += f"_w{waves_per_eu}"
     if persist:
