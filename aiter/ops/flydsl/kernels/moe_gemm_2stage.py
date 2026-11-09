@@ -77,7 +77,7 @@ def _moe_a16wi4_opt_mode() -> int:
                  (deferred-scale pipeline); needs bit 2 on gfx942.
       bit 2 (4): use v_cvt_off_f32_i4 for the int4 -> f32 convert on gfx942.
     """
-    raw = os.environ.get("AITER_MOE_A16WI4_OPT", dsv41_on("5")).strip().lower()
+    raw = os.environ.get("AITER_MOE_A16WI4_OPT", "0").strip().lower()
     if raw in ("", "0", "false", "no", "off"):
         return 0
     if raw in ("true", "yes", "on"):
