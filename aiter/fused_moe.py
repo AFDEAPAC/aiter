@@ -1540,7 +1540,7 @@ def _fused_moe_impl(
         and (
             (model_dim, inter_dim, E, topk) == (5120, 640, 384, 6)
             or (
-                os.environ.get("AITER_GFX942_DSV41_A16WMIX_TP8EP1", dsv41_on()) == "1"
+                os.environ.get("AITER_GFX942_DSV41_A16WMIX_TP8EP1", "0") == "1"
                 and (model_dim, inter_dim, E, topk) == (5120, 384, 384, 6)
             )
         )
@@ -2273,7 +2273,7 @@ def get_ksplit(token, topk, expert, inter_dim, model_dim):
     # kernel name ..._kb5"). Behind a dedicated default-OFF env so every other
     # dispatch, including TP4, keeps the exact same split selection.
     compiled_only = (
-        os.environ.get("AITER_GFX942_DSV41_TP8_KSPLIT_COMPILED", dsv41_on()) == "1"
+        os.environ.get("AITER_GFX942_DSV41_TP8_KSPLIT_COMPILED", "0") == "1"
         and get_gfx() == "gfx942"
     )
     # at least split = 2
