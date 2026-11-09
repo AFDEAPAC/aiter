@@ -1552,7 +1552,7 @@ def _flydsl_moe_stage1_impl(
     )
     _is_a16w_port = a_dtype == "bf16" and b_dtype in ("fp4", "int4")
     if _is_a16w_port:
-        from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import flydsl_a16w4_gemm1
+        from aiter.ops.flydsl.moe_a16wmix_host import flydsl_a16w4_gemm1
 
         _act = "situv2" if act in ("situv2", "situ") else act
         sorted_size = int(sorted_expert_ids.shape[0]) * int(tile_m)
@@ -2053,7 +2053,7 @@ def _flydsl_moe_stage2_impl(
         # unique [M*topk,H] rows then moe_reduce. Tiles from the kernelName (like
         # a4w4/a8w4). a16wi4 W2 uses the OLD-kernel int4 layout
         # (pack_int8_to_packed_int4(shuffle_weight(w,(16,16)))) + (E,G//2,N,2) bf16 scale.
-        from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import flydsl_a16w4_gemm2
+        from aiter.ops.flydsl.moe_a16wmix_host import flydsl_a16w4_gemm2
 
         E = w2.shape[0]
         model_dim = w2.shape[1]
@@ -2078,17 +2078,12 @@ def _flydsl_moe_stage2_impl(
                 device=inter_states.device,
             )
         )
+        # flydsl_a16w4_gemm2 (moe_a16wmix_host) implements the atomic scatter
+        # only; the reduce epilogue belongs to the moe_2stage_a16wmix builder,
+        # which takes a different argument list entirely. Requesting reduce
+        # here would be silently ignored at best.
         _epilog = "atomic"
         gemm2_out = out
-        if b_dtype == "int4" and mode == "reduce":
-            _epilog = "reduce"
-            gemm2_out = torch.empty(
-                (M_logical * int(topk), model_dim),
-                dtype=out.dtype,
-                device=out.device,
-            )
-            if expert_mask is not None:
-                gemm2_out.zero_()
         flydsl_a16w4_gemm2(
             inter_sorted_bf16=inter_states,
             w2_u8=w2.view(torch.uint8).contiguous(),
@@ -2115,7 +2110,6 @@ def _flydsl_moe_stage2_impl(
             waves_per_eu=waves_per_eu,
             xcd_swizzle=xcd_swizzle,
             w_dtype=b_dtype,
-            epilog=_epilog,
         )
         if _epilog == "reduce":
             _run_moe_reduction(
