@@ -1358,6 +1358,12 @@ AITER_CTYPES_DEFINE_ENTRYPOINT_VOID(
     {
         args.ptr_LSEP = lse->data_ptr();
     }
+    // Park LSEP also at 0x118 (KVSCALE pad) so kernels whose runtime kernarg
+    // window is still the twin-B 288B layout can load it. 0x130 stays canonical.
+    if (args.ptr_LSEP != nullptr)
+    {
+        *reinterpret_cast<void**>(reinterpret_cast<char*>(&args) + 0x118) = args.ptr_LSEP;
+    }
 
     // round-robin context-parallel inputs (no-op when cp_world_size <= 1)
     args.ptr_GKVTP       = (g_kv_indptr != nullptr) ? g_kv_indptr->data_ptr() : nullptr;
@@ -1370,6 +1376,16 @@ AITER_CTYPES_DEFINE_ENTRYPOINT_VOID(
         AITER_CHECK(cp_rank >= 0 && cp_rank < cp_world_size,
                     __func__, ": cp_rank must be in [0, cp_world_size) when g_kv_indptr is provided");
     }
+    // Twin-B-derived kernels historically only see the first 288B of kernarg at
+    // runtime. Park CP extension fields into pads inside that window:
+    //   0x108 = GKVTP (QSCALE pad), 0x84/0x88 = world/rank (s_MQA pad),
+    //   0x118 = LSEP (already parked above).
+    if (args.ptr_GKVTP != nullptr)
+    {
+        *reinterpret_cast<void**>(reinterpret_cast<char*>(&args) + 0x108) = args.ptr_GKVTP;
+    }
+    *reinterpret_cast<unsigned int*>(reinterpret_cast<char*>(&args) + 0x84) = args.s_cp_world_size;
+    *reinterpret_cast<unsigned int*>(reinterpret_cast<char*>(&args) + 0x88) = args.s_cp_rank;
     if (persistent)
     {
         args.out_16_nosplit = kv_split;

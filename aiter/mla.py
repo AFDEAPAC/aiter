@@ -1027,8 +1027,13 @@ def mla_decode_fwd(
     page_table=None,
     kv_csr_layout="page",
     fast_mode=True,
+    fold_cache=None,
 ):
     """MLA decode with explicit KV byte-layout selection.
+
+    ``fold_cache`` (a dict the caller keeps for one forward) holds the
+    head-folded qo / kv indptr of the FOLDED plan, so the layers of a forward
+    that pass the same indptr tensors fold them once instead of per call.
 
     ``token_major`` preserves the existing segmented page64 dispatch.
     ``kv_shuffled`` on gfx1250 supports FP8 Q/KV, BF16 O and page64.
@@ -1496,13 +1501,33 @@ def mla_decode_fwd(
 
             o = o.view(total_s, nhead, -1)
 
-            qo_indptr = _fold_seqlen_indptr(qo_indptr, fold_factor)
+            # A graph capture must record its own fold, not reuse an eager warmup's.
+            fold_key = (
+                torch.cuda.is_current_stream_capturing(),
+                fold_factor,
+                id(qo_indptr),
+                id(kv_indptr),
+                None if g_kv_indptr is None else id(g_kv_indptr),
+            )
+            folded = None if fold_cache is None else fold_cache.get(fold_key)
+            if folded is None:
+                folded_g = folded_kv = None
+                if g_kv_indptr is not None:
+                    folded_g = _fold_seqlen_indptr(g_kv_indptr, fold_factor)
+                    # Each pseudo-batch shares the original batch's local kv begin.
+                    folded_kv = torch.cat(
+                        [kv_indptr[:-1].repeat_interleave(fold_factor), kv_indptr[-1:]]
+                    )
+                folded = (_fold_seqlen_indptr(qo_indptr, fold_factor), folded_g, folded_kv)
+                if fold_cache is not None:
+                    # Hold the inputs too, so their ids in the key stay unique.
+                    fold_cache[fold_key] = folded
+                    fold_cache.setdefault("_inputs", []).append(
+                        (qo_indptr, kv_indptr, g_kv_indptr)
+                    )
+            qo_indptr = folded[0]
             if g_kv_indptr is not None:
-                g_kv_indptr = _fold_seqlen_indptr(g_kv_indptr, fold_factor)
-                # Each pseudo-batch shares the original batch's local kv begin.
-                kv_indptr = torch.cat(
-                    [kv_indptr[:-1].repeat_interleave(fold_factor), kv_indptr[-1:]]
-                )
+                g_kv_indptr, kv_indptr = folded[1], folded[2]
             io_transformed = True
         else:
             assert False, f"{nhead=} and {max_seqlen_q=} not supported"

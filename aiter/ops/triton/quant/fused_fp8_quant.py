@@ -21,7 +21,7 @@ from aiter.ops.triton.utils.types import get_fp8_e4m3_dtype
 _LOGGER = AiterTritonLogger()
 
 
-fp8_dtype = aiter.dtypes.fp8
+fp8_dtype = get_fp8_e4m3_dtype()  # patched: avoid circular import before aiter.dtypes binds
 
 
 def fused_rms_fp8_per_tensor_static_quant(

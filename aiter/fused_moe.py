@@ -1608,6 +1608,54 @@ def _fused_moe_impl(
             herd_topk = 0
     quant_type = quant_remap.get(quant_type, quant_type)
     q_dtype_w = w1.dtype
+
+    # gfx942 (CDNA3): Kimi-K3 a16w4 -- bf16 activations x MXFP4 weights, SiTUv2.
+    # The a16wmix gemm1/gemm2 pair runs as one unit rather than through the
+    # two-stage path below: that path hands stage1 -> stage2 a (token, slot)
+    # indexed intermediate of token_num*topk rows, while the pair both writes and
+    # reads a sorted-position buffer whose sorted_size exceeds that (per-expert
+    # block padding). See ops/flydsl/a16wmix_fused_moe.py.
+    if (
+        get_gfx() == "gfx942"
+        and activation == ActivationType.Situv2
+        and quant_type == QuantType.per_1x32
+        and q_dtype_w == dtypes.fp4x2
+        and hidden_states.dtype == dtypes.bf16
+        and isShuffled
+        and (
+            expert_mask is None
+            or os.environ.get("AITER_A16W4_ALLOW_EP", "0") == "1"
+        )
+        and not doweight_stage1
+        and num_local_tokens is None
+        and bias1 is None
+        and bias2 is None
+    ):
+        from aiter.ops.flydsl.a16wmix_fused_moe import fused_moe_a16wmix
+
+        return fused_moe_a16wmix(
+            hidden_states,
+            w1,
+            w2,
+            topk_weight,
+            topk_ids,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            situ_beta=1.0 if beta is None else float(beta),
+            situ_linear_beta=1.0 if linear_beta is None else float(linear_beta),
+            act="situv2",
+            block_m=32 if block_size_M is None else int(block_size_M),
+            # A wrong layout leaves the output nearly orthogonal (cos ~0.008), and
+            # the bytes cannot tell the two apart. Untagged W1 is the separated
+            # layout (vLLM's a16w4); SGLang preshuffles a16w4 gate/up-interleaved
+            # and tags W1 with gate_up_interleave.
+            w1_layout=(
+                "guinterleave"
+                if getattr(w1, "gate_up_interleave", False)
+                else "standard"
+            ),
+            expert_mask=expert_mask,
+        )
     q_dtype_a = resolve_activation_dtype(
         quant_type,
         q_dtype_w,
@@ -1716,7 +1764,11 @@ def _fused_moe_impl(
                 ),
             ),
             (bias1 is not None or bias2 is not None, "per-expert bias"),
-            (expert_mask is not None, "expert-parallel masking"),
+            (
+                expert_mask is not None
+                and os.environ.get("AITER_A16W4_ALLOW_EP", "0") != "1",
+                "expert-parallel masking",
+            ),
             (
                 not (isShuffled and isG1U1 and not doweight_stage1),
                 "non-preshuffled / non-g1u1 weights or doweight_stage1=True",
