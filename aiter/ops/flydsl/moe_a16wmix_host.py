@@ -35,6 +35,7 @@ from .kernels.moe_2stage_a16wmix.gemm2 import (
     gemm2_a16w4_grid,
 )
 from .kernels.moe_2stage_a16wmix.utils import lds_acc_bytes_for
+from ._dsv41_defaults import dsv41_on
 
 __all__ = [
     "compile_gemm1_a16w4_port",
@@ -314,7 +315,12 @@ def _fp8_tile_override(cfg, *, stage, tile_m, tokens=None):
         return cfg
     if stage == 2:
         _min_tok = _FP8_OVR_ENV("AITER_FP8_OVR_S2_TILE_N_MIN_TOKENS", 0)
-        if tokens is None or int(tokens) >= _min_tok:
+        # The override applies in [MIN_TOKENS, MAX_TOKENS); prefill-size batches keep 128. The DSv4.1 TP4 launcher
+        # widens the decode band to 256, which costs 7-8% of TTFT at 4096-14336 prompt tokens (MI308X).
+        _max_tok = _FP8_OVR_ENV("AITER_FP8_OVR_S2_TILE_N_MAX_TOKENS", int(dsv41_on("2048", "0")))
+        if tokens is None or (
+            int(tokens) >= _min_tok and (_max_tok <= 0 or int(tokens) < _max_tok)
+        ):
             cfg["tile_n"] = _FP8_OVR_ENV("AITER_FP8_OVR_S2_TILE_N", 128)
         else:
             cfg["tile_n"] = 128
