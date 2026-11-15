@@ -186,11 +186,22 @@ _DEFAULT_CAR_MIN_SIZE = 0
 _CAR_MIN_SIZE_ENV = "AITER_CUSTOM_AR_MIN_SIZE"
 
 
-def _resolve_car_max_size(pool_size: int) -> int:
+def _default_car_max_size(world_size) -> int:
+    """64 MiB, except on gfx942 where RCCL overtakes the 2-stage kernels sooner: past ~48 MiB at 8 ranks and
+    ~16 MiB at 4 (MI308X, bf16, back-to-back all-reduces: 60 MiB 446 vs 462 us at 8 ranks, 40 MiB 500 vs 535 us
+    at 4)."""
+    from aiter.jit.utils.chip_info import get_gfx
+
+    if world_size in (4, 8) and get_gfx() == "gfx942":
+        return (48 if world_size == 8 else 16) * 1024 * 1024
+    return _DEFAULT_CAR_MAX_SIZE
+
+
+def _resolve_car_max_size(pool_size: int, world_size=None) -> int:
     """Resolve the custom-AR size cutoff (bytes) from ``AITER_CUSTOM_AR_MAX_SIZE``.
 
     Semantics:
-      * unset / empty / unparyable  -> default (64 MiB), i.e. unchanged behavior.
+      * unset / empty / unparyable  -> default (_default_car_max_size).
       * 0                           -> 0: custom AR disabled, everything uses RCCL.
       * 0 < v <= pool_size          -> v: custom AR used up to v bytes.
       * v > pool_size               -> too large: the registered pool cannot hold
@@ -199,9 +210,10 @@ def _resolve_car_max_size(pool_size: int) -> int:
 
     ``pool_size`` is the registered input-buffer size (``CustomAllreduce.max_size``).
     """
+    default = _default_car_max_size(world_size)
     raw = os.environ.get(_CAR_MAX_SIZE_ENV, "").strip()
     if raw == "":
-        return _DEFAULT_CAR_MAX_SIZE
+        return default
     try:
         v = int(raw)
     except ValueError:
@@ -209,17 +221,17 @@ def _resolve_car_max_size(pool_size: int) -> int:
             "%s=%r is not an integer; using default %d bytes.",
             _CAR_MAX_SIZE_ENV,
             raw,
-            _DEFAULT_CAR_MAX_SIZE,
+            default,
         )
-        return _DEFAULT_CAR_MAX_SIZE
+        return default
     if v < 0:
         logger.warning(
             "%s=%d is negative; using default %d bytes.",
             _CAR_MAX_SIZE_ENV,
             v,
-            _DEFAULT_CAR_MAX_SIZE,
+            default,
         )
-        return _DEFAULT_CAR_MAX_SIZE
+        return default
     if v == 0:
         logger.info(
             "%s=0: custom allreduce disabled; all sizes fall back to RCCL.",
@@ -235,11 +247,11 @@ def _resolve_car_max_size(pool_size: int) -> int:
             )
     except ValueError as e:
         logger.warning(
-            "%s Falling back to the default %d bytes (64 MiB).",
+            "%s Falling back to the default %d bytes.",
             e,
-            _DEFAULT_CAR_MAX_SIZE,
+            default,
         )
-        return _DEFAULT_CAR_MAX_SIZE
+        return default
     logger.info(
         "Custom allreduce size cutoff overridden to %d bytes via %s.",
         v,
@@ -1114,7 +1126,7 @@ class CustomAllreduce:
         # Custom-AR size cutoff (bytes): inputs at or below this run on the
         # custom kernels; larger ones fall back to RCCL. Overridable via
         # AITER_CUSTOM_AR_MAX_SIZE (capped at the registered pool size == max_size).
-        self._car_max_size = _resolve_car_max_size(max_size)
+        self._car_max_size = _resolve_car_max_size(max_size, self.world_size)
         # Custom-AR lower size bound (bytes): inputs at or below this fall back
         # to RCCL. Default 0 (no lower bound). Overridable via
         # AITER_CUSTOM_AR_MIN_SIZE. Custom AR runs only in (min, max].
