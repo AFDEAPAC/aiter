@@ -27,6 +27,11 @@ _ANNOUNCED = False
 _FP8_FALLBACK_WARNED = False
 _SORT_MP_SMALL = os.environ.get("AITER_A16WMIX_SORT_MP_SMALL", dsv41_on()) == "1"
 _SKIP_BUF_ZERO = os.environ.get("AITER_A16WMIX_SKIP_BUF_ZERO", dsv41_on()) == "1"
+# Skip the gemm1 inter tiles that only see the loader's zero padding (DSv4.1: 288 -> 384 at TP8, 576 -> 640 at TP4).
+# From MIN_TOKENS on: the zero fill of their columns costs more than it saves at a handful of tokens (MI308X, TP8
+# fused MoE 1 / 16 tokens 352 -> 370 / 367 -> 384 us, 136 tokens 681 -> 656 us, 6144 tokens 3455 -> 3183 us).
+_SKIP_PAD_N = os.environ.get("AITER_A16WMIX_SKIP_PAD_N", dsv41_on()) == "1"
+_SKIP_PAD_N_MIN_TOKENS = int(os.environ.get("AITER_A16WMIX_SKIP_PAD_N_MIN_TOKENS", "128"))
 _FP8_S2_FALLBACK_WARNED = False
 
 
@@ -104,6 +109,7 @@ def fused_moe_a16wmix(
     tile_m: int | None = None,
     out: torch.Tensor | None = None,
     expert_mask: torch.Tensor | None = None,
+    intermediate_pad: int = 0,
 ):
     """bf16 hidden_states x MXFP4 experts -> bf16 ``[tokens, model_dim]``.
 
@@ -112,7 +118,8 @@ def fused_moe_a16wmix(
     stage1 kernel decodes: ``"standard"`` for the separated GGUU layout,
     ``"guinterleave"`` for the gate/up-interleaved GUGU one. Stage2 takes no such
     mode: its gate_up=False layout is byte-identical to standard whenever
-    ``experts * model_dim % 256 == 0``.
+    ``experts * model_dim % 256 == 0``. ``intermediate_pad``: trailing zero-padded intermediate
+    columns of every expert (padded minus real inter_dim).
     """
     from aiter.fused_moe import moe_sorting
 
@@ -307,6 +314,13 @@ def fused_moe_a16wmix(
         w_dtype="mxfp4",
         w_layout=w1_layout,
         use_csv_config=False,
+        inter_valid=(
+            inter_dim - int(intermediate_pad)
+            if _SKIP_PAD_N and intermediate_pad and tokens >= _SKIP_PAD_N_MIN_TOKENS
+            else None
+        ),
+        # rows gemm2 and the stage-2 quant can reach: every active expert's run is padded up to bm
+        pad_rows=min(int(topk_ids.numel()) + min(int(topk_ids.numel()), sorting_experts) * (bm - 1), sorted_size),
     )
 
     flat_out = (

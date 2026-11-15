@@ -71,6 +71,7 @@ def _get_compiled_gemm1_a16w4(
     w_layout="standard",
     a_dtype="bf16",
     k_wave=1,
+    n_run=None,
 ):
     return compile_gemm1_a16w4_port(
         BM=BM,
@@ -88,6 +89,7 @@ def _get_compiled_gemm1_a16w4(
         w_layout=w_layout,
         a_dtype=a_dtype,
         k_wave=k_wave,
+        n_run=n_run,
     )
 
 
@@ -457,6 +459,8 @@ def flydsl_a16w4_gemm1(
     use_csv_config=False,  # opt-in: default uses our tuned tile_n; CSV params for aiter-compare / when requested
     csv_path=None,
     stream=None,
+    inter_valid=None,
+    pad_rows=None,
 ):
     """a16w4/a16wi4/a16w16 fused stage1: gate+up GEMM + SiLU -> bf16 intermediate.
 
@@ -484,6 +488,10 @@ def flydsl_a16w4_gemm1(
     ``k_batch``/``gate_mode`` accepted for parity (only k_batch=1/separated supported).
     ``tile_n=None`` picks the largest N tile dividing D_INTER. ``b_nt=None`` uses the
     per-M U-shape (nt mid-band, cached at ends).
+
+    ``inter_valid``: real intermediate size when the weights are zero-padded up to ``D_INTER``. The inter tiles
+    past it are not launched and their intermediate columns are zeroed instead (in the first ``pad_rows``
+    rows, default all), which is what the padded weights would have produced.
     """
     if k_batch != 1:
         raise NotImplementedError(f"a16w4 gemm1 only supports k_batch=1, got {k_batch}")
@@ -557,6 +565,11 @@ def flydsl_a16w4_gemm1(
         raise NotImplementedError(f"a16w4 gemm1 requires 2*D_INTER % 256 == 0, got D_INTER={D_INTER}")
     if D_INTER % TILE_N != 0:
         raise NotImplementedError(f"a16w4 gemm1 requires D_INTER % TILE_N({TILE_N}) == 0, got D_INTER={D_INTER}")
+    n_run = None
+    if inter_valid is not None and 0 < int(inter_valid) < D_INTER:
+        n_run = -(-int(inter_valid) // TILE_N)
+        if n_run >= D_INTER // TILE_N:
+            n_run = None
 
     launch = _get_compiled_gemm1_a16w4(
         BM,
@@ -574,6 +587,7 @@ def flydsl_a16w4_gemm1(
         w_layout,
         a_dtype,
         k_wave,
+        n_run,
     )
     if a_dtype == "fp8":
         if a_scale is None or w1_sref is None:
@@ -586,7 +600,10 @@ def flydsl_a16w4_gemm1(
         _a_scale_ptr = a_bf16.data_ptr()
         _sref_ptr = a_bf16.data_ptr()
     max_m_blocks = min(int(sorted_expert_ids.numel()), int(m_indices.numel()) // BM)
-    grid = gemm1_a16w4_grid(BM, INTER=D_INTER, TILE_N=TILE_N, max_m_blocks=max_m_blocks)
+    grid = gemm1_a16w4_grid(BM, INTER=D_INTER, TILE_N=TILE_N, max_m_blocks=max_m_blocks, n_run=n_run)
+    if n_run is not None:
+        rows = inter_sorted_bf16.shape[0] if pad_rows is None else int(pad_rows)
+        inter_sorted_bf16.view(-1, D_INTER)[:rows, n_run * TILE_N :].zero_()
     # SiTUv2 beta/linear_beta + swiglu_limit -> runtime f32 scalars (host precomputes
     # reciprocals; no device rcp). swiglu_limit is the SiTUv2 clamp bound (+inf = no
     # clamp), matching the a8w4/mixed_moe situv2 clamp; the silu kernel applies the

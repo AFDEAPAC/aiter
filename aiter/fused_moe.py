@@ -1587,6 +1587,7 @@ def _fused_moe_impl(
             ),
             block_m=32 if block_size_M is None else int(block_size_M),
             w1_layout="standard",
+            intermediate_pad=intermediate_pad,
         )
 
     grouped_a8w4_out = None

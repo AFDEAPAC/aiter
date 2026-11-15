@@ -130,6 +130,7 @@ def _gemm1_body_a16w4(
     a_dtype="bf16",
     k_wave=1,
     use_k16=False,
+    N_RUN=None,
 ):
     """a16w4/a16wi4/a16w16 (bf16 A x mxfp4/int4/bf16 W) fused stage1 gemm1 body.
 
@@ -192,7 +193,8 @@ def _gemm1_body_a16w4(
     A_SLOT_BYTES = BM * KH_TILE_BYTES
     # Per-k-group A-LDS region (single region at k_wave=1).
     _A_GRP_BYTES = A_LDS_STAGES * A_SLOT_BYTES
-    NUM_N_BLOCKS = INTER // TILE_N
+    # launched n-blocks: N_RUN < INTER // TILE_N leaves the trailing ones (padding only) out of the grid
+    NUM_N_BLOCKS = INTER // TILE_N if N_RUN is None else N_RUN
 
     # W (mxfp4) preshuffle layout (aiter make_preshuffle_b_layout, N-major, fp4 bytes):
     #   shape (N_OUT/16, (K/2)/64, klane=4, nlane=16, kpack=16), strides below.
@@ -271,7 +273,7 @@ def _gemm1_body_a16w4(
     # epilogue relies on. Size num_records from the allocated buffer (grid is
     # max_m_blocks * NUM_N_BLOCKS), not from cumsum0: a corrupted cumsum0
     # disables hardware OOB clamp and stores hit unmapped pages.
-    _max_m = fx.Int32(gpu.grid_dim.x) // fx.Int32(INTER // TILE_N)
+    _max_m = fx.Int32(gpu.grid_dim.x) // fx.Int32(NUM_N_BLOCKS)
     _max_sorted = fx.Int64(_max_m) * fx.Int64(BM)
     out_rsrc = buffer_ops.create_buffer_resource_from_addr(
         _raw(fx.Int64(arg_out)),
@@ -897,9 +899,9 @@ def _gemm1_body_a16w4(
                 buffer_ops.buffer_store(yb, _raw(out_rsrc), _raw(out_idx), mask=valid)
 
 
-def gemm1_a16w4_grid(BM, *, INTER, TILE_N, max_m_blocks):
-    """Flattened grid for a16w4 gemm1: (m-blocks) x (inter/tile_n) n-blocks."""
-    num_n_blocks = INTER // TILE_N
+def gemm1_a16w4_grid(BM, *, INTER, TILE_N, max_m_blocks, n_run=None):
+    """Flattened grid for a16w4 gemm1: (m-blocks) x (inter/tile_n, or n_run) n-blocks."""
+    num_n_blocks = INTER // TILE_N if n_run is None else int(n_run)
     return int(max_m_blocks) * num_n_blocks
 
 
@@ -920,6 +922,7 @@ def compile_gemm1_a16w4_port(
     w_layout="standard",
     a_dtype="bf16",
     k_wave=1,
+    n_run=None,
 ):
     """a16w4/a16wi4/a16w16 (bf16 A x mxfp4/int4/bf16 W1) fused stage1 builder.
 
@@ -939,6 +942,9 @@ def compile_gemm1_a16w4_port(
     ``k_wave`` (aiter slice-K, default 1): repartition 4 waves into (4/k_wave) N-waves x
     k_wave K-waves; partials LDS-reduced. k_wave in {1,2,4}; requires 4 % k_wave == 0 and
     D_HIDDEN % (k_wave*TILE_K) == 0.
+
+    ``n_run`` (default: all INTER // TILE_N): launch only the first ``n_run`` inter tiles, for weights padded
+    past the real intermediate size. The intermediate columns of the other tiles are left unwritten.
     """
     assert w_dtype in ("mxfp4", "int4", "bf16"), f"w_dtype must be 'mxfp4', 'int4' or 'bf16', got {w_dtype!r}"
     assert a_dtype in ("bf16", "fp8"), f"a_dtype must be 'bf16' or 'fp8', got {a_dtype!r}"
@@ -962,6 +968,9 @@ def compile_gemm1_a16w4_port(
     assert _INTER % TILE_N == 0, f"D_INTER must be a multiple of TILE_N={TILE_N}, got {_INTER}"
     assert BM % 16 == 0, f"BM must be a multiple of 16, got {BM}"
     NUM_N_BLOCKS = _INTER // TILE_N
+    if n_run is not None:
+        assert 0 < int(n_run) <= NUM_N_BLOCKS, f"n_run must be in [1, {NUM_N_BLOCKS}], got {n_run}"
+        NUM_N_BLOCKS = int(n_run)
 
     # A-LDS tile BM x TILE_K, double-buffered (must match A_LDS_STAGES in the body).
     # k_wave>1 gives each K-wave its own region (x k_wave). fp8 halves it.
@@ -991,9 +1000,10 @@ def compile_gemm1_a16w4_port(
     _ad_tag = "" if a_dtype == "bf16" else f"_a{a_dtype}"
     _wl_tag = "" if w_layout == "standard" else f"_{w_layout}"
     _kw_tag = f"_kw{k_wave}" if k_wave > 1 else ""
+    _nr_tag = f"_nr{NUM_N_BLOCKS}" if NUM_N_BLOCKS != _INTER // TILE_N else ""
     name_suffix = (
         f"a16w4{_wd_tag}{_ad_tag}{_wl_tag}_h{_K}_i{_INTER}_ne{NE}_bm{BM}"
-        f"_tn{TILE_N}{_act_tag}{_bcm_tag}{_xcd_tag}{_wpe_tag}{_kw_tag}"
+        f"_tn{TILE_N}{_act_tag}{_bcm_tag}{_xcd_tag}{_wpe_tag}{_kw_tag}{_nr_tag}"
     )
 
     @fx.struct
@@ -1094,6 +1104,7 @@ def compile_gemm1_a16w4_port(
                 a_dtype=a_dtype,
                 k_wave=k_wave,
                 use_k16=_use_k16,
+                N_RUN=NUM_N_BLOCKS,
             )
 
     @flyc.jit
