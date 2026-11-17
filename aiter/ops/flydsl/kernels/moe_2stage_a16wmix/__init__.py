@@ -49,8 +49,11 @@ from .gemm1 import (
     gemm1_a16w4_grid,
 )
 from .gemm2 import compile_gemm2_a16w4_port, gemm2_a16w4_grid
+from .utils import FP4_DECODE_ENV, FP4_DECODE_FLAGS, fp4_decode_spec
 
 __all__ = [
+    "FP4_DECODE_ENV",
+    "FP4_DECODE_FLAGS",
     "a16w4_default_shared_tile_n",
     "a16w4_shared_tiles",
     "compile_gemm1_a16w4_port",
@@ -58,6 +61,7 @@ __all__ = [
     "flydsl_a16w4_gemm1",
     "flydsl_a16w4_gemm2",
     "flydsl_a16w4_moe",
+    "fp4_decode_spec",
     "gemm1_a16w4_grid",
     "gemm2_a16w4_grid",
 ]
@@ -162,6 +166,7 @@ def flydsl_a16w4_gemm1(
     w_layout="standard",
     activation_bf16=False,
     prefetch=1,
+    fp4_decode=None,
     stream=None,
     fused_shared_w1=None,
     shared_inter_bf16=None,
@@ -205,6 +210,10 @@ def flydsl_a16w4_gemm1(
     ``fused_shared_w1`` / ``shared_inter_bf16`` (together): the shared-expert prologue (see
     the module docstring); bf16 ``fused_shared_w1``, or fp8 e4m3 with ``fused_shared_w1_scale``
     (MXFP8). ``shared_tile_n`` defaults to ``a16w4_default_shared_tile_n``.
+
+    ``fp4_decode`` (gfx942 mxfp4 only): experimental W decode variant, e.g. ``"sign"``,
+    ``"perm+pkmul"`` or ``"all"`` (see ``FP4_DECODE_FLAGS``). ``None`` reads
+    ``$AITER_FLYDSL_A16W4_FP4_DECODE``; unset/empty keeps the default decode.
     """
     if k_batch != 1:
         raise NotImplementedError(f"a16w4 gemm1 only supports k_batch=1, got {k_batch}")
@@ -282,6 +291,7 @@ def flydsl_a16w4_gemm1(
         k_wave=k_wave,
         activation_bf16=activation_bf16,
         rocm_arch=str(get_rocm_arch()),
+        fp4_decode=fp4_decode_spec(fp4_decode),
         prefetch=prefetch,
         **_shared_kw(
             sh_tn,
@@ -368,6 +378,7 @@ def flydsl_a16w4_gemm2(
     persist=None,
     epilog="atomic",
     use_valid_token_count=False,
+    fp4_decode=None,
     stream=None,
     reuse_lds=False,
     shared_inter_bf16=None,
@@ -394,6 +405,8 @@ def flydsl_a16w4_gemm2(
     prologue adds ``shared_inter_bf16 [M_logical, D_INTER] @ fused_shared_w2^T`` into every
     token; bf16 ``fused_shared_w2``, or fp8 e4m3 with ``fused_shared_w2_scale`` (MXFP8).
     ``shared_tile_n`` defaults to ``a16w4_default_shared_tile_n``.
+
+    ``fp4_decode``: as in :func:`flydsl_a16w4_gemm1`.
     """
     if k_batch != 1:
         raise NotImplementedError(f"a16w4 gemm2 only supports k_batch=1, got {k_batch}")
@@ -460,6 +473,7 @@ def flydsl_a16w4_gemm2(
         w_dtype=w_dtype,
         persist=_persist,
         rocm_arch=str(get_rocm_arch()),
+        fp4_decode=fp4_decode_spec(fp4_decode),
         epilog=epilog,
         topk=topk,
         reuse_lds=reuse_lds,

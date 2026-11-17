@@ -25,6 +25,8 @@ from .utils import (
     _mma_bf16,
     _udiv,
     _umod,
+    fp4_decode_name_tag,
+    fp4_decode_spec,
     make_a_loader,
     make_b_loader,
 )
@@ -63,6 +65,7 @@ def _gemm1_body_a16w4(
     k_wave=1,
     activation_bf16=False,
     rocm_arch="",
+    fp4_decode="",
     prefetch=1,
     dense=False,
 ):
@@ -143,6 +146,7 @@ def _gemm1_body_a16w4(
         w_dtype=w_dtype,
         b_cache_mod=b_cache_mod,
         rocm_arch=rocm_arch,
+        fp4_decode=fp4_decode,
     )
     # Intermediate [sorted_size, inter] bf16: num_records = cumsum0*inter*2, so masked
     # (clamped) stores land OOB. KEPT RAW: the output resource + masked buffer_store need a
@@ -504,6 +508,7 @@ def compile_gemm1_a16w4_port(
     k_wave=1,
     activation_bf16=False,
     rocm_arch,
+    fp4_decode="",
     prefetch=1,
     shared_tile_n=None,
     shared_tile_m=None,
@@ -632,6 +637,8 @@ def compile_gemm1_a16w4_port(
     _kw_tag = f"_kw{k_wave}" if k_wave > 1 else ""
     _kw_tag += f"_pf{prefetch}" if prefetch > 1 else ""
     name_suffix = f"a16w4{_wd_tag}{_wl_tag}_h{_K}_i{_INTER}_ne{NE}_bm{BM}_tn{TILE_N}{_act_tag}{_bcm_tag}{_xcd_tag}{_wpe_tag}{_kw_tag}"
+    fp4_decode = fp4_decode_spec(fp4_decode)
+    name_suffix += fp4_decode_name_tag(fp4_decode)
     if shared_tile_n is not None:
         SH_BM = shared_tile_m or BM
         SH_TK = shared_tile_k or TILE_K
@@ -760,6 +767,7 @@ def compile_gemm1_a16w4_port(
                 k_wave=k_wave,
                 activation_bf16=activation_bf16,
                 rocm_arch=rocm_arch,
+                fp4_decode=fp4_decode,
                 prefetch=prefetch,
             )
 
@@ -901,6 +909,7 @@ def compile_gemm1_a16w4_port(
                 k_wave=SH_KW,
                 activation_bf16=activation_bf16,
                 rocm_arch=rocm_arch,
+                fp4_decode=fp4_decode,
                 dense=True,
             )
         else:
@@ -937,6 +946,7 @@ def compile_gemm1_a16w4_port(
                     k_wave=k_wave,
                     activation_bf16=activation_bf16,
                     rocm_arch=rocm_arch,
+                    fp4_decode=fp4_decode,
                     prefetch=prefetch,
                 )
 

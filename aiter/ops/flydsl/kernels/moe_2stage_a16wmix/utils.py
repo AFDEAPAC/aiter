@@ -14,6 +14,7 @@ Used by both stage1 (:mod:`gemm1`) and stage2 (:mod:`gemm2`):
                            int4/fp4->bf16 upconvert, index math.
 """
 
+import os
 from collections.abc import Callable
 from typing import NamedTuple
 
@@ -441,15 +442,67 @@ class _BLoader(NamedTuple):
 # byte[i] = {0x00, 0x38, 0x40, 0x44, 0x48, 0x4C, 0x50, 0x54}[mag.byte(i)]
 _FP4_E2M1_FP8_LUT_LO = 0x44403800  # mag 0..3
 _FP4_E2M1_FP8_LUT_HI = 0x54504C48  # mag 4..7
+# Same table with the sign bit set (0x80 | code), except mag 0 stays 0x00.
+_FP4_E2M1_FP8_NEG_LUT_LO = 0xC4C0B800
+_FP4_E2M1_FP8_NEG_LUT_HI = 0xD4D0CCC8
+# v_perm_b32(hi, lo, sel): bytes 2,3 of lo then bytes 2,3 of hi == (lo >> 16) | (hi & 0xFFFF0000).
+_PERM_SEL_BF16_HI_PAIR = 0x07060302
+
+# Experimental gfx942 MXFP4 decode variants. Each flag is independent; "" is the
+# #6144 decode and the default. Bit-exact to it for all 16 nibbles x all e8m0 scales.
+#   sign   negative LUT + AND mask for the sign (Triton upcast8xMxfp4_SW)
+#   perm   v_perm_b32 bf16 pack instead of lshr-16 | and
+#   pkmul  explicit v2f32 scale multiply (v_pk_mul_f32) on the cvt_pk_f32_fp8 result
+FP4_DECODE_FLAGS = ("sign", "perm", "pkmul")
+FP4_DECODE_ENV = "AITER_FLYDSL_A16W4_FP4_DECODE"
 
 
-def _fp4x4_e2m1_to_f32x4(nib_i32):
-    """4 E2M1 nibbles (low nibble of each byte) -> 4 unscaled f32.
+def fp4_decode_spec(spec=None):
+    """Canonical decode-variant string: known flags joined by ``+`` in a fixed order.
 
-    One ``v_perm_b32`` gathers E4M3FNUZ fp8 codes, then ``cvt_pk_f32_fp8``.
-    Sign is forced off when mag==0 so E2M1 -0.0 does not become FNUZ NaN (0x80).
+    ``None`` reads :data:`FP4_DECODE_ENV`. ``""``/``"base"`` is the default decode and
+    ``"all"`` enables every flag; flags may be separated by ``+`` or ``,``.
+    """
+    if spec is None:
+        spec = os.environ.get(FP4_DECODE_ENV, "")
+    spec = str(spec).strip().lower()
+    if spec in ("", "base", "baseline", "none"):
+        return ""
+    if spec == "all":
+        return "+".join(FP4_DECODE_FLAGS)
+    flags = {f.strip() for f in spec.replace(",", "+").split("+") if f.strip()}
+    unknown = flags.difference(FP4_DECODE_FLAGS)
+    if unknown:
+        raise ValueError(
+            f"unknown fp4 decode flag(s) {sorted(unknown)}; expected a subset of "
+            f"{FP4_DECODE_FLAGS} or 'all'"
+        )
+    return "+".join(f for f in FP4_DECODE_FLAGS if f in flags)
+
+
+def fp4_decode_name_tag(spec):
+    """Kernel-name suffix for a canonical decode spec ("" for the default decode)."""
+    return f"_dec_{spec.replace('+', '_')}" if spec else ""
+
+
+def _fp4x4_e2m1_to_fp8x4(nib_i32, *, sign_and=False):
+    """4 E2M1 nibbles (low nibble of each byte) -> 4 E4M3FNUZ fp8 bytes in one i32.
+
+    E2M1 -0.0 must not become FNUZ 0x80 (NaN), so mag==0 always decodes to 0x00.
+    Default: positive LUT, sign OR'd in only where mag != 0. ``sign_and``: negative
+    LUT whose mag-0 entry is already 0x00, sign cleared by AND for positive nibbles.
     """
     mag = nib_i32 & fx.Int32(0x07070707)
+    if const_expr(sign_and):
+        neg = fx.Int32(
+            rocdl.perm_b32(
+                _raw(fx.Int32(_FP4_E2M1_FP8_NEG_LUT_HI)),
+                _raw(fx.Int32(_FP4_E2M1_FP8_NEG_LUT_LO)),
+                _raw(mag),
+            )
+        )
+        # Per byte: 0x7F | (sign << 7); nibbles are < 16 so the shift never crosses bytes.
+        return neg & ((nib_i32 << fx.Int32(4)) | fx.Int32(0x7F7F7F7F))
     magbyte = fx.Int32(
         rocdl.perm_b32(
             _raw(fx.Int32(_FP4_E2M1_FP8_LUT_HI)),
@@ -460,9 +513,19 @@ def _fp4x4_e2m1_to_f32x4(nib_i32):
     nz = ((mag + fx.Int32(0x7F7F7F7F)).shrui(fx.Int32(7))) & fx.Int32(0x01010101)
     signbit = (nib_i32 & fx.Int32(0x08080808)) << fx.Int32(4)
     signmask = nz << fx.Int32(7)
-    fp8_i32 = magbyte | (signbit & signmask)
+    return magbyte | (signbit & signmask)
+
+
+def _fp8x4_to_f32x2_pair(fp8_i32):
+    """4 E4M3FNUZ fp8 -> (f32x2 of bytes 0,1, f32x2 of bytes 2,3) via cvt_pk_f32_fp8."""
     lo = fx.Vector(rocdl.cvt_pk_f32_fp8(T.f32x2, _raw(fp8_i32), False))
     hi = fx.Vector(rocdl.cvt_pk_f32_fp8(T.f32x2, _raw(fp8_i32), True))
+    return lo, hi
+
+
+def _fp4x4_e2m1_to_f32x4(nib_i32, *, sign_and=False):
+    """4 E2M1 nibbles (low nibble of each byte) -> 4 unscaled f32."""
+    lo, hi = _fp8x4_to_f32x2_pair(_fp4x4_e2m1_to_fp8x4(nib_i32, sign_and=sign_and))
     return (
         fx.Float32(lo[0]),
         fx.Float32(lo[1]),
@@ -471,31 +534,52 @@ def _fp4x4_e2m1_to_f32x4(nib_i32):
     )
 
 
-def _fp4_nibble_to_bf16x8(raw_i32, scale_f32):
+def _fp4_nibble_to_bf16x8(raw_i32, scale_f32, *, decode=""):
     """FP4 (E2M1) -> v8bf16 for one MFMA K32 step, with the groupwise scale applied.
 
     gfx942 substitute for ``v_cvt_scalef32_pk_bf16_fp4``. Nibble i is bits
     ``[4*i : 4*i+4)``, matching gfx950 cvt sel order (sel 0 = byte0 = K0,K1).
     E8M0 is a power of two; scale is applied on f32, then packed with the same
-    lshr-16 used by gfx942 int4.
+    lshr-16 used by gfx942 int4. ``decode`` is a :func:`fp4_decode_spec` string.
     """
+    flags = decode.split("+") if decode else ()
+    sign_and = "sign" in flags
+    perm_pack = "perm" in flags
     packed = fx.Int32(raw_i32)
     even = packed & 0x0F0F0F0F  # K0,K2,K4,K6
     odd = packed.shrui(fx.Int32(4)) & 0x0F0F0F0F  # K1,K3,K5,K7
-    fe = _fp4x4_e2m1_to_f32x4(even)
-    fo = _fp4x4_e2m1_to_f32x4(odd)
     scale = fx.Float32(scale_f32)
-    f32s = []
-    for i in range_constexpr(4):
-        f32s.append(fe[i] * scale)
-        f32s.append(fo[i] * scale)
-    c16 = fx.Int32(16)
-    hi16 = fx.Int32(0xFFFF0000)
+    if const_expr("pkmul" in flags):
+        e_lo, e_hi = _fp8x4_to_f32x2_pair(_fp4x4_e2m1_to_fp8x4(even, sign_and=sign_and))
+        o_lo, o_hi = _fp8x4_to_f32x2_pair(_fp4x4_e2m1_to_fp8x4(odd, sign_and=sign_and))
+        # f32x2 * scalar broadcasts the scale: one v_pk_mul_f32 per cvt result.
+        e_lo, e_hi, o_lo, o_hi = (v * scale for v in (e_lo, e_hi, o_lo, o_hi))
+        f32s = []
+        for ev, od in ((e_lo, o_lo), (e_hi, o_hi)):
+            for j in range_constexpr(2):
+                f32s.append(fx.Float32(ev[j]))
+                f32s.append(fx.Float32(od[j]))
+    else:
+        fe = _fp4x4_e2m1_to_f32x4(even, sign_and=sign_and)
+        fo = _fp4x4_e2m1_to_f32x4(odd, sign_and=sign_and)
+        f32s = []
+        for i in range_constexpr(4):
+            f32s.append(fe[i] * scale)
+            f32s.append(fo[i] * scale)
     i32s = []
-    for i in range_constexpr(4):
-        b0 = f32s[2 * i].bitcast(fx.Int32)
-        b1 = f32s[2 * i + 1].bitcast(fx.Int32)
-        i32s.append(b0.shrui(c16) | (b1 & hi16))
+    if const_expr(perm_pack):
+        sel = fx.Int32(_PERM_SEL_BF16_HI_PAIR)
+        for i in range_constexpr(4):
+            b0 = f32s[2 * i].bitcast(fx.Int32)
+            b1 = f32s[2 * i + 1].bitcast(fx.Int32)
+            i32s.append(fx.Int32(rocdl.perm_b32(_raw(b1), _raw(b0), _raw(sel))))
+    else:
+        c16 = fx.Int32(16)
+        hi16 = fx.Int32(0xFFFF0000)
+        for i in range_constexpr(4):
+            b0 = f32s[2 * i].bitcast(fx.Int32)
+            b1 = f32s[2 * i + 1].bitcast(fx.Int32)
+            i32s.append(b0.shrui(c16) | (b1 & hi16))
     v4i32 = fx.Vector.from_elements([_raw(x) for x in i32s], fx.Int32)
     return v4i32.bitcast(fx.BFloat16)
 
@@ -514,6 +598,7 @@ def make_b_loader(
     w_dtype,
     b_cache_mod,
     rocm_arch,
+    fp4_decode="",
 ):
     """Build the shared B (weight) operand path for gemm1 and gemm2.
 
@@ -543,11 +628,18 @@ def make_b_loader(
     On gfx942 the a16wi4 W upconvert is the lshr-16 bf16 pack in
     ``_int4_nibble_to_bf16x8``; a16wfp4 uses ``_fp4_nibble_to_bf16x8`` (fp8 LUT
     + ``cvt_pk_f32_fp8``) instead of ``v_cvt_scalef32_pk_bf16_fp4``.
+    ``fp4_decode`` selects an experimental variant of that decode (see
+    :data:`FP4_DECODE_FLAGS`); it is a closure value of the stage kernels and part of
+    their names, so each variant gets its own cache entry. Editing the helper bodies
+    still needs a cleared FlyDSL cache.
     """
     _is_int4 = w_dtype == "int4"
     _is_bf16 = w_dtype == "bf16"
     _is_fp8 = w_dtype == "fp8"
     _is_gfx942 = str(rocm_arch).startswith("gfx942")
+    assert fp4_decode == fp4_decode_spec(
+        fp4_decode
+    ), f"fp4_decode must be canonical (fp4_decode_spec), got {fp4_decode!r}"
     assert not (_is_fp8 and _is_gfx942), "fp8 (MXFP8) W needs gfx950 cvt_scalef32"
     assert not _is_fp8 or TILE_K % 128 == 0, "fp8 W needs TILE_K % 128 == 0"
     # W tensors whose per-expert base is folded into the buffer resource address.
@@ -899,7 +991,9 @@ def make_b_loader(
             )
         if const_expr(_is_gfx942):
             # gfx942: no v_cvt_scalef32_pk_bf16_fp4; fp8-LUT + cvt_pk_f32_fp8.
-            return _fp4_nibble_to_bf16x8(fx.Int32(i32_val), scale_f32)
+            return _fp4_nibble_to_bf16x8(
+                fx.Int32(i32_val), scale_f32, decode=fp4_decode
+            )
         # raw[ku//4][ku%4] i32 holds 8 fp4 -> 4x cvt (v2bf16, sel 0..3) -> v8bf16.
         s_raw = _raw(scale_f32)
         i32s = []

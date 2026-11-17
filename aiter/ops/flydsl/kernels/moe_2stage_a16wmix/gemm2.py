@@ -21,6 +21,8 @@ from .utils import (
     _raw,
     _udiv,
     _umod,
+    fp4_decode_name_tag,
+    fp4_decode_spec,
     make_a_loader,
     make_b_loader,
 )
@@ -281,6 +283,7 @@ def _gemm2_body_a16w4(
     b_cache_mod=2,
     w_dtype="fp4",
     rocm_arch="",
+    fp4_decode="",
     use_reduce=False,
     topk=1,
     dense=False,
@@ -340,6 +343,7 @@ def _gemm2_body_a16w4(
         w_dtype=w_dtype,
         b_cache_mod=b_cache_mod,
         rocm_arch=rocm_arch,
+        fp4_decode=fp4_decode,
     )
 
     # ---- A path (shared with gemm1, see utils.make_a_loader) -------------------
@@ -482,6 +486,7 @@ def compile_gemm2_a16w4_port(
     w_dtype="fp4",
     persist=False,
     rocm_arch,
+    fp4_decode="",
     epilog="atomic",
     topk=1,
     reuse_lds=False,
@@ -619,6 +624,8 @@ def compile_gemm2_a16w4_port(
         _name += f"_reduce_tk{_topk}"
     if use_valid_token_count:
         _name += "_valid_tokens"
+    fp4_decode = fp4_decode_spec(fp4_decode)
+    _name += fp4_decode_name_tag(fp4_decode)
 
     @fx.struct
     class SharedStorage:
@@ -703,6 +710,7 @@ def compile_gemm2_a16w4_port(
                 b_cache_mod=b_cache_mod,
                 w_dtype=w_dtype,
                 rocm_arch=rocm_arch,
+                fp4_decode=fp4_decode,
                 use_reduce=_use_reduce,
                 topk=_topk,
             )
@@ -850,6 +858,7 @@ def compile_gemm2_a16w4_port(
                 b_cache_mod=b_cache_mod,
                 w_dtype=shared_w_dtype,
                 rocm_arch=rocm_arch,
+                fp4_decode=fp4_decode,
                 dense=True,
                 a_rows=i32_M,
             )
@@ -877,6 +886,7 @@ def compile_gemm2_a16w4_port(
                 b_cache_mod=b_cache_mod,
                 w_dtype=w_dtype,
                 rocm_arch=rocm_arch,
+                fp4_decode=fp4_decode,
                 use_reduce=_use_reduce,
                 topk=_topk,
             )
