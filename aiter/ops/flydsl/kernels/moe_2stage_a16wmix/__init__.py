@@ -19,6 +19,8 @@ Launch args are raw device pointers (``fx.Int64``); tensors passed as
 ``.data_ptr()``.
 """
 
+import os
+
 import torch
 from flydsl.runtime.device import get_rocm_arch
 
@@ -26,13 +28,17 @@ from aiter.ops.flydsl.kernels.tensor_shim import _run_compiled
 
 from .gemm1 import compile_gemm1_a16w4_port, gemm1_a16w4_grid
 from .gemm2 import compile_gemm2_a16w4_port, gemm2_a16w4_grid
+from .utils import FP8_DECODE_ENV, FP8_DECODE_FLAGS, fp8_decode_spec
 
 __all__ = [
+    "FP8_DECODE_ENV",
+    "FP8_DECODE_FLAGS",
     "compile_gemm1_a16w4_port",
     "compile_gemm2_a16w4_port",
     "flydsl_a16w4_gemm1",
     "flydsl_a16w4_gemm2",
     "flydsl_a16w4_moe",
+    "fp8_decode_spec",
     "gemm1_a16w4_grid",
     "gemm2_a16w4_grid",
     "mxfp4_scale_ref_exponent",
@@ -80,10 +86,16 @@ def mxfp4_scale_ref_exponent(scale_u8, rows, k_groups):
 # compile with moe_kernels.py's AOT/runtime direct calls.
 
 
-def _non_default_a_dtype(a_dtype):
+def _non_default_a_dtype(a_dtype, fp8_decode=None):
     # Passed only when not bf16: an explicit a_dtype="bf16" would be a different
     # functools.cache key from moe_kernels.py's calls and compile the kernel twice.
-    return {} if a_dtype == "bf16" else {"a_dtype": a_dtype}
+    if a_dtype == "bf16":
+        return {}
+    # fp8_decode=None reads FP8_DECODE_ENV here, outside the cached compile.
+    spec = fp8_decode_spec(
+        os.environ.get(FP8_DECODE_ENV, "") if fp8_decode is None else fp8_decode
+    )
+    return {"a_dtype": a_dtype, **({"fp8_decode": spec} if spec else {})}
 
 
 def flydsl_a16w4_gemm1(
@@ -120,6 +132,7 @@ def flydsl_a16w4_gemm1(
     a_dtype="bf16",
     a_scale=None,
     w1_sref=None,
+    fp8_decode=None,
     stream=None,
 ):
     """a16w4/a16wi4/a16w16 fused stage1: gate+up GEMM + SiLU -> bf16 intermediate.
@@ -156,7 +169,9 @@ def flydsl_a16w4_gemm1(
     ``a_dtype="fp8"`` (gfx942, mxfp4 W, standard layout): ``a_bf16`` holds per-token
     e4m3fnuz activations, ``a_scale`` their ``[n_tokens]`` f32 scales and ``w1_sref``
     the ``[E, 2*D_INTER]`` u8 reference exponents of ``w1_scale_u8``
-    (:func:`mxfp4_scale_ref_exponent`); the GEMM runs on fp8 MFMA.
+    (:func:`mxfp4_scale_ref_exponent`); the GEMM runs on fp8 MFMA. ``fp8_decode``
+    picks the opt-in decode variants (``FP8_DECODE_FLAGS``); None reads
+    ``AITER_FLYDSL_A16W4_FP8_DECODE``.
     """
     if k_batch != 1:
         raise NotImplementedError(f"a16w4 gemm1 only supports k_batch=1, got {k_batch}")
@@ -210,7 +225,7 @@ def flydsl_a16w4_gemm1(
         activation_bf16=activation_bf16,
         rocm_arch=str(get_rocm_arch()),
         prefetch=prefetch,
-        **_non_default_a_dtype(a_dtype),
+        **_non_default_a_dtype(a_dtype, fp8_decode),
     )
     max_m_blocks = int(sorted_expert_ids.numel())
     grid = gemm1_a16w4_grid(BM, INTER=D_INTER, TILE_N=TILE_N, max_m_blocks=max_m_blocks)
@@ -276,6 +291,7 @@ def flydsl_a16w4_gemm2(
     a_dtype="bf16",
     a_scale=None,
     w2_sref=None,
+    fp8_decode=None,
     stream=None,
     reuse_lds=False,
 ):
@@ -295,7 +311,8 @@ def flydsl_a16w4_gemm2(
     ``a_dtype="fp8"`` (gfx942, mxfp4 W, atomic): ``inter_sorted_bf16`` holds the
     intermediate quantized per sorted row to e4m3fnuz, ``a_scale`` its
     ``[max_sorted]`` f32 row scales and ``w2_sref`` the ``[E, D_HIDDEN]`` u8 reference
-    exponents of ``w2_scale_u8``; the GEMM runs on fp8 MFMA.
+    exponents of ``w2_scale_u8``; the GEMM runs on fp8 MFMA. ``fp8_decode`` as in
+    :func:`flydsl_a16w4_gemm1`.
     """
     if k_batch != 1:
         raise NotImplementedError(f"a16w4 gemm2 only supports k_batch=1, got {k_batch}")
@@ -349,7 +366,7 @@ def flydsl_a16w4_gemm2(
         topk=topk,
         reuse_lds=reuse_lds,
         use_valid_token_count=use_valid_token_count,
-        **_non_default_a_dtype(a_dtype),
+        **_non_default_a_dtype(a_dtype, fp8_decode),
     )
     grid = gemm2_a16w4_grid(
         BM, N_OUT=D_HIDDEN, TILE_N=TILE_N, max_m_blocks=max_m_blocks, persist=_persist

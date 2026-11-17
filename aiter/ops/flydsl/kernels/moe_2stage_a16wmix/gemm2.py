@@ -23,6 +23,8 @@ from .utils import (
     _raw,
     _udiv,
     _umod,
+    fp8_decode_name_tag,
+    fp8_decode_spec,
     make_a_loader,
     make_b_loader,
 )
@@ -281,6 +283,7 @@ def _gemm2_body_a16w4(
     a_dtype="bf16",
     arg_a_scale=None,
     arg_sref=None,
+    fp8_decode="",
 ):
     """a16w4/a16wi4/a16w16 stage2 body. K=inter_dim (contraction), N=model_dim (N_OUT).
 
@@ -334,6 +337,7 @@ def _gemm2_body_a16w4(
         rocm_arch=rocm_arch,
         a_dtype=a_dtype,
         arg_sref=arg_sref,
+        fp8_decode=fp8_decode,
     )
 
     # ---- A path (shared with gemm1, see utils.make_a_loader) -------------------
@@ -358,6 +362,7 @@ def _gemm2_body_a16w4(
         dma_cache_mod=b_cache_mod,
         dma_via_vgpr=_is_gfx942,
         a_dtype=a_dtype,
+        a_kperm="aperm" in fp8_decode.split("+"),
     )
 
     # ---- N-column addressing (W2 cols of model_dim; wave owns _n_per_wave) ------
@@ -504,6 +509,7 @@ def compile_gemm2_a16w4_port(
     reuse_lds=False,
     use_valid_token_count=False,
     a_dtype="bf16",
+    fp8_decode="",
 ):
     """a16w4/a16wi4/a16w16 (bf16 intermediate A x mxfp4/int4/bf16 W2) stage2 builder.
 
@@ -521,7 +527,9 @@ def compile_gemm2_a16w4_port(
     ``a_dtype="fp8"`` (gfx942, mxfp4 W, non-persistent) builds the fp8 MFMA variant: A
     is the intermediate quantized per sorted row to e4m3fnuz, and the kernel takes two
     extra pointers, the f32 per-row A scale and the ``[E, N_OUT]`` u8 per-column
-    reference exponent. The default ``"bf16"`` kernel is unchanged.
+    reference exponent. The default ``"bf16"`` kernel is unchanged. ``fp8_decode``
+    (fp8 only) picks the opt-in decode variants of ``utils.FP8_DECODE_FLAGS`` and tags
+    the kernel name.
     """
     assert w_dtype in (
         "fp4",
@@ -617,6 +625,12 @@ def compile_gemm2_a16w4_port(
         _name += f"_reduce_tk{_topk}"
     if use_valid_token_count:
         _name += "_valid_tokens"
+    # noslp is a gemm1 compile hint; gemm2 keeps one kernel per decode change.
+    fp8_decode = "+".join(
+        f for f in fp8_decode_spec(fp8_decode).split("+") if f and f != "noslp"
+    )
+    assert a_dtype == "fp8" or not fp8_decode, "fp8_decode needs a_dtype='fp8'"
+    _name += fp8_decode_name_tag(fp8_decode)
 
     @fx.struct
     class SharedStorage:
@@ -700,6 +714,7 @@ def compile_gemm2_a16w4_port(
                     a_dtype=a_dtype,
                     arg_a_scale=arg_a_scale,
                     arg_sref=arg_sref,
+                    fp8_decode=fp8_decode,
                 )
 
         @flyc.jit

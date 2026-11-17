@@ -239,6 +239,7 @@ def make_a_loader(
     k_grp_base_bytes=None,
     A_SLOT_BYTES=0,
     a_dtype="bf16",
+    a_kperm=False,
 ):
     """Build the shared A (activation) LDS path: global->LDS staging + fragment reads.
 
@@ -270,8 +271,12 @@ def make_a_loader(
       * ``a_dtype``          ``"bf16"``, or ``"fp8"`` (gfx942 e4m3fnuz, 1 B/elem): same
                              element layout and K order, every byte offset halves, and
                              ``load`` returns 8 fp8 elements (one ds_read_b64).
+      * ``a_kperm``          fp8 ``aperm`` decode: each 8-byte K group is written to LDS
+                             as [K0,K2,K4,K6,K1,K3,K5,K7], the B fragment order of
+                             ``_fp4_nibble_to_fp8x8(interleave=False)``.
     """
     _is_fp8 = a_dtype == "fp8"
+    assert not a_kperm or (_is_fp8 and dma_via_vgpr), "a_kperm is the gfx942 fp8 path"
     elem_bytes = 1 if _is_fp8 else 2
     _a_elem = fx.Float8E4M3FNUZ if _is_fp8 else fx.BFloat16
     # Per-thread A gather: each thread moves 16 B per pass. An fp8 tile can leave a
@@ -335,6 +340,17 @@ def make_a_loader(
     row_a_lds = lane_mod_16
     col_base_bytes_L = lane_div_16 * fx.Int32(32 * elem_bytes)  # 32 elems per lane
 
+    def _kperm_regs(r):
+        # Every staged chunk starts on an 8-byte K group (16 B or 8 B aligned copies).
+        v = fx.Vector(fx.memref_load_vec(r))
+        out = []
+        for j in range_constexpr(0, chunk_i32, 2):
+            e, o = _fp8_kperm_dwords(fx.Int32(v[j]), fx.Int32(v[j + 1]))
+            out += [_raw(e), _raw(o)]
+        rp = fx.make_rmem_tensor(fx.make_layout(chunk_i32, 1), fx.Int32)
+        rp.store(fx.Vector.from_elements(out, fx.Int32))
+        return rp
+
     def store_a_tile(base_k, slot=0):
         base_k_div4 = (base_k * fx.Int32(elem_bytes)) // fx.Int32(4)
         if k_grp_base_bytes is None:
@@ -360,6 +376,8 @@ def make_a_loader(
             if const_expr(dma_via_vgpr):
                 r = fx.make_rmem_tensor(fx.make_layout(chunk_i32, 1), fx.Int32)
                 fx.copy(x_dma_atom, src, r)
+                if const_expr(a_kperm):
+                    r = _kperm_regs(r)
                 fx.copy(lds_atom, r, dst)
             else:
                 fx.copy(x_dma_atom, src, dst)
@@ -392,6 +410,7 @@ def make_a_loader(
 
     def issue_a_tile(base_k):
         assert dma_via_vgpr, "issue_tile is the gfx942 VGPR staging path"
+        assert not a_kperm, "a_kperm is store_tile-only (fp8 runs prefetch=1)"
         base_k_div4 = (base_k * fx.Int32(elem_bytes)) // fx.Int32(4)
         regs = []
         for i in range_constexpr(num_x_loads):
@@ -542,6 +561,41 @@ _FP4_E2M1_FP8_RES_LO = 0x44403840  # mag 0..3 (byte 0 rewritten to 0x01)
 _FP4_E2M1_FP8_RES_HI = 0x54504C48  # mag 4..7
 A16W4_FP8_MAX_RESIDUAL = 6
 
+# Opt-in decode variants of the fp8 mode (``a_dtype="fp8"``), any "+"/","-joined subset:
+#   aperm  the decoded B fragment stays in [K0,K2,K4,K6 | K1,K3,K5,K7] byte order (no
+#          interleave v_perm pair per K32 step); A is written to LDS in the same order,
+#          two v_perm per 8 A bytes a thread stages. MFMA sums the same products.
+#   tab    residual table from a v_perm byte broadcast of 8*t instead of a v_mul_lo_u32
+#          (quarter rate on gfx942), and without the byte-0 fixup. Same table bits.
+#   noslp  not a decode change: gemm1 is built with SLP off for every activation, not
+#          only SwiGLU/SiLU. On FlyDSL 0.5.0 SLP makes the SiTUv2 TILE_K=256 and k_wave>1
+#          tiles spill or drop to one wave per SIMD. gemm2 ignores it.
+FP8_DECODE_FLAGS = ("aperm", "tab", "noslp")
+FP8_DECODE_ENV = "AITER_FLYDSL_A16W4_FP8_DECODE"
+# A-LDS byte order under aperm: 8-byte group [K0..K7] -> [K0,K2,K4,K6,K1,K3,K5,K7].
+_FP8_KPERM_SEL_EVEN = 0x06040200
+_FP8_KPERM_SEL_ODD = 0x07050301
+
+
+def fp8_decode_spec(spec):
+    """Canonical ``"+"``-joined flag string for an fp8 decode spec ("" = PR default)."""
+    if spec is None:
+        return ""
+    parts = [p.strip() for p in str(spec).replace(",", "+").split("+") if p.strip()]
+    if parts in (["base"], ["default"]):
+        return ""
+    bad = [p for p in parts if p not in FP8_DECODE_FLAGS]
+    if bad:
+        raise ValueError(
+            f"unknown {FP8_DECODE_ENV} flag(s) {bad}; known {FP8_DECODE_FLAGS}"
+        )
+    return "+".join(f for f in FP8_DECODE_FLAGS if f in parts)
+
+
+def fp8_decode_name_tag(spec):
+    spec = fp8_decode_spec(spec)
+    return "" if not spec else "_d8_" + spec.replace("+", "_")
+
 
 def _fp4_fp8_residual_table(t_i32):
     """(lo, hi) ``v_perm_b32`` pool decoding E2M1 to E4M3FNUZ scaled by 2^-t."""
@@ -552,12 +606,38 @@ def _fp4_fp8_residual_table(t_i32):
     return lo, hi
 
 
-def _fp4_nibble_to_fp8x8(raw_i32, table):
+def _fp4_fp8_residual_table_bcast(sref_i32, s_i32):
+    """:func:`_fp4_fp8_residual_table` of ``sref - s`` without the 32-bit multiply.
+
+    t8 = 8*clamp(sref - s, 0, 6) <= 48 is one byte, so ``v_perm_b32`` selector 0
+    broadcasts it to the four LUT bytes. lo is LO with byte 0 = 0x01, plus t8, minus the
+    broadcast: byte 0 stays 0x01 and no byte borrows (every LO byte is >= 0x38 > 48).
+    Inline asm for a mad24/add3 form would save two VALU per table, but any asm in the
+    decode stream moves the LLVM schedule to ~1.7x the VGPRs (gfx942, FlyDSL 0.5.0).
+    """
+    t8 = (fx.Int32(sref_i32) - fx.Int32(s_i32)) * fx.Int32(8)
+    t8 = fx.max(fx.min(t8, fx.Int32(8 * A16W4_FP8_MAX_RESIDUAL)), fx.Int32(0))
+    sub = fx.Int32(rocdl.perm_b32(_raw(t8), _raw(t8), _raw(fx.Int32(0))))
+    hi = fx.Int32(_FP4_E2M1_FP8_RES_HI) - sub
+    lo_minus_hi = ((_FP4_E2M1_FP8_RES_LO & 0xFFFFFF00) | 1) - _FP4_E2M1_FP8_RES_HI
+    lo = hi + t8 + fx.Int32(lo_minus_hi)
+    return lo, hi
+
+
+def _fp8_kperm_dwords(lo_i32, hi_i32):
+    """8 bytes [K0..K3], [K4..K7] -> [K0,K2,K4,K6], [K1,K3,K5,K7] (aperm A order)."""
+    e = rocdl.perm_b32(_raw(hi_i32), _raw(lo_i32), _raw(fx.Int32(_FP8_KPERM_SEL_EVEN)))
+    o = rocdl.perm_b32(_raw(hi_i32), _raw(lo_i32), _raw(fx.Int32(_FP8_KPERM_SEL_ODD)))
+    return fx.Int32(e), fx.Int32(o)
+
+
+def _fp4_nibble_to_fp8x8(raw_i32, table, interleave=True):
     """FP4 (E2M1) -> 8 E4M3FNUZ bytes for one MFMA K32 step, K order unchanged.
 
     Nibble i (bits ``[4*i : 4*i+4)``) becomes byte i, the order the bf16 path uses.
     All eight magnitudes fit one ``v_perm_b32`` pool; the sign is bit 7 of the
-    nibble's byte, which is where E4M3 keeps it.
+    nibble's byte, which is where E4M3 keeps it. ``interleave=False`` (aperm) returns
+    [K0,K2,K4,K6, K1,K3,K5,K7], the order the aperm A loader stores.
     """
     tab_lo, tab_hi = table
     raw = fx.Int32(raw_i32)
@@ -567,6 +647,9 @@ def _fp4_nibble_to_fp8x8(raw_i32, table):
     mag_o = fx.Int32(rocdl.perm_b32(_raw(tab_hi), _raw(tab_lo), _raw(odd)))
     mag_e = mag_e | ((raw & fx.Int32(0x08080808)) << fx.Int32(4))
     mag_o = mag_o | (raw & fx.Int32(0x80808080))
+    if const_expr(not interleave):
+        v2i32 = fx.Vector.from_elements([_raw(mag_e), _raw(mag_o)], fx.Int32)
+        return v2i32.bitcast(fx.Float8E4M3FNUZ)
     # mag_e = [K0,K2,K4,K6], mag_o = [K1,K3,K5,K7]; interleave back to K order.
     d0 = fx.Int32(rocdl.perm_b32(_raw(mag_o), _raw(mag_e), _raw(fx.Int32(0x05010400))))
     d1 = fx.Int32(rocdl.perm_b32(_raw(mag_o), _raw(mag_e), _raw(fx.Int32(0x07030602))))
@@ -590,6 +673,7 @@ def make_b_loader(
     rocm_arch,
     a_dtype="bf16",
     arg_sref=None,
+    fp8_decode="",
 ):
     """Build the shared B (weight) operand path for gemm1 and gemm2.
 
@@ -613,7 +697,8 @@ def make_b_loader(
     as logical ``[E, N_OUT]`` u8, ``col`` loads this lane's byte into ``_BCol.sref`` for
     the caller's epilogue (2^s_ref is per column, constant over K), and 2^-t is folded
     into the decode table, picked once per k0-block (``load_scale`` returns one table
-    pair per K-step).
+    pair per K-step). ``fp8_decode`` selects the :data:`FP8_DECODE_FLAGS` variants;
+    ``aperm`` must match the A loader's ``a_kperm``.
 
     ``expert_off``/``inter``-style N arithmetic stays with the caller: it hands ``col``
     the 16-wide N block base and gets back everything the loaders need.
@@ -633,6 +718,10 @@ def make_b_loader(
     assert not _is_fp8 or (
         w_dtype == "fp4" and _is_gfx942 and arg_sref is not None
     ), "a_dtype='fp8' needs mxfp4 W on gfx942 and arg_sref"
+    _fp8_flags = fp8_decode_spec(fp8_decode).split("+") if fp8_decode else []
+    assert _is_fp8 or not _fp8_flags, "fp8_decode needs a_dtype='fp8'"
+    _fp8_interleave = "aperm" not in _fp8_flags
+    _fp8_tab_bcast = "tab" in _fp8_flags
     # Emitted before the layouts/resources below: this is where the stages used to
     # compute it, and the ISA is sensitive to the order operands are materialized in.
     expert_off = e * fx.Int32(N_OUT)
@@ -920,7 +1009,10 @@ def make_b_loader(
                 packed = _buffer_i32_scalar_read(sw_tiles, idx, sw_read_atom)
                 byte_pos = k_pack_sub * fx.Int32(2) + n_pack
                 s = packed.shrui(byte_pos * fx.Int32(8)) & fx.Int32(0xFF)
-                cache[_k0_blk] = _fp4_fp8_residual_table(sref - s)
+                if const_expr(_fp8_tab_bcast):
+                    cache[_k0_blk] = _fp4_fp8_residual_table_bcast(sref, s)
+                else:
+                    cache[_k0_blk] = _fp4_fp8_residual_table(sref - s)
             tables.append(cache[_k0_blk])
         return tables
 
@@ -954,7 +1046,9 @@ def make_b_loader(
             )
         if const_expr(_is_fp8):
             # scale_f32 is this K-step's residual table (see load_b_scale_fp8).
-            return _fp4_nibble_to_fp8x8(fx.Int32(i32_val), scale_f32)
+            return _fp4_nibble_to_fp8x8(
+                fx.Int32(i32_val), scale_f32, interleave=_fp8_interleave
+            )
         if const_expr(_is_gfx942):
             # gfx942: no v_cvt_scalef32_pk_bf16_fp4; fp8-LUT + cvt_pk_f32_fp8.
             return _fp4_nibble_to_bf16x8(fx.Int32(i32_val), scale_f32)

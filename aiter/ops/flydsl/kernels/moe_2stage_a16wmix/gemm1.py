@@ -31,6 +31,8 @@ from .utils import (
     _mma_fp8,
     _udiv,
     _umod,
+    fp8_decode_name_tag,
+    fp8_decode_spec,
     make_a_loader,
     make_b_loader,
 )
@@ -73,6 +75,7 @@ def _gemm1_body_a16w4(
     a_dtype="bf16",
     arg_a_scale=None,
     arg_sref=None,
+    fp8_decode="",
 ):
     """a16w4/a16wi4/a16w16 (bf16 A x mxfp4/int4/bf16 W) fused stage1 gemm1 body.
 
@@ -151,6 +154,7 @@ def _gemm1_body_a16w4(
         rocm_arch=rocm_arch,
         a_dtype=a_dtype,
         arg_sref=arg_sref,
+        fp8_decode=fp8_decode,
     )
     # Intermediate [sorted_size, inter] bf16: num_records = cumsum0*inter*2, so masked
     # (clamped) stores land OOB. KEPT RAW: the output resource + masked buffer_store need a
@@ -201,6 +205,7 @@ def _gemm1_body_a16w4(
         k_grp_base_bytes=k_grp_base_bytes,
         A_SLOT_BYTES=A_SLOT_BYTES,
         a_dtype=a_dtype,
+        a_kperm="aperm" in fp8_decode.split("+"),
     )
 
     # ---- N-column addressing for gate/up (SEPARATED; wave owns _n_per_wave) ----
@@ -497,6 +502,7 @@ def compile_gemm1_a16w4_port(
     rocm_arch,
     prefetch=1,
     a_dtype="bf16",
+    fp8_decode="",
 ):
     """a16w4/a16wi4/a16w16 (bf16 A x mxfp4/int4/bf16 W1) fused stage1 builder.
 
@@ -525,7 +531,9 @@ def compile_gemm1_a16w4_port(
     MFMA variant: A is per-token e4m3fnuz and the kernel takes two extra pointers, the
     f32 per-token A scale and the ``[E, 2*D_INTER]`` u8 per-column reference exponent.
     The accumulators are dequantized before ``activation_bf16`` rounds them. The
-    default ``"bf16"`` kernel and its argument list are unchanged.
+    default ``"bf16"`` kernel and its argument list are unchanged. ``fp8_decode``
+    (fp8 only) picks the opt-in decode variants of ``utils.FP8_DECODE_FLAGS``; it is
+    taken as given here (no env read), and tags the kernel name.
     """
     assert w_dtype in (
         "fp4",
@@ -623,6 +631,9 @@ def compile_gemm1_a16w4_port(
     _wl_tag = "" if w_layout == "standard" else f"_{w_layout}"
     _kw_tag = f"_kw{k_wave}" if k_wave > 1 else ""
     _kw_tag += f"_pf{prefetch}" if prefetch > 1 else ""
+    fp8_decode = fp8_decode_spec(fp8_decode)
+    assert a_dtype == "fp8" or not fp8_decode, "fp8_decode needs a_dtype='fp8'"
+    _kw_tag += fp8_decode_name_tag(fp8_decode)
     name_suffix = f"a16w4{_wd_tag}{_ad_tag}{_wl_tag}_h{_K}_i{_INTER}_ne{NE}_bm{BM}_tn{TILE_N}{_act_tag}{_bcm_tag}{_xcd_tag}{_wpe_tag}{_kw_tag}"
 
     @fx.struct
@@ -723,6 +734,7 @@ def compile_gemm1_a16w4_port(
                     a_dtype=a_dtype,
                     arg_a_scale=arg_a_scale,
                     arg_sref=arg_sref,
+                    fp8_decode=fp8_decode,
                 )
 
         @flyc.jit
@@ -772,7 +784,9 @@ def compile_gemm1_a16w4_port(
         # epilogue, so the raw weights stay live across tiles and the kernel spills.
         # SiTUv2 does not spill and is faster with SLP on some tuned tiles, so it keeps
         # the default.
-        if act in ("swiglu", "silu", "silu_clamped"):
+        if act in ("swiglu", "silu", "silu_clamped") or "noslp" in fp8_decode.split(
+            "+"
+        ):
             launch_gemm1_fp8.compile_hints["llvm_options"] = {"slp-threshold": 100000}
         return launch_gemm1_fp8
 
