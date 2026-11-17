@@ -932,7 +932,9 @@ def make_b_loader(
 
     def load_b_scale_fp8(base_k, mni, n_pack, sref):
         # Same e8m0 gather as load_b_scale, but kept as the exponent byte: all four ku
-        # of a k0-block share it, so the residual table is built once per block.
+        # of a k0-block share it. Returns (dword, bit offset, s_ref) per ku; upconvert
+        # builds the residual table, so the dword's first use is in the consuming tile
+        # rather than right after the load (CSE keeps one table per block).
         tables = []
         cache = {}
         for ku in range_constexpr(k_unroll):
@@ -949,8 +951,7 @@ def make_b_loader(
                 )
                 packed = _buffer_i32_scalar_read(sw_tiles, idx, sw_read_atom)
                 byte_pos = k_pack_sub * fx.Int32(2) + n_pack
-                s = packed.shrui(byte_pos * fx.Int32(8)) & fx.Int32(0xFF)
-                cache[_k0_blk] = _fp4_fp8_residual_table(sref - s)
+                cache[_k0_blk] = (packed, byte_pos * fx.Int32(8), sref)
             tables.append(cache[_k0_blk])
         return tables
 
@@ -983,8 +984,11 @@ def make_b_loader(
                 fx.Int32(i32_val), scale_f32, is_gfx942=_is_gfx942, old_pack=True
             )
         if const_expr(_is_fp8):
-            # scale_f32 is this K-step's residual table (see load_b_scale_fp8).
-            return _fp4_nibble_to_fp8x8(fx.Int32(i32_val), scale_f32)
+            # scale_f32 is this K-step's (dword, bit offset, s_ref) (load_b_scale_fp8).
+            packed, shift, sref = scale_f32
+            s = fx.Int32(packed).shrui(shift) & fx.Int32(0xFF)
+            table = _fp4_fp8_residual_table(sref - s)
+            return _fp4_nibble_to_fp8x8(fx.Int32(i32_val), table)
         if const_expr(_is_gfx942):
             # gfx942: no v_cvt_scalef32_pk_bf16_fp4; fp8-LUT + cvt_pk_f32_fp8.
             return _fp4_nibble_to_bf16x8(fx.Int32(i32_val), scale_f32)
