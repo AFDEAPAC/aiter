@@ -1181,6 +1181,35 @@ def test_flydsl_a16wfp4_fp8_mfma_gemm1_rows(tile_m, tile_n):
     assert rel < 5e-3, f"fp8 gemm1 vs fp8 stage-1 reference: rel_l2 {rel:.3e}"
 
 
+@_SKIP_FP8_MFMA
+@pytest.mark.parametrize("routing", ["random", "spread", "packed"])
+@pytest.mark.parametrize("token", [1, 3, 16, 300])
+@pytest.mark.parametrize("E,topk,tile_m", [(896, 16, 16), (896, 16, 32), (128, 8, 64)])
+def test_a16w4_fp8_q2_row_bound(routing, token, E, topk, tile_m):
+    """The host bound the stage-2 fp8 quant launches over covers every sorted row.
+
+    "spread" puts each route on its own expert where it can (most padding), "packed"
+    puts every token on the same topk experts (least); the bound must hold for both.
+    """
+    from aiter.ops.flydsl.moe_kernels import _a16w4_fp8_q2_rows
+
+    torch.manual_seed(token)
+    if routing == "random":
+        topk_ids = torch.rand((token, E), device="cuda").topk(topk, dim=1).indices
+    elif routing == "spread":
+        topk_ids = torch.arange(token * topk, device="cuda").view(token, topk) % E
+    else:
+        topk_ids = torch.arange(topk, device="cuda").repeat(token, 1)
+    topk_ids = topk_ids.to(torch.int32)
+    topk_weights = torch.full((token, topk), 1.0 / topk, device="cuda")
+    _, _, sorted_eids, num_valid_ids, _ = moe_sorting(
+        topk_ids, topk_weights, E, 256, dtypes.bf16, block_size=tile_m
+    )
+    max_sorted = int(sorted_eids.numel()) * tile_m
+    rows = _a16w4_fp8_q2_rows(token * topk, E, tile_m, max_sorted)
+    assert int(num_valid_ids[0]) <= rows <= max_sorted
+
+
 def test_mxfp4_scale_ref_exponent():
     """The fp8 mode's per-row reference exponent, read from the preshuffled scale."""
     from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import mxfp4_scale_ref_exponent
