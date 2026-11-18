@@ -302,6 +302,150 @@ def _fused_decode_sort_quant(
     )
 
 
+# (num_experts, topk, model_dim) the gfx942 a16w4 decode sort kernel is
+# instantiated for; must stay in sync with AITER_A16W4_SORT_QUANT_SHAPES in
+# moe_sorting_opus_kernels.cu.
+_A16W4_DECODE_SORT_SHAPES = {(896, 16, 3584)}
+# The kernel's M limit. With the tuned BM=16 tiles it beats the multi-phase Opus
+# sort at every M up to here on MI308X.
+_A16W4_DECODE_SORT_MAX_M = 128
+
+
+def _is_a16w4_decode_sort_quant_enabled(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    *,
+    w1: torch.Tensor,
+    global_experts: int,
+    block_m: int,
+    dtype: torch.dtype,
+    quant_type: QuantType,
+    q_dtype_a: torch.dtype,
+    q_dtype_w: torch.dtype,
+    expert_mask: torch.Tensor | None,
+    need_local_topk_ids: bool,
+    metadata,
+    hidden_pad: int,
+    dispatch_policy: int,
+) -> str | None:
+    """Gate the gfx942 a16w4 decode sort kernel; returns None or "sort".
+
+    "sort" replaces the Opus sort (and its moe_buf zeroing) with one launch.
+    Anything outside the kernel's shape or the a16w4 FlyDSL pipeline keeps the
+    generic sort.
+    """
+    if _USE_CK_MOE_SORTING or _USE_FLYDSL_MOE_SORTING or dispatch_policy != 0:
+        return None
+    try:
+        if get_gfx_runtime() != "gfx942":
+            return None
+    except (KeyError, OSError, RuntimeError):
+        return None
+    if hidden_states.ndim != 2 or topk_ids.ndim != 2:
+        return None
+    tokens, model_dim = hidden_states.shape
+    topk = topk_ids.shape[1]
+    stage1 = metadata.stage1
+    if not (
+        1 <= tokens <= _A16W4_DECODE_SORT_MAX_M
+        and (global_experts, topk, model_dim) in _A16W4_DECODE_SORT_SHAPES
+        and block_m in (16, 32)
+        and hidden_states.dtype == dtypes.bf16
+        and hidden_states.is_contiguous()
+        and topk_ids.dtype == dtypes.i32
+        and topk_ids.shape[0] == tokens
+        and topk_ids.is_contiguous()
+        and topk_weights.dtype == dtypes.fp32
+        and topk_weights.is_contiguous()
+        and quant_type == QuantType.per_1x32
+        and q_dtype_a == dtypes.bf16
+        and q_dtype_w == dtypes.fp4x2
+        and w1.dtype == dtypes.fp4x2
+        and dtype in (dtypes.bf16, dtypes.fp16)
+        and expert_mask is None
+        and not need_local_topk_ids
+        and not metadata.run_1stage
+        and not metadata.output_aux
+        and metadata.ksplit <= 1
+        and AsmMoeMode(metadata.flat) is AsmMoeMode.SORTED
+        and hidden_pad == 0
+        and getattr(stage1, "func", stage1) is _flydsl_stage1_wrapper
+    ):
+        return None
+    moe_kernels = _get_flydsl_moe_kernels()
+    parsed = moe_kernels.get_flydsl_kernel_params(
+        getattr(stage1, "keywords", {}).get("kernelName", "")
+    )
+    if not parsed or parsed.get("a_dtype") != "bf16" or parsed.get("b_dtype") != "fp4":
+        return None
+    return "sort"
+
+
+def _a16w4_decode_sort_quant(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    *,
+    num_experts: int,
+    block_m: int,
+    moebuf_dtype: torch.dtype,
+    accumulate: bool,
+    quant: bool,
+    num_local_tokens: torch.Tensor | None = None,
+    output: torch.Tensor | None = None,
+):
+    """Sorted metadata and moe_buf as _moe_sorting_impl returns them, plus fp8 A and its scale when quant."""
+    device = topk_ids.device
+    M, topk = topk_ids.shape
+    model_dim = hidden_states.shape[1]
+    max_num_tokens_padded = int(topk_ids.numel() + num_experts * block_m - topk)
+    max_num_m_blocks = (max_num_tokens_padded + block_m - 1) // block_m
+    max_num_tokens_padded = max_num_m_blocks * block_m
+    sorted_ids = torch.empty(max_num_tokens_padded, dtype=dtypes.i32, device=device)
+    sorted_weights = torch.empty(
+        max_num_tokens_padded, dtype=dtypes.fp32, device=device
+    )
+    sorted_expert_ids = torch.empty(max_num_m_blocks, dtype=dtypes.i32, device=device)
+    num_valid_ids = torch.empty(2, dtype=dtypes.i32, device=device)
+    if accumulate:
+        moe_buf = (
+            output
+            if output is not None
+            else torch.empty((M, model_dim), dtype=moebuf_dtype, device=device)
+        )
+    else:
+        moe_buf = torch.empty((0, 0), dtype=moebuf_dtype, device=device)
+    a_q = a_s = None
+    if quant:
+        a_q = torch.empty((M, model_dim), dtype=dtypes.fp8, device=device)
+        a_s = torch.empty((M, 1), dtype=dtypes.fp32, device=device)
+    aiter.a16w4_moe_sort_quant_fwd(
+        hidden_states,
+        topk_ids,
+        topk_weights,
+        sorted_token_ids=sorted_ids,
+        sorted_weights=sorted_weights,
+        sorted_expert_ids=sorted_expert_ids,
+        num_valid_ids=num_valid_ids,
+        moe_buf=moe_buf,
+        num_experts=num_experts,
+        block_m=block_m,
+        activation_quant=a_q,
+        activation_scale=a_s,
+        num_local_tokens=num_local_tokens,
+    )
+    return (
+        sorted_ids,
+        sorted_weights,
+        sorted_expert_ids,
+        num_valid_ids,
+        moe_buf,
+        a_q,
+        a_s,
+    )
+
+
 # Optional hook for collecting per-stage benchmark callables.
 kernel_bench_callable = None
 
@@ -2384,6 +2528,27 @@ def _fused_moe_impl(
         ksplit=metadata.ksplit,
     )
     fused_sort_quant = fused_sort_quant and not herd_topk
+    a16w4_sort_mode = (
+        None
+        if herd_topk or fused_sort_quant
+        else _is_a16w4_decode_sort_quant_enabled(
+            hidden_states,
+            topk_ids,
+            topk_weight,
+            w1=w1,
+            global_experts=global_E,
+            block_m=block_size_M,
+            dtype=dtype,
+            quant_type=quant_type,
+            q_dtype_a=q_dtype_a,
+            q_dtype_w=q_dtype_w,
+            expert_mask=expert_mask,
+            need_local_topk_ids=need_local_topk_ids,
+            metadata=metadata,
+            hidden_pad=hidden_pad,
+            dispatch_policy=moe_sorting_dispatch_policy,
+        )
+    )
     # compact-scale variant not ported (its stage-1 change targets the
     # refactored mixed_moe_gemm_2stage_common); keep the fused sort+quant on
     # the expanded-scale path only.
@@ -2525,6 +2690,28 @@ def _fused_moe_impl(
             accumulate=not runtime_stage2_reduce,
             compact_scale=fused_compact_scale,
             num_local_tokens=num_local_tokens,
+        )
+        local_topk_ids = None
+    elif a16w4_sort_mode is not None:
+        (
+            sorted_ids,
+            sorted_weights,
+            sorted_expert_ids,
+            num_valid_ids,
+            moe_buf,
+            prequantized_a1,
+            prequantized_a1_scale,
+        ) = _a16w4_decode_sort_quant(
+            hidden_states,
+            topk_ids,
+            topk_weight,
+            num_experts=global_E,
+            block_m=block_size_M,
+            moebuf_dtype=dtype,
+            accumulate=not runtime_stage2_reduce,
+            quant=False,
+            num_local_tokens=num_local_tokens,
+            output=output,
         )
         local_topk_ids = None
     else:
