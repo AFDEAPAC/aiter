@@ -5,6 +5,7 @@
 (:mod:`gemm1` stage1 and :mod:`gemm2` stage2). Pointer/GEP builders, buffer-tensor
 views, e8m0/int4 dequant, the A-LDS XOR swizzle, and the arch gate."""
 
+import inspect
 import os
 
 import flydsl.expr as fx
@@ -424,7 +425,7 @@ def _fp8_table_select(neg_r):
     return lo, hi
 
 
-def _fp4_nibble_to_fp8x8(raw_i32, tab_lo, tab_hi):
+def _fp4_nibble_to_fp8x8(raw_i32, tab_lo, tab_hi, interleave=True):
     """8 FP4 nibbles -> 8 e4m3fnuz bytes, as two dwords (one MFMA 16x16x32 B operand).
 
     ``raw_i32`` holds nibble j in bits[4j+3:4j], the same K order the bf16 path uses,
@@ -434,6 +435,11 @@ def _fp4_nibble_to_fp8x8(raw_i32, tab_lo, tab_hi):
     and a low-byte pool), so four nibbles decode per perm instead of two perms plus a
     repack. Twelve instructions for eight weights, against 39.5 for the scaled bf16
     decode measured in prof/isa_summary_prefill_bm32.json.
+
+    ``interleave=False`` skips the last two perms and returns the bytes in the K order
+    [e0,e2,e4,e6 | e1,e3,e5,e7]. That is only correct when A was staged in the same
+    order (:func:`fp8_kperm_regs`): an MFMA pairs A byte j with B byte j and does not
+    care which K each slot holds.
     """
     raw = fx.Int32(raw_i32)
     # v_perm honours selector values 0..7 only, so mask the sign off and fold it back
@@ -445,6 +451,8 @@ def _fp4_nibble_to_fp8x8(raw_i32, tab_lo, tab_hi):
     mag_odd = _perm(tab_hi, tab_lo, sel_odd)
     mag_even = mag_even | ((raw & fx.Int32(0x08080808)) << fx.Int32(4))
     mag_odd = mag_odd | (raw & fx.Int32(0x80808080))
+    if not interleave:
+        return mag_even, mag_odd
 
     # mag_even = [e0,e2,e4,e6], mag_odd = [e1,e3,e5,e7]; interleave to K order.
     d0 = _perm(mag_odd, mag_even, fx.Int32(0x05010400))  # e0,e1,e2,e3
@@ -452,10 +460,78 @@ def _fp4_nibble_to_fp8x8(raw_i32, tab_lo, tab_hi):
     return d0, d1
 
 
-def _fp4_nibble_to_fp8x8_vec(raw_i32, tab_lo, tab_hi):
+def _fp4_nibble_to_fp8x8_vec(raw_i32, tab_lo, tab_hi, interleave=True):
     """:func:`_fp4_nibble_to_fp8x8` as a v8 fp8 vector, ready for an MMA fragment."""
-    d0, d1 = _fp4_nibble_to_fp8x8(raw_i32, tab_lo, tab_hi)
+    d0, d1 = _fp4_nibble_to_fp8x8(raw_i32, tab_lo, tab_hi, interleave=interleave)
     return fx.Vector.from_elements([_raw(d0), _raw(d1)], fx.Int32).bitcast(fp8_elem_type())
+
+
+def _env_on(name, default="1"):
+    return os.environ.get(name, default) not in ("0", "", "false", "False")
+
+
+def a16wmix_fp8_aperm():
+    """``AITER_A16WMIX_FP8_APERM`` (default on): fp8 A staged in the decode's K order.
+
+    The B decode then drops its two interleave perms (12 -> 10 VALU per 8 weights) and
+    the A staging pays two perms per 8 A bytes, once per workgroup tile. gfx942 only:
+    that is where A goes through VGPRs on its way to LDS.
+    """
+    return _env_on("AITER_A16WMIX_FP8_APERM")
+
+
+def _jit_has_compile_hints():
+    try:
+        from flydsl.compiler.jit_function import JitFunction
+    except ImportError:
+        return False
+    return "compile_hints" in inspect.signature(JitFunction.__init__).parameters
+
+
+def a16wmix_fp8_noslp():
+    """``AITER_A16WMIX_FP8_NOSLP`` (default on): build the fp8 gemm1 with SLP off.
+
+    SLP-vectorizing the epilogue lets LLVM sink the decode and MFMAs of the fully
+    unrolled K loop toward it, which keeps the raw weights live across tiles and spills
+    the k_wave > 1 / waves_per_eu-capped tiles. Needs a FlyDSL whose ``@flyc.jit``
+    takes compile hints; off otherwise.
+    """
+    return _env_on("AITER_A16WMIX_FP8_NOSLP") and _jit_has_compile_hints()
+
+
+def a16wmix_reuse_lds():
+    """``AITER_A16WMIX_REUSE_LDS`` (default on): gemm2 LDS = max(A tile, epilog scratch).
+
+    The atomic epilog stages its f32 accumulators at LDS offset 0, over the A tile,
+    after the K loop's last barrier, so the A + scratch allocation never touches its
+    tail. Sizing it to the larger of the two raises LDS-limited workgroups per CU with
+    the same instructions.
+    """
+    return _env_on("AITER_A16WMIX_REUSE_LDS")
+
+
+# fp8 operand K order within one 8-byte MFMA fragment: [K0,K2,K4,K6, K1,K3,K5,K7], the
+# order _fp4_nibble_to_fp8x8(interleave=False) produces.
+_FP8_KPERM_SEL_EVEN = 0x06040200
+_FP8_KPERM_SEL_ODD = 0x07050301
+
+
+def fp8_kperm_regs(r, chunk_i32):
+    """Reorder a staged fp8 A chunk (rmem tensor of ``chunk_i32`` dwords) into that K order.
+
+    Every staged chunk is 8 B or 16 B and 8 B aligned, so it holds whole 8-element K
+    groups, and the gemm2 XOR swizzle only flips address bits >= 4, so the groups stay
+    whole in LDS too.
+    """
+    v = fx.Vector(fx.memref_load_vec(r))
+    out = []
+    for j in range_constexpr(0, chunk_i32, 2):
+        lo, hi = fx.Int32(v[j]), fx.Int32(v[j + 1])
+        out.append(_raw(_perm(hi, lo, fx.Int32(_FP8_KPERM_SEL_EVEN))))
+        out.append(_raw(_perm(hi, lo, fx.Int32(_FP8_KPERM_SEL_ODD))))
+    rp = fx.make_rmem_tensor(fx.make_layout(chunk_i32, 1), fx.Int32)
+    rp.store(fx.Vector.from_elements(out, fx.Int32))
+    return rp
 
 
 def fp8_elem_type():

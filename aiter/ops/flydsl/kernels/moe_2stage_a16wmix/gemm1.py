@@ -36,9 +36,12 @@ from .utils import (
     _raw,
     _udiv,
     _umod,
+    a16wmix_fp8_aperm,
+    a16wmix_fp8_noslp,
     a16wmix_use_k16,
     acc_scale_for,
     fp8_elem_type,
+    fp8_kperm_regs,
 )
 
 
@@ -131,6 +134,7 @@ def _gemm1_body_a16w4(
     k_wave=1,
     use_k16=False,
     N_RUN=None,
+    a_kperm=False,
 ):
     """a16w4/a16wi4/a16w16 (bf16 A x mxfp4/int4/bf16 W) fused stage1 gemm1 body.
 
@@ -367,6 +371,8 @@ def _gemm1_body_a16w4(
                 # gfx942: buffer_load gmem->regs, then ds_write regs->LDS.
                 r = fx.make_rmem_tensor(fx.make_layout(chunk_i32, 1), fx.Int32)
                 fx.copy(x_dma_atom, fx.slice(x_dma_tiles4, (None, g_tile)), r)
+                if const_expr(a_kperm):
+                    r = fp8_kperm_regs(r, chunk_i32)
                 fx.copy(x_lds_store_atom, r, fx.slice(s_x_dma_tiles, (None, l_tile)))
             else:
                 fx.copy(
@@ -540,7 +546,9 @@ def _gemm1_body_a16w4(
         ``tab`` is the (lo, hi) v_perm pool for this lane's k0-block, hoisted by the
         caller: the residual only changes when the k0-block does, i.e. every 4 ku.
         """
-        return _fp4_nibble_to_fp8x8_vec(fx.Int32(_raw(raw[ku // 4][ku % 4])), *tab)
+        return _fp4_nibble_to_fp8x8_vec(
+            fx.Int32(_raw(raw[ku // 4][ku % 4])), *tab, interleave=not a_kperm
+        )
 
     def fp8_tables_for(scale_bytes, sref_byte):
         """Magnitude-table pool per k0-block from the per-column reference exponent.
@@ -1001,9 +1009,12 @@ def compile_gemm1_a16w4_port(
     _wl_tag = "" if w_layout == "standard" else f"_{w_layout}"
     _kw_tag = f"_kw{k_wave}" if k_wave > 1 else ""
     _nr_tag = f"_nr{NUM_N_BLOCKS}" if NUM_N_BLOCKS != _INTER // TILE_N else ""
+    _a_kperm = a_dtype == "fp8" and _use_k16 and a16wmix_fp8_aperm()
+    _noslp = a_dtype == "fp8" and a16wmix_fp8_noslp()
+    _opt_tag = ("_aperm" if _a_kperm else "") + ("_noslp" if _noslp else "")
     name_suffix = (
         f"a16w4{_wd_tag}{_ad_tag}{_wl_tag}_h{_K}_i{_INTER}_ne{NE}_bm{BM}"
-        f"_tn{TILE_N}{_act_tag}{_bcm_tag}{_xcd_tag}{_wpe_tag}{_kw_tag}{_nr_tag}"
+        f"_tn{TILE_N}{_act_tag}{_bcm_tag}{_xcd_tag}{_wpe_tag}{_kw_tag}{_nr_tag}{_opt_tag}"
     )
 
     @fx.struct
@@ -1105,6 +1116,7 @@ def compile_gemm1_a16w4_port(
                 k_wave=k_wave,
                 use_k16=_use_k16,
                 N_RUN=NUM_N_BLOCKS,
+                a_kperm=_a_kperm,
             )
 
     @flyc.jit
@@ -1147,4 +1159,6 @@ def compile_gemm1_a16w4_port(
             value_attrs={"rocdl.waves_per_eu": waves_per_eu} if waves_per_eu else None,
         ).launch(grid=(grid_x, 1, 1), block=(256, 1, 1), stream=stream)
 
+    if _noslp:
+        launch_gemm1.compile_hints["llvm_options"] = {"slp-threshold": 100000}
     return launch_gemm1

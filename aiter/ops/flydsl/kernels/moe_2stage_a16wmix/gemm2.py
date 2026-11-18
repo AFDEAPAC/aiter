@@ -36,9 +36,12 @@ from .utils import (
     _raw,
     _udiv,
     _umod,
+    a16wmix_fp8_aperm,
+    a16wmix_reuse_lds,
     a16wmix_use_k16,
     acc_scale_for,
     fp8_elem_type,
+    fp8_kperm_regs,
     kmchunks_for,
     lds_acc_bytes_for,
 )
@@ -193,6 +196,7 @@ def _gemm2_body_a16w4(
     w_dtype="mxfp4",
     a_dtype="bf16",
     use_k16=False,
+    a_kperm=False,
 ):
     """a16w4/a16wi4/a16w16 stage2 body. K=inter_dim (contraction), N=model_dim (N_OUT).
 
@@ -388,6 +392,8 @@ def _gemm2_body_a16w4(
                 # gfx942: buffer_load gmem->regs, then ds_write regs->LDS.
                 r = fx.make_rmem_tensor(fx.make_layout(chunk_i32, 1), fx.Int32)
                 fx.copy(x_dma_atom, fx.slice(x_dma_tiles4, (None, g_tile)), r)
+                if const_expr(a_kperm):
+                    r = fp8_kperm_regs(r, chunk_i32)
                 fx.copy(x_lds_store_atom, r, fx.slice(s_x_dma_tiles, (None, l_tile)))
             else:
                 fx.copy(
@@ -529,7 +535,9 @@ def _gemm2_body_a16w4(
 
     def upconvert_b_fp8(raw, ku, tab):
         """FP4 -> 8 fp8 bytes with 2^r already folded in by the chosen table."""
-        return _fp4_nibble_to_fp8x8_vec(fx.Int32(_raw(raw[ku // 4][ku % 4])), *tab)
+        return _fp4_nibble_to_fp8x8_vec(
+            fx.Int32(_raw(raw[ku // 4][ku % 4])), *tab, interleave=not a_kperm
+        )
 
     def fp8_tables_for(scale_bytes, sref_byte):
         """Magnitude-table pool per k0-block from the per-output-column reference.
@@ -795,6 +803,12 @@ def compile_gemm2_a16w4_port(
     _a_bytes = BM * KH_TILE_BYTES
     _acc_bytes = lds_acc_bytes_for(BM, TILE_N)
     _lds_bytes = _a_bytes + _acc_bytes
+    # The epilog stages its scratch at offset 0 after the K loop's final barrier, so on
+    # gfx942 (where the extra allocation is what caps occupancy) size LDS to the larger.
+    _reuse_lds = _use_k16 and w_dtype == "mxfp4" and a16wmix_reuse_lds()
+    if _reuse_lds:
+        _lds_bytes = max(_a_bytes, _acc_bytes)
+    _a_kperm = a_dtype == "fp8" and _use_k16 and a16wmix_fp8_aperm()
     # Refuse rather than emit a kernel that cannot launch. Without this the overflow
     # surfaces at launch as hipErrorIllegalState ("the operation cannot be performed in
     # the present state"), which says nothing about the cause. BM=64 with TILE_N=256
@@ -819,6 +833,10 @@ def compile_gemm2_a16w4_port(
         _name += f"_w{waves_per_eu}"
     if persist:
         _name += "_persist"
+    if _reuse_lds:
+        _name += "_ldsreuse"
+    if _a_kperm:
+        _name += "_aperm"
 
     @fx.struct
     class SharedStorage:
@@ -900,6 +918,7 @@ def compile_gemm2_a16w4_port(
                 w_dtype=w_dtype,
                 a_dtype=a_dtype,
                 use_k16=_use_k16,
+                a_kperm=_a_kperm,
             )
 
         if const_expr(persist):
