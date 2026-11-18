@@ -551,3 +551,436 @@ void mxfp4_moe_sort_quant_fwd(aiter_tensor_t& hidden_states,
         __func__,
         ": fused sort+quant launch failed");
 }
+
+namespace aiter::a16w4_moe {
+
+constexpr int kThreads       = 1024;
+constexpr int kWaveSize      = 64; // gfx942 / gfx950
+constexpr int kMaxTokens     = 128;
+constexpr int kMaskWords     = kMaxTokens / 32;
+// Quantized tokens per CTA (one wave each); the rest of the CTA only zeroes.
+// A CU streams a few rows faster than one CTA working through 16.
+constexpr int kTokensPerCta  = 4;
+
+// (num_experts, topk, model_dim) the kernel is instantiated for. The expert
+// table lives in LDS and the per-token quant is unrolled over model_dim, so
+// each supported shape is a row here.
+#define AITER_A16W4_SORT_QUANT_SHAPES(_) _(896, 16, 3584) _(384, 6, 5120)
+
+// Single-CTA route sort producing the same metadata as the multi-phase
+// moe_sorting_opus_fwd at these sizes: experts in ascending order, each
+// expert's routes in ascending token order, every non-empty expert padded to
+// BlockM with the (tokens, topk) sentinel and weight 0, empty experts skipped.
+// A route's rank inside its expert is the number of earlier tokens in the
+// expert's token bitmask, so the result does not depend on atomic ordering.
+template <int NumExperts, int TopK, int BlockM>
+__device__ __forceinline__ void sort_routes(const int32_t* topk_ids,
+                                            const float* topk_weights,
+                                            int32_t* sorted_token_ids,
+                                            float* sorted_weights,
+                                            int32_t* sorted_expert_ids,
+                                            int32_t* num_valid_ids,
+                                            int tokens)
+{
+    using aiter::mxfp4_moe::dpp_inclusive_scan_wave;
+    using aiter::mxfp4_moe::pack_token_topk_id;
+    static_assert((BlockM & (BlockM - 1)) == 0, "BlockM must be a power of two");
+    constexpr int kFullExpertWaves = NumExperts / kWaveSize;
+    static_assert(NumExperts <= kThreads && kFullExpertWaves <= kWaveSize,
+                  "one expert per thread and wave totals in one wave scan");
+    constexpr int kRoutesPerThread = (kMaxTokens * TopK + kThreads - 1) / kThreads;
+
+    __shared__ uint32_t token_masks[NumExperts][kMaskWords];
+    __shared__ int expert_offsets[NumExperts];
+    __shared__ int expert_counts[NumExperts];
+    __shared__ int wave_totals[kThreads / kWaveSize];
+
+    const int tid = threadIdx.x;
+    for(int i = tid; i < NumExperts * kMaskWords; i += kThreads)
+        (&token_masks[0][0])[i] = 0;
+
+    const int routes = tokens * TopK;
+    int route_expert[kRoutesPerThread];
+    float route_weight[kRoutesPerThread];
+#pragma unroll
+    for(int r = 0; r < kRoutesPerThread; ++r)
+    {
+        const int index = tid + r * kThreads;
+        route_expert[r] = index < routes ? topk_ids[index] : -1;
+        route_weight[r] = index < routes ? topk_weights[index] : 0.0f;
+    }
+    __syncthreads();
+
+#pragma unroll
+    for(int r = 0; r < kRoutesPerThread; ++r)
+    {
+        const int expert = route_expert[r];
+        if(expert >= 0 && expert < NumExperts)
+        {
+            const int token = (tid + r * kThreads) / TopK;
+            atomicOr(&token_masks[expert][token >> 5], 1u << (token & 31));
+        }
+    }
+    __syncthreads();
+
+    int count = 0;
+    if(tid < NumExperts)
+    {
+#pragma unroll
+        for(int w = 0; w < kMaskWords; ++w)
+            count += __popc(token_masks[tid][w]);
+    }
+    const int padded = (count + BlockM - 1) & ~(BlockM - 1);
+    const int lane   = tid % kWaveSize;
+    const int wave   = tid / kWaveSize;
+    int value        = dpp_inclusive_scan_wave(padded);
+    if(lane == kWaveSize - 1 && wave < kFullExpertWaves)
+        wave_totals[wave] = value;
+    __syncthreads();
+    if(wave == 0)
+    {
+        int wave_value = lane < kFullExpertWaves ? wave_totals[lane] : 0;
+        wave_value     = dpp_inclusive_scan_wave(wave_value);
+        if(lane < kFullExpertWaves)
+            wave_totals[lane] = wave_value;
+    }
+    __syncthreads();
+
+    const int end = value + (wave == 0 ? 0 : wave_totals[wave - 1]);
+    if(tid < NumExperts)
+    {
+        expert_offsets[tid] = end - padded;
+        expert_counts[tid]  = count;
+    }
+    if(tid == NumExperts - 1)
+    {
+        num_valid_ids[0] = end;
+        num_valid_ids[1] = tokens;
+    }
+    __syncthreads();
+
+    // BlockM consecutive threads per expert write its padding rows and block
+    // ids, so the stores coalesce and no thread loops over an expert's rows.
+    // An expert has at most kMaxTokens / BlockM <= BlockM blocks.
+    static_assert(kMaxTokens / BlockM <= BlockM, "one pass covers an expert's blocks");
+    const int sentinel = pack_token_topk_id(tokens, TopK);
+    for(int slot = tid; slot < NumExperts * BlockM; slot += kThreads)
+    {
+        const int expert = slot / BlockM;
+        const int j      = slot % BlockM;
+        const int e_cnt  = expert_counts[expert];
+        if(e_cnt == 0)
+            continue;
+        const int e_start = expert_offsets[expert];
+        const int e_pad   = ((e_cnt + BlockM - 1) & ~(BlockM - 1)) - e_cnt;
+        if(j < e_pad)
+        {
+            sorted_token_ids[e_start + e_cnt + j] = sentinel;
+            sorted_weights[e_start + e_cnt + j]   = 0.0f;
+        }
+        if(j < (e_cnt + BlockM - 1) / BlockM)
+            sorted_expert_ids[e_start / BlockM + j] = expert;
+    }
+
+#pragma unroll
+    for(int r = 0; r < kRoutesPerThread; ++r)
+    {
+        const int expert = route_expert[r];
+        if(expert < 0 || expert >= NumExperts)
+            continue;
+        const int index   = tid + r * kThreads;
+        const int token   = index / TopK;
+        const int word    = token >> 5;
+        const uint32_t* m = token_masks[expert];
+        int rank          = __popc(m[word] & ((1u << (token & 31)) - 1u));
+#pragma unroll
+        for(int w = 0; w < kMaskWords; ++w)
+            rank += w < word ? __popc(m[w]) : 0;
+        const int position          = expert_offsets[expert] + rank;
+        sorted_token_ids[position]  = pack_token_topk_id(token, index - token * TopK);
+        sorted_weights[position]    = route_weight[r];
+    }
+}
+
+// x * inverted_scale clamped to +-fp8 max and packed to two e4m3 bytes: the
+// instruction sequence of aiter::fp32_to_fp8_scaled_x2 (aiter_opus_plus.h),
+// which dynamic_per_token_scaled_quant uses. That header is not included
+// here because its `using namespace opus` inside aiter clashes with this file.
+__device__ __forceinline__ uint16_t fp32x2_to_fp8x2_scaled(float x0, float x1, float inverted_scale)
+{
+#if defined(__gfx942__) || defined(__gfx950__)
+    using f32x2 = float __attribute__((ext_vector_type(2)));
+    f32x2 v = {x0, x1};
+    f32x2 s = {inverted_scale, inverted_scale};
+    asm volatile("v_pk_mul_f32 %0, %1, %2" : "=v"(v) : "v"(v), "v"(s));
+    const float hi = opus::finfo<opus::fp8_t>::max();
+    const float lo = -hi;
+    float a = v[0], b = v[1];
+    int packed;
+    asm volatile("v_med3_f32 %1, %1, %3, %4\n"
+                 "v_med3_f32 %2, %2, %3, %4\n"
+                 "v_cvt_pk_fp8_f32 %0, %1, %2"
+                 : "=v"(packed), "+v"(a), "+v"(b)
+                 : "v"(lo), "v"(hi));
+    return static_cast<uint16_t>(packed);
+#else
+    // The host gate only selects the quant on gfx942.
+    (void)x0;
+    (void)x1;
+    (void)inverted_scale;
+    __builtin_trap();
+    return 0;
+#endif
+}
+
+// Per-token e4m3 quant of one row by one wave, with the arithmetic of
+// dynamic_per_token_scaled_quant_kernel (row amax, scale = amax / fp8 max,
+// rcp, then the same scaled fp8 pair conversion), so a_q / a_s are bitwise
+// the same as that kernel's.
+template <int HiddenSize>
+__device__ __forceinline__ void quantize_token_fp8(const opus::bf16_t* hidden_states,
+                                                   opus::fp8_t* activation_quant,
+                                                   float* activation_scale,
+                                                   int token)
+{
+    constexpr int kVec         = 8;
+    constexpr int kVecsPerLane = HiddenSize / (kVec * kWaveSize);
+    static_assert(HiddenSize % (kVec * kWaveSize) == 0, "model_dim must fill whole waves");
+    using in_vec  = opus::vector_t<opus::bf16_t, kVec>;
+    using out_vec = opus::vector_t<uint16_t, kVec / 2>;
+    const float inverted_fp8_max = (1. / static_cast<float>(opus::finfo<opus::fp8_t>::max()));
+
+    const int lane    = threadIdx.x % kWaveSize;
+    const auto* src   = reinterpret_cast<const in_vec*>(hidden_states) +
+                      static_cast<size_t>(token) * (HiddenSize / kVec);
+    auto* dst         = reinterpret_cast<out_vec*>(activation_quant) +
+                static_cast<size_t>(token) * (HiddenSize / kVec);
+    in_vec v[kVecsPerLane];
+#pragma unroll
+    for(int i = 0; i < kVecsPerLane; ++i)
+        v[i] = src[lane + i * kWaveSize];
+
+    float amax = 0.f;
+#pragma unroll
+    for(int i = 0; i < kVecsPerLane; ++i)
+    {
+#pragma unroll
+        for(int j = 0; j < kVec; ++j)
+            amax = max(amax, abs(static_cast<float>(v[i][j])));
+    }
+#pragma unroll
+    for(int offset = kWaveSize / 2; offset > 0; offset >>= 1)
+        amax = max(amax, __shfl_xor(amax, offset));
+    const float row_scale      = amax * inverted_fp8_max;
+    const float inverted_scale = __builtin_amdgcn_rcpf(row_scale);
+    if(lane == 0)
+        activation_scale[token] = row_scale;
+
+#pragma unroll
+    for(int i = 0; i < kVecsPerLane; ++i)
+    {
+        out_vec q;
+#pragma unroll
+        for(int j = 0; j < kVec; j += 2)
+            q[j / 2] = fp32x2_to_fp8x2_scaled(
+                static_cast<float>(v[i][j]), static_cast<float>(v[i][j + 1]), inverted_scale);
+        dst[lane + i * kWaveSize] = q;
+    }
+}
+
+// CTA 0 sorts; CTAs 1.. zero moe_buf and, with kQuant, quantize one token per
+// wave. Sorting and quantization share no data, so they run concurrently.
+template <int NumExperts, int TopK, int HiddenSize, int BlockM, bool kQuant>
+__global__ void __launch_bounds__(kThreads)
+    a16w4_moe_sort_quant_kernel(const opus::bf16_t* hidden_states,
+                                const int32_t* topk_ids,
+                                const float* topk_weights,
+                                int32_t* sorted_token_ids,
+                                float* sorted_weights,
+                                int32_t* sorted_expert_ids,
+                                int32_t* num_valid_ids,
+                                int4* moe_buf,
+                                int64_t moe_buf_vecs,
+                                opus::fp8_t* activation_quant,
+                                float* activation_scale,
+                                int tokens,
+                                const int32_t* num_local_tokens)
+{
+    if(num_local_tokens != nullptr)
+        tokens = max(0, min(tokens, *num_local_tokens));
+    if(blockIdx.x == 0)
+    {
+        sort_routes<NumExperts, TopK, BlockM>(topk_ids,
+                                              topk_weights,
+                                              sorted_token_ids,
+                                              sorted_weights,
+                                              sorted_expert_ids,
+                                              num_valid_ids,
+                                              tokens);
+        return;
+    }
+
+    const int worker = blockIdx.x - 1;
+    if constexpr(kQuant)
+    {
+        const int wave  = static_cast<int>(threadIdx.x) / kWaveSize;
+        const int token = worker * kTokensPerCta + wave;
+        if(wave < kTokensPerCta && token < tokens)
+            quantize_token_fp8<HiddenSize>(hidden_states, activation_quant, activation_scale, token);
+    }
+
+    const int64_t step = static_cast<int64_t>(gridDim.x - 1) * kThreads;
+    const int4 zero    = {0, 0, 0, 0};
+    for(int64_t i = static_cast<int64_t>(worker) * kThreads + threadIdx.x; i < moe_buf_vecs;
+        i += step)
+        moe_buf[i] = zero;
+}
+
+} // namespace aiter::a16w4_moe
+
+void a16w4_moe_sort_quant_fwd(aiter_tensor_t& hidden_states,
+                              aiter_tensor_t& topk_ids,
+                              aiter_tensor_t& topk_weights,
+                              aiter_tensor_t& sorted_token_ids,
+                              aiter_tensor_t& sorted_weights,
+                              aiter_tensor_t& sorted_expert_ids,
+                              aiter_tensor_t& num_valid_ids,
+                              aiter_tensor_t& moe_buf,
+                              int num_experts,
+                              int block_m,
+                              std::optional<aiter_tensor_t> activation_quant,
+                              std::optional<aiter_tensor_t> activation_scale,
+                              std::optional<aiter_tensor_t> num_local_tokens)
+{
+    using namespace aiter::a16w4_moe;
+
+    const bool quant = activation_quant.has_value();
+    AITER_CHECK(quant == activation_scale.has_value(),
+                __func__,
+                ": activation_quant and activation_scale go together");
+    const int device_id = hidden_states.device_id;
+    AITER_CHECK(topk_ids.device_id == device_id && topk_weights.device_id == device_id &&
+                    sorted_token_ids.device_id == device_id &&
+                    sorted_weights.device_id == device_id &&
+                    sorted_expert_ids.device_id == device_id &&
+                    num_valid_ids.device_id == device_id &&
+                    (moe_buf.numel() == 0 || moe_buf.device_id == device_id) &&
+                    (!quant || (activation_quant->device_id == device_id &&
+                                activation_scale->device_id == device_id)),
+                __func__,
+                ": all tensors must be on the same device");
+    AITER_CHECK(hidden_states.dtype() == AITER_DTYPE_bf16 && hidden_states.dim() == 2,
+                __func__,
+                ": hidden_states must be 2-D BF16");
+    AITER_CHECK(topk_ids.dtype() == AITER_DTYPE_i32 && topk_weights.dtype() == AITER_DTYPE_fp32 &&
+                    sorted_token_ids.dtype() == AITER_DTYPE_i32 &&
+                    sorted_weights.dtype() == AITER_DTYPE_fp32 &&
+                    sorted_expert_ids.dtype() == AITER_DTYPE_i32 &&
+                    num_valid_ids.dtype() == AITER_DTYPE_i32 && num_valid_ids.numel() >= 2,
+                __func__,
+                ": expected int32 ids and fp32 weights");
+    AITER_CHECK(hidden_states.is_contiguous() && topk_ids.is_contiguous() &&
+                    topk_weights.is_contiguous() && sorted_token_ids.is_contiguous() &&
+                    sorted_weights.is_contiguous() && sorted_expert_ids.is_contiguous() &&
+                    moe_buf.is_contiguous() &&
+                    (!quant || (activation_quant->is_contiguous() &&
+                                activation_scale->is_contiguous())),
+                __func__,
+                ": all tensors must be contiguous");
+
+    const int tokens     = static_cast<int>(hidden_states.size(0));
+    const int model_dim  = static_cast<int>(hidden_states.size(1));
+    const int topk       = topk_ids.dim() == 2 ? static_cast<int>(topk_ids.size(1)) : 0;
+    AITER_CHECK(tokens >= 1 && tokens <= kMaxTokens && topk_ids.size(0) == tokens &&
+                    topk_weights.numel() == topk_ids.numel(),
+                __func__,
+                ": only decode M in [1, 128] is supported");
+    AITER_CHECK(block_m == 16 || block_m == 32, __func__, ": block_m must be 16 or 32");
+
+#define AITER_A16W4_SORT_QUANT_MATCH(E, K, D) \
+    || (num_experts == (E) && topk == (K) && model_dim == (D))
+    const bool shape_supported = false AITER_A16W4_SORT_QUANT_SHAPES(AITER_A16W4_SORT_QUANT_MATCH);
+#undef AITER_A16W4_SORT_QUANT_MATCH
+    AITER_CHECK(shape_supported,
+                __func__,
+                ": (num_experts, topk, model_dim) must be (896, 16, 3584) or (384, 6, 5120)");
+
+    const int64_t routes         = topk_ids.numel();
+    const int64_t active_experts = std::min<int64_t>(routes, num_experts);
+    const int64_t required_sorted =
+        (routes + active_experts * (block_m - 1) + block_m - 1) / block_m * block_m;
+    AITER_CHECK(static_cast<int64_t>(sorted_token_ids.numel()) >= required_sorted &&
+                    static_cast<int64_t>(sorted_weights.numel()) >= required_sorted &&
+                    static_cast<int64_t>(sorted_expert_ids.numel()) >= required_sorted / block_m,
+                __func__,
+                ": output routing buffers are too small");
+
+    int64_t moe_buf_vecs = 0;
+    if(moe_buf.numel() != 0)
+    {
+        AITER_CHECK((moe_buf.dtype() == AITER_DTYPE_bf16 || moe_buf.dtype() == AITER_DTYPE_fp16) &&
+                        static_cast<int64_t>(moe_buf.numel()) >=
+                            static_cast<int64_t>(tokens) * model_dim,
+                    __func__,
+                    ": moe_buf must be empty or hold at least M*model_dim BF16/FP16 elements");
+        moe_buf_vecs = static_cast<int64_t>(tokens) * model_dim * 2 / sizeof(int4);
+    }
+    if(quant)
+    {
+        AITER_CHECK(activation_quant->dtype() == AITER_DTYPE_fp8 &&
+                        activation_quant->numel() == hidden_states.numel() &&
+                        activation_scale->dtype() == AITER_DTYPE_fp32 &&
+                        static_cast<int64_t>(activation_scale->numel()) >= tokens,
+                    __func__,
+                    ": expected fp8 [M, model_dim] activation_quant and fp32 [M, 1] activation_scale");
+    }
+
+    HipDeviceGuard device_guard(device_id);
+    const hipStream_t stream = aiter::getCurrentHIPStream();
+    const dim3 grid(1 + (tokens + kTokensPerCta - 1) / kTokensPerCta);
+
+    const auto* hidden_ptr  = static_cast<const opus::bf16_t*>(hidden_states.data_ptr());
+    const auto* ids_ptr     = static_cast<const int32_t*>(topk_ids.data_ptr());
+    const auto* weights_ptr = static_cast<const float*>(topk_weights.data_ptr());
+    auto* sorted_ids_ptr    = static_cast<int32_t*>(sorted_token_ids.data_ptr());
+    auto* sorted_w_ptr      = static_cast<float*>(sorted_weights.data_ptr());
+    auto* sorted_e_ptr      = static_cast<int32_t*>(sorted_expert_ids.data_ptr());
+    auto* num_valid_ptr     = static_cast<int32_t*>(num_valid_ids.data_ptr());
+    auto* moe_buf_ptr       = moe_buf_vecs == 0 ? nullptr : static_cast<int4*>(moe_buf.data_ptr());
+    auto* a_q_ptr = quant ? static_cast<opus::fp8_t*>(activation_quant->data_ptr()) : nullptr;
+    auto* a_s_ptr = quant ? static_cast<float*>(activation_scale->data_ptr()) : nullptr;
+    const auto* local_ptr =
+        num_local_tokens.has_value() ? static_cast<const int32_t*>(num_local_tokens->data_ptr())
+                                     : nullptr;
+
+    auto launch = [&](auto kernel) {
+        kernel<<<grid, dim3(kThreads), 0, stream>>>(hidden_ptr,
+                                                    ids_ptr,
+                                                    weights_ptr,
+                                                    sorted_ids_ptr,
+                                                    sorted_w_ptr,
+                                                    sorted_e_ptr,
+                                                    num_valid_ptr,
+                                                    moe_buf_ptr,
+                                                    moe_buf_vecs,
+                                                    a_q_ptr,
+                                                    a_s_ptr,
+                                                    tokens,
+                                                    local_ptr);
+    };
+#define AITER_A16W4_SORT_QUANT_LAUNCH(E, K, D)                                              \
+    if(num_experts == (E) && topk == (K) && model_dim == (D))                               \
+    {                                                                                       \
+        if(block_m == 16)                                                                   \
+            quant ? launch(a16w4_moe_sort_quant_kernel<(E), (K), (D), 16, true>)            \
+                  : launch(a16w4_moe_sort_quant_kernel<(E), (K), (D), 16, false>);          \
+        else                                                                                \
+            quant ? launch(a16w4_moe_sort_quant_kernel<(E), (K), (D), 32, true>)            \
+                  : launch(a16w4_moe_sort_quant_kernel<(E), (K), (D), 32, false>);          \
+    }
+    AITER_A16W4_SORT_QUANT_SHAPES(AITER_A16W4_SORT_QUANT_LAUNCH)
+#undef AITER_A16W4_SORT_QUANT_LAUNCH
+
+    const hipError_t launch_status = hipGetLastError();
+    AITER_CHECK(launch_status == hipSuccess, __func__, ": a16w4 sort+quant launch failed");
+}

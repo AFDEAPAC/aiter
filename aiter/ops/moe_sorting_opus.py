@@ -59,3 +59,27 @@ def mxfp4_moe_sort_quant_fwd(
     ``(num_experts, topk)`` must be one of ``(512, 10)`` or ``(513, 11)``
     -- the expert histogram is a kernel template parameter.
     """
+
+
+@compile_ops("module_moe_sorting_opus", develop=True)
+def a16w4_moe_sort_quant_fwd(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    sorted_weights: torch.Tensor,
+    sorted_expert_ids: torch.Tensor,
+    num_valid_ids: torch.Tensor,
+    moe_buf: torch.Tensor,
+    num_experts: int,
+    block_m: int,
+    activation_quant: torch.Tensor | None = None,
+    activation_scale: torch.Tensor | None = None,
+    num_local_tokens: torch.Tensor | None = None,
+) -> None:
+    """Decode route sort + moe_buf zeroing, optionally fused with per-token fp8 quant.
+
+    Metadata as ``moe_sorting_opus_fwd``; quant as ``dynamic_per_token_scaled_quant``.
+    ``M`` in ``[1, 128]``, ``block_m`` 16 or 32, ``(num_experts, topk, model_dim)`` in
+    {(896, 16, 3584), (384, 6, 5120)}.
+    """

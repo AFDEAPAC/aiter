@@ -33,6 +33,11 @@ _SKIP_BUF_ZERO = os.environ.get("AITER_A16WMIX_SKIP_BUF_ZERO", dsv41_on()) == "1
 _SKIP_PAD_N = os.environ.get("AITER_A16WMIX_SKIP_PAD_N", dsv41_on()) == "1"
 _SKIP_PAD_N_MIN_TOKENS = int(os.environ.get("AITER_A16WMIX_SKIP_PAD_N_MIN_TOKENS", "128"))
 _FP8_S2_FALLBACK_WARNED = False
+# One-launch decode sort (a16w4_moe_sort_quant_fwd) in place of moe_sorting, also doing the
+# stage-1 fp8 quant when no prequantized operand is provided. 0 keeps moe_sorting.
+_SORT_QUANT = os.environ.get("AITER_A16WMIX_SORT_QUANT", "1") == "1"
+_SORT_QUANT_SHAPES = {(896, 16, 3584), (384, 6, 5120)}
+_SORT_QUANT_MAX_M = 128
 
 
 # Optional source of an already computed per-token fp8 quant of hidden_states for
@@ -48,6 +53,16 @@ def _note_prequant(hit):
     n = _PREQUANT_EVENTS[kind]
     if n <= 2 or n & (n - 1) == 0:
         logger.warning("A16WMIX_PREQUANT %s #%d", kind, n)
+
+
+_SORT_QUANT_EVENTS = {True: 0, False: 0}
+
+
+def _note_sort_quant(quant):
+    _SORT_QUANT_EVENTS[quant] += 1
+    n = _SORT_QUANT_EVENTS[quant]
+    if n <= 2 or n & (n - 1) == 0:
+        logger.warning("A16WMIX_SORT_QUANT %s #%d", "sort+q1" if quant else "sort", n)
 
 
 def _fp8_enabled():
@@ -155,20 +170,118 @@ def fused_moe_a16wmix(
             "fp8" if _fp8_s2_enabled() else "bf16",
         )
 
+    # fp8 stage1 (AITER_A16WMIX_FP8=1): quantize the activation per token here rather
+    # than upstream, so the vLLM/SGLang dispatch and the weight-prep contract are both
+    # unchanged -- switching arms is one env var plus a restart. The weight and its
+    # e8m0 scale are untouched; only the per-column reference exponent is derived.
+    # Resolved before the sort: the decode sort below can also do the activation quant.
+    _a_dtype, _a_fp8, _a_scale, _w1_sref = "bf16", None, None, None
+    _s1_fp8, _s2_fp8 = _fp8_enabled(), _fp8_s2_enabled()
+    _need_q1 = False
+    if _s1_fp8 or _s2_fp8:
+        # Imported lazily: the bf16 path must not pay for, or depend on, any of this.
+        from aiter import dtypes
+        from aiter.ops.flydsl.a16wmix_fp8_prep import get_sref_u8
+        from aiter.ops.quant import dynamic_per_token_scaled_quant, per_token_quant_hip
+        from aiter.ops.shuffle import shuffle_scale_a16w4
+        from aiter.utility.fp4_utils import e8m0_shuffle
+    if _s1_fp8:
+        # Kimi-K3's own e8m0 residuals stop at -3, which is exactly the last table the
+        # fp8 decode carries (0.0001% of a billion groups reach it), so a differently
+        # trained checkpoint could step past the end. Degrade to bf16 rather than take
+        # the server down, and say so once and loudly -- a silent 2.2x loss on stage1
+        # is the kind of thing that goes unnoticed for a month.
+        try:
+            _w1_sref = get_sref_u8(
+                w1_scale.view(torch.uint8),
+                experts=experts,
+                n_out=2 * inter_dim,
+                k_groups=model_dim // 32,
+                shuffle_fn=lambda t, e: shuffle_scale_a16w4(
+                    t, e, w1_layout == "guinterleave"
+                ),
+            )
+        except ValueError as exc:
+            global _FP8_FALLBACK_WARNED
+            if not _FP8_FALLBACK_WARNED:
+                _FP8_FALLBACK_WARNED = True
+                logger.error(
+                    "A16WMIX_FP8 disabled, falling back to the bf16 stage1: %s", exc
+                )
+        else:
+            _pre = (
+                prequant_provider(hidden_states)
+                if prequant_provider is not None
+                else None
+            )
+            if prequant_provider is not None:
+                _note_prequant(_pre is not None)
+            if _pre is not None:
+                _a_fp8, _a_scale = _pre
+            else:
+                _need_q1 = True
+            _a_dtype = "fp8"
+
     # EP weights contain only local experts, while topk_ids and expert_mask use
     # global expert IDs.  The sorter iterates over global IDs and uses the mask
     # prefix sum to emit local weight indices in sorted_expert_ids.
     sorting_experts = experts if expert_mask is None else int(expert_mask.numel())
-    sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, moe_buf = moe_sorting(
-        topk_ids.to(torch.int32),
-        topk_weights.to(torch.float32),
-        sorting_experts,
-        model_dim,
-        hidden_states.dtype,
-        bm,
-        expert_mask=expert_mask,
-        dispatch_policy=2 if (_SORT_MP_SMALL and tokens < 32) else 0,
-    )
+    if (
+        _SORT_QUANT
+        and expert_mask is None
+        and tokens <= _SORT_QUANT_MAX_M
+        and bm in (16, 32)
+        and (experts, topk, model_dim) in _SORT_QUANT_SHAPES
+        and hidden_states.dtype == torch.bfloat16
+        and hidden_states.is_contiguous()
+    ):
+        # One launch: route sort, moe_buf zeroing and, when no prequantized operand
+        # came in, the stage-1 per-token fp8 quant (dynamic_per_token_scaled_quant math).
+        import aiter
+
+        _dev = hidden_states.device
+        _max_sorted = int(topk_ids.numel() + experts * bm - topk)
+        _max_blocks = (_max_sorted + bm - 1) // bm
+        _max_sorted = _max_blocks * bm
+        sorted_ids = torch.empty(_max_sorted, dtype=torch.int32, device=_dev)
+        sorted_weights = torch.empty(_max_sorted, dtype=torch.float32, device=_dev)
+        sorted_expert_ids = torch.empty(_max_blocks, dtype=torch.int32, device=_dev)
+        num_valid_ids = torch.empty(2, dtype=torch.int32, device=_dev)
+        moe_buf = torch.empty((tokens, model_dim), dtype=hidden_states.dtype, device=_dev)
+        if _need_q1:
+            _a_fp8 = torch.empty((tokens, model_dim), dtype=dtypes.fp8, device=_dev)
+            _a_scale = torch.empty((tokens, 1), dtype=torch.float32, device=_dev)
+        aiter.a16w4_moe_sort_quant_fwd(
+            hidden_states,
+            topk_ids.to(torch.int32).contiguous(),
+            topk_weights.to(torch.float32).contiguous(),
+            sorted_token_ids=sorted_ids,
+            sorted_weights=sorted_weights,
+            sorted_expert_ids=sorted_expert_ids,
+            num_valid_ids=num_valid_ids,
+            moe_buf=moe_buf,
+            num_experts=experts,
+            block_m=bm,
+            activation_quant=_a_fp8 if _need_q1 else None,
+            activation_scale=_a_scale if _need_q1 else None,
+        )
+        _note_sort_quant(_need_q1)
+        _need_q1 = False
+    else:
+        sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, moe_buf = moe_sorting(
+            topk_ids.to(torch.int32),
+            topk_weights.to(torch.float32),
+            sorting_experts,
+            model_dim,
+            hidden_states.dtype,
+            bm,
+            expert_mask=expert_mask,
+            dispatch_policy=2 if (_SORT_MP_SMALL and tokens < 32) else 0,
+        )
+    if _need_q1:
+        _a_fp8, _a_scale = per_token_quant_hip(
+            _contiguous_bf16(hidden_states), quant_dtype=dtypes.fp8
+        )
     # Some builds return num_valid_ids as [2] (padded total, logical total).
     if num_valid_ids.numel() > 1:
         num_valid_ids = num_valid_ids[:1].contiguous()
@@ -231,58 +344,6 @@ def fused_moe_a16wmix(
     inter_sorted = torch.empty(
         sorted_size, inter_dim, dtype=torch.bfloat16, device=hidden_states.device
     )
-
-    # fp8 stage1 (AITER_A16WMIX_FP8=1): quantize the activation per token here rather
-    # than upstream, so the vLLM/SGLang dispatch and the weight-prep contract are both
-    # unchanged -- switching arms is one env var plus a restart. The weight and its
-    # e8m0 scale are untouched; only the per-column reference exponent is derived.
-    _a_dtype, _a_fp8, _a_scale, _w1_sref = "bf16", None, None, None
-    _s1_fp8, _s2_fp8 = _fp8_enabled(), _fp8_s2_enabled()
-    if _s1_fp8 or _s2_fp8:
-        # Imported lazily: the bf16 path must not pay for, or depend on, any of this.
-        from aiter import dtypes
-        from aiter.ops.flydsl.a16wmix_fp8_prep import get_sref_u8
-        from aiter.ops.quant import dynamic_per_token_scaled_quant, per_token_quant_hip
-        from aiter.ops.shuffle import shuffle_scale_a16w4
-        from aiter.utility.fp4_utils import e8m0_shuffle
-    if _s1_fp8:
-        # Kimi-K3's own e8m0 residuals stop at -3, which is exactly the last table the
-        # fp8 decode carries (0.0001% of a billion groups reach it), so a differently
-        # trained checkpoint could step past the end. Degrade to bf16 rather than take
-        # the server down, and say so once and loudly -- a silent 2.2x loss on stage1
-        # is the kind of thing that goes unnoticed for a month.
-        try:
-            _w1_sref = get_sref_u8(
-                w1_scale.view(torch.uint8),
-                experts=experts,
-                n_out=2 * inter_dim,
-                k_groups=model_dim // 32,
-                shuffle_fn=lambda t, e: shuffle_scale_a16w4(
-                    t, e, w1_layout == "guinterleave"
-                ),
-            )
-        except ValueError as exc:
-            global _FP8_FALLBACK_WARNED
-            if not _FP8_FALLBACK_WARNED:
-                _FP8_FALLBACK_WARNED = True
-                logger.error(
-                    "A16WMIX_FP8 disabled, falling back to the bf16 stage1: %s", exc
-                )
-        else:
-            _pre = (
-                prequant_provider(hidden_states)
-                if prequant_provider is not None
-                else None
-            )
-            if prequant_provider is not None:
-                _note_prequant(_pre is not None)
-            if _pre is not None:
-                _a_fp8, _a_scale = _pre
-            else:
-                _a_fp8, _a_scale = per_token_quant_hip(
-                    _contiguous_bf16(hidden_states), quant_dtype=dtypes.fp8
-                )
-            _a_dtype = "fp8"
 
     flydsl_a16w4_gemm1(
         a_bf16=(

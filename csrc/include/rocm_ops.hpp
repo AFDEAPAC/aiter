@@ -1512,7 +1512,22 @@ namespace py = pybind11;
           py::arg("moe_buf"),                          \
           py::arg("activation_quant"),                 \
           py::arg("activation_scale_token"),           \
-          py::arg("num_experts"));
+          py::arg("num_experts"));                     \
+    m.def("a16w4_moe_sort_quant_fwd",                  \
+          &a16w4_moe_sort_quant_fwd,                   \
+          py::arg("hidden_states"),                    \
+          py::arg("topk_ids"),                         \
+          py::arg("topk_weights"),                     \
+          py::arg("sorted_token_ids"),                 \
+          py::arg("sorted_weights"),                   \
+          py::arg("sorted_expert_ids"),                \
+          py::arg("num_valid_ids"),                    \
+          py::arg("moe_buf"),                          \
+          py::arg("num_experts"),                      \
+          py::arg("block_m"),                          \
+          py::arg("activation_quant") = std::nullopt,  \
+          py::arg("activation_scale") = std::nullopt,  \
+          py::arg("num_local_tokens") = std::nullopt);
 
 #define MLA_V4_PREFILL_OPUS_PYBIND                  \
     m.def("pa_sparse_prefill_gfx950_opus_fwd",      \
