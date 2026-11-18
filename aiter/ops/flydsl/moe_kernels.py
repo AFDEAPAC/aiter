@@ -1825,10 +1825,26 @@ def _flydsl_moe_stage1_impl(
         sorted_size = int(sorted_expert_ids.shape[0]) * int(tile_m)
         _alloc = torch.zeros if inter_dim_pad > 0 else torch.empty
         inter_sorted = _alloc(sorted_size, inter_dim, dtype=torch.bfloat16, device=dev)
-        _a = a.to(torch.bfloat16).contiguous()
         _fp8 = {}
+        if a.dtype == dtypes.fp8 and a1_scale is not None:
+            # A quantized per token by the decode sort (a16w4_moe_sort_quant_fwd).
+            _sref = (
+                _a16w4_fp8_sref(w1_scale, E, 2 * inter_dim, model_dim // 32)
+                if b_dtype == "fp4" and w1_scale is not None and not _shared
+                else None
+            )
+            if _sref is None:
+                raise ValueError(
+                    "fp8 A needs the a16w4 fp8 MFMA gemm1 (fp4 W1 with scales "
+                    "in its range, no shared expert)"
+                )
+            _a = a
+            _fp8 = {"a_dtype": "fp8", "a_scale": a1_scale, "w1_sref": _sref}
+        else:
+            _a = a.to(torch.bfloat16).contiguous()
         if (
-            b_dtype == "fp4"
+            not _fp8
+            and b_dtype == "fp4"
             and w1_scale is not None
             and not _shared
             and _a16w4_fp8_mfma_enabled()

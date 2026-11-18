@@ -307,6 +307,9 @@ _A16W4_DECODE_SORT_SHAPES = {(896, 16, 3584)}
 # The kernel's M limit. With the tuned BM=16 tiles it beats the multi-phase Opus
 # sort at every M up to here on MI308X.
 _A16W4_DECODE_SORT_MAX_M = 128
+# In fp8 mode the whole fused_moe call measured slower from M=32 on MI325X and from
+# M=48 on MI308X (eager per-call timing), so only M up to here use it.
+_A16W4_DECODE_SORT_FP8_MAX_M = 16
 
 
 def _is_a16w4_decode_sort_quant_enabled(
@@ -315,6 +318,7 @@ def _is_a16w4_decode_sort_quant_enabled(
     topk_weights: torch.Tensor,
     *,
     w1: torch.Tensor,
+    w1_scale: torch.Tensor | None,
     global_experts: int,
     block_m: int,
     dtype: torch.dtype,
@@ -326,12 +330,16 @@ def _is_a16w4_decode_sort_quant_enabled(
     metadata,
     hidden_pad: int,
     dispatch_policy: int,
+    stage1_extra_args: dict | None,
 ) -> str | None:
-    """Gate the gfx942 a16w4 decode sort kernel; returns None or "sort".
+    """Gate the gfx942 a16w4 decode sort kernel; returns None, "sort" or "fp8".
 
-    "sort" replaces the Opus sort (and its moe_buf zeroing) with one launch.
-    Anything outside the kernel's shape or the a16w4 FlyDSL pipeline keeps the
-    generic sort.
+    "sort" replaces the Opus sort (and its moe_buf zeroing) with one launch;
+    "fp8" also quantizes A per token for the fp8 MFMA gemm1, which then skips
+    its own quant. fp8 is chosen only when stage 1 would run the fp8 gemm1
+    (fp8 mode on and the W1 scales in its range), so the bf16 gemm1 never gets
+    fp8 A; in fp8 mode M is limited to _A16W4_DECODE_SORT_FP8_MAX_M. Anything
+    outside the kernel's shape or the a16w4 FlyDSL pipeline keeps the generic sort.
     """
     if _USE_CK_MOE_SORTING or _USE_FLYDSL_MOE_SORTING or dispatch_policy != 0:
         return None
@@ -377,6 +385,19 @@ def _is_a16w4_decode_sort_quant_enabled(
     )
     if not parsed or parsed.get("a_dtype") != "bf16" or parsed.get("b_dtype") != "fp4":
         return None
+    fp8_mode = moe_kernels._a16w4_fp8_mfma_enabled()
+    if fp8_mode and tokens > _A16W4_DECODE_SORT_FP8_MAX_M:
+        return None
+    if (
+        fp8_mode
+        and w1_scale is not None
+        and not stage1_extra_args
+        and moe_kernels._a16w4_fp8_sref(
+            w1_scale, w1.shape[0], w1.shape[1], model_dim // 32
+        )
+        is not None
+    ):
+        return "fp8"
     return "sort"
 
 
@@ -2474,6 +2495,7 @@ def _fused_moe_impl(
             topk_ids,
             topk_weight,
             w1=w1,
+            w1_scale=w1_scale,
             global_experts=global_E,
             block_m=block_size_M,
             dtype=dtype,
@@ -2485,6 +2507,7 @@ def _fused_moe_impl(
             metadata=metadata,
             hidden_pad=hidden_pad,
             dispatch_policy=moe_sorting_dispatch_policy,
+            stage1_extra_args=_stage1_extra_args,
         )
     )
     # compact-scale variant not ported (its stage-1 change targets the
@@ -2647,7 +2670,7 @@ def _fused_moe_impl(
             block_m=block_size_M,
             moebuf_dtype=dtype,
             accumulate=not runtime_stage2_reduce,
-            quant=False,
+            quant=a16w4_sort_mode == "fp8",
             num_local_tokens=num_local_tokens,
             output=output,
         )
