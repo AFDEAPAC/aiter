@@ -1040,6 +1040,7 @@ def test_flydsl_a16wfp4_situv2_fp8_mfma(model_dim, inter_dim, token, monkeypatch
 
 def _situv2_fused_moe_fp8(p, situ_beta, situ_linear_beta, monkeypatch):
     """fused_moe in fp8 MFMA mode, recording (gemm, a_dtype) of each a16w4 launch."""
+    import aiter.fused_moe as moe
     from aiter.ops.flydsl.kernels import moe_2stage_a16wmix
 
     ran = []
@@ -1056,7 +1057,14 @@ def _situv2_fused_moe_fp8(p, situ_beta, situ_linear_beta, monkeypatch):
     for name in ("flydsl_a16w4_gemm1", "flydsl_a16w4_gemm2"):
         monkeypatch.setattr(moe_2stage_a16wmix, name, _spy(name))
     monkeypatch.setenv("AITER_FLYDSL_A16W4_FP8_MFMA", "1")
-    return _situv2_fused_moe(p, situ_beta, situ_linear_beta), ran
+    # get_2stage_cfgs caches the heuristic tiles by shape, not by the fp8 mode: a bf16
+    # run of the same untuned shape earlier in the session would otherwise hand this
+    # one the bf16 tier's tiles, and this one would hand its tiles to later bf16 runs.
+    moe.get_2stage_cfgs.cache_clear()
+    try:
+        return _situv2_fused_moe(p, situ_beta, situ_linear_beta), ran
+    finally:
+        moe.get_2stage_cfgs.cache_clear()
 
 
 @_SKIP_FP8_MFMA
