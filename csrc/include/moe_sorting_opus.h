@@ -48,6 +48,25 @@ void mxfp4_moe_sort_quant_fwd(aiter_tensor_t& hidden_states,
                               int num_experts,
                               std::optional<aiter_tensor_t> num_local_tokens = std::nullopt);
 
+// Decode helper for the gfx942 a16w4 MoE: one launch sorts the routes (same
+// metadata as moe_sorting_opus_fwd), zeroes moe_buf and, when activation_quant
+// / activation_scale are given, quantizes hidden_states per token to fp8 with
+// dynamic_per_token_scaled_quant's arithmetic. M in [1, 128], block_m 16 or
+// 32, (num_experts, topk, model_dim) from AITER_A16W4_SORT_QUANT_SHAPES.
+void a16w4_moe_sort_quant_fwd(aiter_tensor_t& hidden_states,
+                              aiter_tensor_t& topk_ids,
+                              aiter_tensor_t& topk_weights,
+                              aiter_tensor_t& sorted_token_ids,
+                              aiter_tensor_t& sorted_weights,
+                              aiter_tensor_t& sorted_expert_ids,
+                              aiter_tensor_t& num_valid_ids,
+                              aiter_tensor_t& moe_buf,
+                              int num_experts,
+                              int block_m,
+                              std::optional<aiter_tensor_t> activation_quant = std::nullopt,
+                              std::optional<aiter_tensor_t> activation_scale = std::nullopt,
+                              std::optional<aiter_tensor_t> num_local_tokens = std::nullopt);
+
 #ifdef MOE_SORTING_OPUS_IMPL
 // ============================================================================
 // Implementation section - only compiled in the .cu translation unit
