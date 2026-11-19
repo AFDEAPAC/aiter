@@ -10,11 +10,16 @@ from flydsl.expr.typing import Vector as Vec
 
 from ..act import situ_mul, tanh_via_sigmoid_f32
 from ..moe_2stage_a16wmix.utils import (
+    _e8m0_byte_raw,
     _e8m0_byte_to_f32,
     _fp4_nibble_to_bf16x8_lut,
+    _fp4_nibble_to_fp8x8_vec,
+    _fp8_table_select,
     a16wmix_use_k16,
+    fp8_elem_type,
 )
 from ..tensor_shim import buf_copy_load, buf_copy_store, ptr_buf_tensor
+from . import envs
 
 _PACK = 2  # fp4 micro-scale pack (per-32 E8M0): pack_M = pack_N = pack_K = 2
 
@@ -61,6 +66,56 @@ def k16_mma(atom, c_frag, a_bf16x8s, b_bf16x8s):
             a4.store(fx.Vector.from_elements([a8[h * 4 + i] for i in range_constexpr(4)], fx.BFloat16))
             b4.store(fx.Vector.from_elements([b8[h * 4 + i] for i in range_constexpr(4)], fx.BFloat16))
             fx.gemm(atom, c_frag, a4, b4, c_frag)
+
+
+def a_per_token_enabled():
+    """gfx942 GEMM1 with per-token FP8 A: FP8 MFMA, FP4 B decoded through the
+    a16wmix residual tables, token and column scales applied in the epilogue."""
+    return a16wmix_use_k16() and envs.AITER_MEGA_GFX942_A_PER_TOKEN
+
+
+def decode_b_fp4_fp8(b_i32x4, sb_word, sb_byte, sref_i32):
+    """B operand of one 128-K step -> 4 x v8 e4m3fnuz with 2^(s - s_ref) folded in.
+
+    s_ref is the column's largest E8M0 exponent, so the residual is <= 0; the
+    epilogue multiplies the accumulator by 2^s_ref (a16wmix FP8 stage1 scheme)."""
+    neg_r = fx.Int32(sref_i32) - _e8m0_byte_raw(fx.Int32(sb_word), fx.Int32(sb_byte))
+    tab_lo, tab_hi = _fp8_table_select(neg_r)
+    b_vec = Vec(b_i32x4)
+    return [_fp4_nibble_to_fp8x8_vec(fx.Int32(b_vec[j]), tab_lo, tab_hi) for j in range_constexpr(4)]
+
+
+def fp8_mma_k32(atom, c_frag, a_i32x8, b_fp8x8s):
+    """One 128-K step as 4 FP8 16x16x32 MFMAs: in the a16wmix K order lane group g
+    supplies A/B elements [32g + 8j, +8) to MFMA j."""
+    a_vec = Vec(a_i32x8)
+    elem = fp8_elem_type()
+    for j in range_constexpr(4):
+        a_frag = fx.make_rmem_tensor(8, elem)
+        b_frag = fx.make_rmem_tensor(8, elem)
+        a_frag.store(fx.Vector.from_elements([a_vec[2 * j], a_vec[2 * j + 1]], fx.Int32).bitcast(elem))
+        b_frag.store(b_fp8x8s[j])
+        fx.gemm(atom, c_frag, a_frag, b_frag, c_frag)
+
+
+def scale_acc_per_token(acc, m_repeat, num_acc_n, token_scale_rsrc, row_base_i32, scale_row_i32, sref):
+    """acc[mi, ni] *= token_scale[row] * 2^(s_ref[ni] - 127), before the activation.
+
+    The token scale is the f32 in the first 4 bytes of each row of the dispatched
+    scale payload (``scale_row_i32`` dwords per row)."""
+    lane = fx.thread_idx.x % 64
+    col = [(fx.Int32(sref[ni]) << fx.Int32(23)).bitcast(fx.Float32) for ni in range_constexpr(num_acc_n)]
+    out = list(acc)
+    for mi in range_constexpr(m_repeat):
+        rows = []
+        for ii in range_constexpr(4):
+            row = row_base_i32 + fx.Int32(mi * 16) + (lane // fx.Int32(16)) * fx.Int32(4) + fx.Int32(ii)
+            rows.append(fx.Int32(token_scale_rsrc[row * fx.Int32(scale_row_i32)]).bitcast(fx.Float32))
+        for ni in range_constexpr(num_acc_n):
+            idx = mi * num_acc_n + ni
+            v = Vec(out[idx])
+            out[idx] = Vec.from_elements([v[ii] * rows[ii] * col[ni] for ii in range_constexpr(4)], fx.Float32)
+    return out
 
 
 def dequant_a_fp8_k16(a_i32x8, sa_word, sa_byte):
@@ -571,13 +626,20 @@ class AScaleLoader:
 class MfmaScaleGU:
     """Gate/up scaled-MFMA atoms for FP8/FP4 A x FP4 B."""
 
-    def __init__(self, *, m_repeat, num_acc_n, a_dtype="fp8"):
+    def __init__(self, *, m_repeat, num_acc_n, a_dtype="fp8", a_per_token=False):
         self._m_repeat = m_repeat
         self._num_acc_n = num_acc_n
         self._is_fp4 = a_dtype == "fp4"
         assert self._is_fp4 or a_dtype == "fp8"
         self._k16 = a16wmix_use_k16()
+        self._a_per_token = bool(a_per_token)
         self.zero_value = Vec.filled(4, 0.0, fx.Float32)
+        if const_expr(self._a_per_token):
+            assert self._k16 and not self._is_fp4, "per-token FP8 A is the gfx942 a8w4 path"
+            self._fp8_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, fp8_elem_type()))
+            self._sref = None
+            self._deq = {}
+            return
         if const_expr(self._k16):
             assert not self._is_fp4, "gfx942 MegaMoE supports a8w4 only"
             self._k16_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
@@ -608,9 +670,26 @@ class MfmaScaleGU:
             self._deq[key] = hit
         return hit[2]
 
-    def _mfma(self, a_op, b_op, acc, sa_v, sb_v, ksub, ia, jb):
+    def set_tile_sref(self, sref):
+        """Per-lane s_ref byte of each 16-column block of the current tile."""
+        self._sref = sref
+
+    def _decode_b_pt(self, b_op, sb_v, sb_byte, ni):
+        key = ("b", id(b_op), id(sb_v), sb_byte)
+        hit = self._deq.get(key)
+        if hit is None:
+            hit = (b_op, sb_v, decode_b_fp4_fp8(b_op, sb_v, sb_byte, self._sref[ni]))
+            self._deq[key] = hit
+        return hit[2]
+
+    def _mfma(self, a_op, b_op, acc, sa_v, sb_v, ksub, ia, jb, ni=None):
         opsel_a = ksub * _PACK + ia
         opsel_b = ksub * _PACK + jb
+        if const_expr(self._a_per_token):
+            c_frag = fx.make_rmem_tensor(4, fx.Float32)
+            c_frag.store(Vec(acc))
+            fp8_mma_k32(self._fp8_atom, c_frag, a_op, self._decode_b_pt(b_op, sb_v, opsel_b, ni))
+            return Vec(c_frag.load())
         if const_expr(self._k16):
             c_frag = fx.make_rmem_tensor(4, fx.Float32)
             c_frag.store(Vec(acc))
@@ -657,6 +736,7 @@ class MfmaScaleGU:
                         ksub,
                         ia,
                         ni % _PACK,
+                        ni=ni,
                     )
         return acc
 
@@ -683,6 +763,7 @@ class MfmaScaleGU:
                         ksub,
                         mi % _PACK,
                         jb,
+                        ni=ni,
                     )
         return acc, b_next
 
@@ -714,6 +795,7 @@ class MfmaScaleGU:
                         ksub,
                         ia,
                         ni % _PACK,
+                        ni=ni,
                     )
                 g += 1
         while nb < nn:
@@ -740,6 +822,7 @@ class MfmaScaleGU:
                         ksub,
                         ia,
                         ni % _PACK,
+                        ni=ni,
                     )
         return acc
 

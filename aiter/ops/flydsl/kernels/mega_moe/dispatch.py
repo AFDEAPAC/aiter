@@ -71,6 +71,8 @@ class DispatchSlot(IntEnum):
     BLOCK_HIST = 52
     TRACE_EVENTS = trace.TRACE_EVENTS_SLOT
     TRACE_COUNT = trace.TRACE_COUNT_SLOT
+    # Per-(local expert, GEMM1 row) s_ref bytes for the gfx942 per-token FP8 A path.
+    W1_SREF = 55
 
 
 DISPATCH_TABLE_SIZE = max(DispatchSlot) + 1

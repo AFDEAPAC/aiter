@@ -19,6 +19,7 @@ from ..flydsl_dispatch_combine_intranode_op import (
 )
 from . import envs, trace
 from .dispatch import DISPATCH_TABLE_SIZE, DispatchSlot
+from .gemm_util import a_per_token_enabled
 from .mega_moe_config import (
     INDEXED_PAYLOAD_MIN_MTPR,
     INDEXED_PAYLOAD_MIN_SBM,
@@ -31,6 +32,36 @@ from .mega_moe_stage2_aligned_pair import ALIGNED_PAIR_SCATTER_VEC
 from .quant import per_1x32_mx_quant
 
 __all__ = ["MegaMoEV2"]
+
+
+def w1_sref_kernel_order(w1_scale_u8, experts, inter_dim, model_dim):
+    """Per-(local expert, GEMM1 kernel row) largest E8M0 byte, ``[experts, 2 * inter_dim]`` uint8.
+
+    ``w1_scale_u8`` is the ``shuffle_scale_a16w4(..., gate_up=True)`` tensor the kernel
+    reads. Kernel rows follow ``shuffle_weight_a16w4(..., gate_up=True)``: 16-row gate
+    and up blocks interleave, so kernel row R is logical row
+    ``(R // 16 % 2) * inter_dim + (R // 32) * 16 + R % 16``."""
+    from aiter.ops.flydsl.a16wmix_fp8_prep import get_sref_u8
+    from aiter.ops.shuffle import shuffle_scale_a16w4
+
+    sref = get_sref_u8(
+        w1_scale_u8, experts=experts, n_out=2 * inter_dim, k_groups=model_dim // 32,
+        shuffle_fn=lambda t, e: shuffle_scale_a16w4(t, e, True),
+    )
+    r = torch.arange(2 * inter_dim, device=sref.device)
+    logical = (r // 16 % 2) * inter_dim + (r // 32) * 16 + r % 16
+    return sref[:, logical].contiguous()
+
+
+def per_token_fp8_quant(x_bf16, out_q, out_scale_rows):
+    """Per-token FP8 (hardware format) quant of ``x_bf16`` into ``out_q``; the f32
+    dequant scale lands in the first 4 bytes of each ``out_scale_rows`` row."""
+    import aiter
+
+    scale = torch.empty(x_bf16.shape[0], 1, dtype=torch.float32, device=x_bf16.device)
+    aiter.dynamic_per_token_scaled_quant(out_q, x_bf16, scale)
+    out_scale_rows[:, :4].view(torch.float32).copy_(scale)
+    return scale
 
 
 class MegaMoEV2:
@@ -69,6 +100,9 @@ class MegaMoEV2:
             else torch.float8_e4m3fn
         )
         self._a_view_dim = self.model_dim // 2 if self._a_dtype == "fp4" else self.model_dim
+        # gfx942: per-token FP8 A and FP8 MFMA in GEMM1 (AITER_MEGA_GFX942_A_PER_TOKEN).
+        self._a_per_token = self._a_dtype == "fp8" and a_per_token_enabled()
+        self._w1_sref_cache = {}
         self.swiglu_limit = float(swiglu_limit)
         self.act = act
         self.situ_beta = float(situ_beta)
@@ -439,6 +473,10 @@ class MegaMoEV2:
         self._s1_trace_count = torch.zeros(trace_blocks, dtype=torch.int32, device=self.dev)
         table[DispatchSlot.TRACE_EVENTS] = self._s1_trace_events.data_ptr()
         table[DispatchSlot.TRACE_COUNT] = self._s1_trace_count.data_ptr()
+        self._s1_sref_placeholder = torch.zeros(1, dtype=torch.uint8, device=self.dev)
+        table[DispatchSlot.W1_SREF] = (
+            self._w1_sref().data_ptr() if self._a_per_token else self._s1_sref_placeholder.data_ptr()
+        )
         if any(pointer == 0 for pointer in table):
             raise RuntimeError("incomplete MegaMoE dispatch table")
         self._s1_disp = torch.tensor(table, dtype=torch.int64, device=self.dev)
@@ -649,6 +687,12 @@ class MegaMoEV2:
             raise ValueError("fixed-slot Stage1 cannot consume compact prepare")
         if not prepared:
             self._run_compact_prepare(topk_ids, cur_tok, config, stream)
+        if self._a_per_token:
+            # shortcut: one 8-byte device write per call because sglang swaps W1 per
+            # layer; a Stage1 kernel argument would remove it.
+            # (fill_ is a kernel, so it also records under CUDA graph capture.)
+            slot = int(DispatchSlot.W1_SREF)
+            self._s1_disp[slot : slot + 1].fill_(self._w1_sref().data_ptr())
         op = self._s1_op
         common_args = (
             self._s1_out_kernel, self._s1_rx_kernel, self._s1_w1, self._s1_scale_kernel, self._s1_w1_scale,
@@ -716,6 +760,17 @@ class MegaMoEV2:
         self._s1_active_tile_m = config.sort_block_m
         return self._s1_active_tile_m
 
+    def _w1_sref(self):
+        """s_ref table of the current W1 scales; cached per tensor (sglang swaps weights
+        per layer), holding a strong reference so the address is not reused."""
+        scale = self._s1_w1_scale
+        key = (scale.data_ptr(), tuple(scale.shape))
+        hit = self._w1_sref_cache.get(key)
+        if hit is None:
+            hit = (scale, w1_sref_kernel_order(scale, self.epr, self.inter_dim, self.model_dim))
+            self._w1_sref_cache[key] = hit
+        return hit[1]
+
     def read_stage1_trace(self):
         """Events of the Stage1 launches since the last call, as
         ``{block: int64 tensor [n, 4]}`` of ``(kind, t0, t1, info)``; then clears them."""
@@ -729,6 +784,12 @@ class MegaMoEV2:
         }
 
     def quantize(self, x_bf16):
+        if self._a_per_token and x_bf16.shape[0]:
+            rows = x_bf16.shape[0]
+            q = self._s1_quant_x[:rows]
+            scales = self._s1_quant_scale[:rows]
+            per_token_fp8_quant(x_bf16, q.view(torch.float8_e4m3fnuz), scales)
+            return q, scales
         if x_bf16.shape[0] == 0:
             # A zero-token rank still participates in the downstream
             # collectives, but HIP rejects a zero-grid quant kernel launch.
@@ -821,7 +882,7 @@ class MegaMoEV2:
             raise ValueError("wts must be contiguous float32")
         if topk_ids.dtype != torch.int32 or not topk_ids.is_contiguous():
             raise ValueError("topk_ids must be contiguous int32")
-        if self._s1_fixed_slot:
+        if self._s1_fixed_slot or self._a_per_token:
             x_q, scales = self.quantize(x_bf16)
             return self._run_joint(
                 x_q, scales, wts, topk_ids, run_tokens, stream, slice_output,

@@ -21,6 +21,7 @@ from .gemm_util import (
     MfmaScaleGU,
     SiluQuantEpilogue,
     TileScheduler,
+    scale_acc_per_token,
     wait_lds_barrier,
 )
 
@@ -34,8 +35,9 @@ class _LdsF32View:
 @flyc.jit
 def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_scale, a_scale, mfma, epi, a_buf,
     a_scale_lds, a_lds_i32, K_ITERS, M_REPEAT, NUM_ACC_N, A_K_STEP_BYTES, pipe_weights,
-    mfma_amajor, async_a_copy, trb_rsrc, tib_rsrc, indirect_input, pair_k):
+    mfma_amajor, async_a_copy, trb_rsrc, tib_rsrc, indirect_input, pair_k, pt=None):
 # fmt: on
+    # pt: (sref_rsrc, token_scale_rsrc, scale_row_i32) for per-token FP8 A, else None.
     N_ACC = M_REPEAT * NUM_ACC_N
     NUM_B_SCALE = NUM_ACC_N // _PACK
     NUM_A_SCALE = M_REPEAT // _PACK
@@ -50,6 +52,11 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
         tile_input_base = tib_rsrc[m_tile]
     b_row = sched.gate_base_row(expert) + n_tile_base
     a_gather.for_tile(tile_input_base)
+    if const_expr(pt is not None):
+        lane16 = fx.thread_idx.x % fx.Int32(16)
+        mfma.set_tile_sref([
+            fx.Int32(pt[0][b_row + fx.Int32(ni * 16) + lane16]) for ni in range_constexpr(NUM_ACC_N)
+        ])
     if const_expr(pipe_weights):
         if const_expr(async_a_copy):
             a_gather.prefetch_to_lds(
@@ -63,7 +70,8 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
                 a_gather.load_regs(fx.Int32(0)),
                 fx.Int32(0),
             )
-        a_scale.stage(a_scale_lds, tile_input_base)
+        if const_expr(pt is None):
+            a_scale.stage(a_scale_lds, tile_input_base)
         wait_lds_barrier(0 if async_a_copy else 63)
         b0 = b_loader.load_step(b_row, fx.Int32(0))
         init = [mfma.zero_value for _ in range(N_ACC)]
@@ -233,7 +241,8 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
                 a_gather.load_regs(fx.Int32(0)),
                 fx.Int32(0),
             )
-        a_scale.stage(a_scale_lds, tile_input_base)
+        if const_expr(pt is None):
+            a_scale.stage(a_scale_lds, tile_input_base)
         wait_lds_barrier(0 if async_a_copy else 63)
         init = [mfma.zero_value for _ in range(N_ACC)]
         for sp_i, state in range(0, K_ITERS, 1, init=init):
@@ -278,6 +287,8 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
                 wait_lds_barrier()
             state = yield list(acc)
         acc = [Vec(r) for r in state]
+    if const_expr(pt is not None):
+        acc = scale_acc_per_token(acc, M_REPEAT, NUM_ACC_N, pt[1], tile_input_base, pt[2], mfma._sref)
     # The epilogue aliases A_buf as cshuffle LDS after every wave finishes its final A ds_read.
     wait_lds_barrier()
     epi.store(acc, m_tile, tile_row_base, n_tile_base)
@@ -291,9 +302,19 @@ def build_fused_gemm1(*, x_tensor, w_rsrc, sw_rsrc, sx_rsrc,
     expert_offset, b_cache_modifier, swizzle_a, pipe_weights, mfma_amajor, async_a_copy,
     use_tile_resource, indirect_input, indexed_input=False, row_map_rsrc=None,
     source_rows=0, a_dtype="fp8", out_dtype="fp8", swiglu_limit=0.0, pair_k=False, evec,
-    act="silu", situ_beta=1.0, situ_linear_beta=1.0):
+    act="silu", situ_beta=1.0, situ_linear_beta=1.0, a_per_token=False, sref_rsrc=None,
+    token_scale_rsrc=None):
     # fmt: on
-    """Build the GEMM1 atoms and return its expert resolver and tile runner."""
+    """Build the GEMM1 atoms and return its expert resolver and tile runner.
+
+    ``a_per_token``: x holds per-token FP8 rows and the first 4 bytes of each
+    scale row are its f32 dequant scale; ``sref_rsrc`` is the per-(local expert,
+    kernel row) s_ref byte table (gfx942 FP8 MFMA path)."""
+    if a_per_token:
+        assert not indexed_input, "per-token FP8 A does not support indexed payloads"
+        pt = (sref_rsrc, token_scale_rsrc, model_dim // 32 // 4)
+    else:
+        pt = None
     sched = TileScheduler(
         expert_rsrc=expert_rsrc,
         inter_dim=inter_dim,
@@ -326,7 +347,7 @@ def build_fused_gemm1(*, x_tensor, w_rsrc, sw_rsrc, sx_rsrc,
         indexed_input=indexed_input,
         row_map_rsrc=row_map_rsrc,
     )
-    mfma = MfmaScaleGU(m_repeat=m_repeat, num_acc_n=num_acc_n, a_dtype=a_dtype)
+    mfma = MfmaScaleGU(m_repeat=m_repeat, num_acc_n=num_acc_n, a_dtype=a_dtype, a_per_token=a_per_token)
     # fmt: off
     epi = SiluQuantEpilogue(out_rsrc=out_rsrc, out_scale_rsrc=os_rsrc, sorted_rsrc=trb_rsrc, tokens=0,
         inter_dim=inter_dim, m_repeat=m_repeat, num_acc_n=num_acc_n, sort_block_m=sort_block_m, tile_n=tile_n,
@@ -353,7 +374,7 @@ def build_fused_gemm1(*, x_tensor, w_rsrc, sw_rsrc, sx_rsrc,
             a_s2r, b_loader, b_scale, a_scale, mfma, epi, a_buf,
             a_scale_lds, a_lds_i32, k_iters, m_repeat, num_acc_n,
             a_k_step_bytes, pipe_weights, mfma_amajor, async_a_copy,
-            trb_rsrc, tib_rsrc, indirect_input, pair_k)
+            trb_rsrc, tib_rsrc, indirect_input, pair_k, pt)
         # fmt: on
 
     return expert_of_flat, do_scheduled_tile
@@ -368,6 +389,7 @@ def compile_gemm1(
     use_tile_resource: bool = True, waves_per_eu_hint: int = 2, b_cache_modifier: int = 0,
     a_dtype: str = "fp8", out_dtype: str = "fp8", swiglu_limit: float = 0.0,
     act: str = "silu", situ_beta: float = 1.0, situ_linear_beta: float = 1.0,
+    a_per_token: bool = False,
 ):
     # fmt: on
     """Compile standalone group GEMM1 from the fused Stage1 compute body."""
@@ -404,8 +426,8 @@ def compile_gemm1(
     @flyc.kernel(known_block_size=[total_threads, 1, 1])
     def kernel(
         out: fx.Tensor, x: fx.Tensor, w: fx.Tensor, scale_x: fx.Tensor, scale_w: fx.Tensor,
-        tile_row_base: fx.Tensor, expert_ids: fx.Tensor, out_scale: fx.Tensor, num_valid: fx.Int32,
-        grid_x: fx.Int32,
+        tile_row_base: fx.Tensor, expert_ids: fx.Tensor, out_scale: fx.Tensor, w_sref: fx.Tensor,
+        num_valid: fx.Int32, grid_x: fx.Int32,
     ):
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         a_buf = lds.pool
@@ -449,7 +471,8 @@ def compile_gemm1(
             a_dtype=a_dtype, out_dtype=out_dtype,
             swiglu_limit=swiglu_limit, evec=8 if use_tile_resource else 2,
             act=act, situ_beta=situ_beta, situ_linear_beta=situ_linear_beta,
-
+            a_per_token=a_per_token, sref_rsrc=ptr_buf_tensor(fx.get_iter(w_sref), fx.Uint8),
+            token_scale_rsrc=ptr_buf_tensor(fx.get_iter(scale_x), fx.Int32),
         )
         total_work = (num_valid // fx.Int32(sort_block_m)) * fx.Int32(n_tiles)
         for flat in range(fx.block_idx.x, total_work, grid_x):
@@ -458,11 +481,11 @@ def compile_gemm1(
     @flyc.jit
     def launch(
         out: fx.Tensor, x: fx.Tensor, w: fx.Tensor, scale_x: fx.Tensor, scale_w: fx.Tensor,
-        tile_row_base: fx.Tensor, expert_ids: fx.Tensor, out_scale: fx.Tensor, num_valid: fx.Int32,
-        grid_x: fx.Int32, stream: fx.Stream,
+        tile_row_base: fx.Tensor, expert_ids: fx.Tensor, out_scale: fx.Tensor, w_sref: fx.Tensor,
+        num_valid: fx.Int32, grid_x: fx.Int32, stream: fx.Stream,
     ):
         kernel(
-            out, x, w, scale_x, scale_w, tile_row_base, expert_ids, out_scale, num_valid, grid_x,
+            out, x, w, scale_x, scale_w, tile_row_base, expert_ids, out_scale, w_sref, num_valid, grid_x,
             value_attrs={
                 "rocdl.waves_per_eu": waves_per_eu_hint,
                 "rocdl.flat_work_group_size": f"{total_threads},{total_threads}",
@@ -481,9 +504,14 @@ def gemm1_kernel(
     async_a_copy: bool = False, use_tile_resource: bool = True, waves_per_eu_hint: int = 2,
     num_cu: int = 256, b_cache_modifier: int = 0, a_dtype: str = "fp8", out_dtype: str = "fp8",
     swiglu_limit: float = 0.0, act: str = "silu", situ_beta: float = 1.0, situ_linear_beta: float = 1.0,
+    w_sref=None,
 ):
     # fmt: on
-    """Run standalone MegaMoEV2 group GEMM1 and return ``(out, out_scale)``."""
+    """Run standalone MegaMoEV2 group GEMM1 and return ``(out, out_scale)``.
+
+    ``w_sref`` (``[experts, 2 * inter_dim]`` uint8 in kernel row order) selects the
+    gfx942 per-token FP8 A path; ``scale_x`` rows then carry the f32 token scale in
+    their first 4 bytes."""
     num_valid = int(num_valid)
     if num_valid < 0 or num_valid % int(sort_block_m):
         raise ValueError("num_valid must be a non-negative multiple of sort_block_m")
@@ -500,10 +528,13 @@ def gemm1_kernel(
         waves_per_eu_hint=waves_per_eu_hint, b_cache_modifier=b_cache_modifier,
         a_dtype=a_dtype, out_dtype=out_dtype,
         swiglu_limit=swiglu_limit, act=act, situ_beta=situ_beta, situ_linear_beta=situ_linear_beta,
+        a_per_token=w_sref is not None,
     )
+    if w_sref is None:
+        w_sref = torch.zeros(1, dtype=torch.uint8, device=out.device)
     _run_compiled(
         launch, out, x, w.view(torch.uint8), scale_x, scale_w.view(torch.uint8),
-        tile_row_base, expert_ids, out_scale,
+        tile_row_base, expert_ids, out_scale, w_sref,
         fx.Int32(num_valid), fx.Int32(grid_x), stream,
     )
     return out, out_scale
