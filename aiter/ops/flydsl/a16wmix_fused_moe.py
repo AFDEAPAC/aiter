@@ -110,8 +110,12 @@ def fused_moe_a16wmix(
     out: torch.Tensor | None = None,
     expert_mask: torch.Tensor | None = None,
     intermediate_pad: int = 0,
+    accumulate: bool = False,
 ):
     """bf16 hidden_states x MXFP4 experts -> bf16 ``[tokens, model_dim]``.
+
+    ``accumulate`` (with ``out``): gemm2 adds the routed result onto ``out``'s current contents (e.g. the shared
+    expert's output) instead of a zeroed buffer.
 
     ``w1``/``w2`` and their e8m0 scales must already be preshuffled by the caller
     (vLLM does this once at load time).     ``w1_layout`` selects which preshuffle the
@@ -330,7 +334,9 @@ def fused_moe_a16wmix(
     )
     # gemm2 atomic-fadd scatter requires zeroed rows; only clear live tokens.
     # moe_sorting's own kernel already zeroed moe_buf, the gemm2 target when out is None
-    if not (_SKIP_BUF_ZERO and out is None):
+    if accumulate:
+        assert out is not None, "accumulate needs out"
+    elif not (_SKIP_BUF_ZERO and out is None):
         moe_buf[:tokens].zero_()
 
     # fp8 stage2 (AITER_A16WMIX_FP8_S2=1): quantize the intermediate per SORTED ROW.

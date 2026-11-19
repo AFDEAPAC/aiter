@@ -1122,6 +1122,9 @@ def fused_moe(
     # copy. Must be contiguous, match shape/dtype/device and not overlap
     # hidden_states, or the call raises; when given it is what gets returned.
     output: torch.Tensor | None = None,
+    # With output: add the MoE result onto output's contents instead of overwriting it
+    # (gfx942 DSv4.1 a16wmix path only; any other path raises).
+    output_accumulate: bool = False,
     quant_type_a: QuantType | None = None,
     quant_dtype_a: torch.dtype | None = None,
     quant_dtype_a2: torch.dtype | None = None,
@@ -1156,6 +1159,8 @@ def fused_moe(
         unsupported = []
         if stage2_scatter is not None:
             unsupported.append("stage2_scatter")
+        if output_accumulate:
+            unsupported.append("output_accumulate")
         if quant_type_a is not None:
             unsupported.append("quant_type_a")
         fhmoe_quant_dtype_a = (
@@ -1266,6 +1271,7 @@ def fused_moe(
         ),
         ep_source_token_map=scatter_source_map,
         output=output,
+        output_accumulate=output_accumulate,
         quant_type_a=None if quant_type_a is None else quant_type_a.value,
         quant_dtype_a=quant_dtype_a,
         quant_dtype_a2=quant_dtype_a2,
@@ -1308,6 +1314,7 @@ def fused_moe_fake(
     ep_combine_quant: int = 0,
     ep_source_token_map: torch.Tensor | None = None,
     output: torch.Tensor | None = None,
+    output_accumulate: bool = False,
     quant_type_a: int | None = None,
     quant_dtype_a: torch.dtype | None = None,
     quant_dtype_a2: torch.dtype | None = None,
@@ -1369,6 +1376,7 @@ def fused_moe_(
     ep_combine_quant: int = 0,
     ep_source_token_map: torch.Tensor | None = None,
     output: torch.Tensor | None = None,
+    output_accumulate: bool = False,
     quant_type_a: int | None = None,
     quant_dtype_a: torch.dtype | None = None,
     quant_dtype_a2: torch.dtype | None = None,
@@ -1412,6 +1420,7 @@ def fused_moe_(
         gate_mode=gate_mode,
         stage2_scatter=stage2_scatter,
         output=output,
+        output_accumulate=output_accumulate,
         quant_type_a=quant_type_a,
         quant_dtype_a=quant_dtype_a,
         quant_dtype_a2=quant_dtype_a2,
@@ -1446,6 +1455,7 @@ def _fused_moe_impl(
     gate_mode: str = GateMode.SEPARATED.value,
     stage2_scatter: Stage2ScatterContext | None = None,
     output: torch.Tensor | None = None,
+    output_accumulate: bool = False,
     quant_type_a: int | None = None,
     quant_dtype_a: torch.dtype | None = None,
     quant_dtype_a2: torch.dtype | None = None,
@@ -1588,7 +1598,11 @@ def _fused_moe_impl(
             block_m=32 if block_size_M is None else int(block_size_M),
             w1_layout="standard",
             intermediate_pad=intermediate_pad,
+            out=output if output_accumulate else None,
+            accumulate=output_accumulate,
         )
+    if output_accumulate:
+        raise NotImplementedError("output_accumulate is only implemented by the gfx942 DSv4.1 a16wmix path")
 
     grouped_a8w4_out = None
     from aiter.ops.flydsl.grouped_moe_gfx1250 import grouped_gemm_gfx1250_a8w4
