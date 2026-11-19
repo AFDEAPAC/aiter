@@ -997,7 +997,14 @@ def _gfx942_config(
     if small:
         sort_block_m = 16
     tile_n = stage1.tile_n
-    min_tile_n = 32 * stage1.num_waves
+    num_waves = stage1.num_waves
+    grid_mult = stage1.grid_mult
+    if bucket <= 128 and sort_block_m <= 32:
+        # One 4-wave CTA per CU leaves each GEMM1 tile stall-bound (MI308X ATT: 60% of
+        # cycles stalled); three co-resident 4-wave CTAs are 6-14% faster end to end
+        # at 1-128 tokens/rank than one 8-wave CTA.
+        tile_n, num_waves, grid_mult = 256, 4, 3
+    min_tile_n = 32 * num_waves
     while (
         _stage1_lds_bytes(sort_block_m, tile_n, model_dim) > GFX942_LDS_BYTES
         and tile_n // 2 >= min_tile_n
@@ -1005,11 +1012,16 @@ def _gfx942_config(
         tile_n //= 2
     if _stage1_lds_bytes(sort_block_m, tile_n, model_dim) > GFX942_LDS_BYTES:
         sort_block_m = 32
+    # Every persistent Stage1 CTA must be co-resident: keep grid_mult CTAs within one
+    # CU's LDS.
+    while grid_mult > 1 and grid_mult * _stage1_lds_bytes(sort_block_m, tile_n, model_dim) > GFX942_LDS_BYTES:
+        grid_mult -= 1
     # Measured on MI308X (EP4, V4.1 Flash): weight prefetch costs 2-3.5% of Stage1 at
     # 32-128 tokens/rank and helps elsewhere; Stage2 block_n=128 is 3-10% faster at
     # every size (more N blocks per CU).
     stage1 = replace(
-        stage1, sort_block_m=sort_block_m, tile_n=tile_n, async_a_copy=False,
+        stage1, sort_block_m=sort_block_m, tile_n=tile_n, num_waves=num_waves,
+        grid_mult=grid_mult, async_a_copy=False,
         pipe_weights=stage1.pipe_weights and not 32 <= bucket <= 128,
     )
     # skew_cu must not exceed the launched CTA count, which Stage2 clamps to the
