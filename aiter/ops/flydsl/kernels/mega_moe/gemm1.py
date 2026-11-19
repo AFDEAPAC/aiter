@@ -22,6 +22,7 @@ from .gemm_util import (
     SiluQuantEpilogue,
     TileScheduler,
     a2_fp8_enabled,
+    a16wmix_use_k16,
     scale_acc_per_token,
     wait_lds_barrier,
 )
@@ -45,7 +46,10 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
     B_STATE_END = (
         N_ACC + NUM_ACC_N * _PACK
     )
-    SB_STATE_END = B_STATE_END + NUM_B_SCALE
+    # Carry next-step B scales through the loop: loading them at the top of the step
+    # that consumes them exposes a full memory round trip per K step on gfx942.
+    PF_SB = async_a_copy or a16wmix_use_k16()
+    SB_STATE_END = B_STATE_END + (NUM_B_SCALE if PF_SB else 0)
     last = fx.Int32(K_ITERS - 1)
     tile_row_base = trb_rsrc[m_tile]
     tile_input_base = tile_row_base
@@ -78,11 +82,12 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
         b0 = b_loader.load_step(b_row, fx.Int32(0))
         init = [mfma.zero_value for _ in range(N_ACC)]
         init += [h for ni_list in b0 for h in ni_list]
-        if const_expr(async_a_copy):
+        if const_expr(PF_SB):
             init += b_scale.load_step(
                 b_row,
                 fx.Int32(0),
             )
+        if const_expr(async_a_copy):
             init += a_scale.load_step(
                 a_scale_lds,
                 fx.Int32(0),
@@ -96,7 +101,7 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
             cur_off = (sp & fx.Int32(1)) * fx.Int32(a_lds_i32)
             nxt_off = ((sp + fx.Int32(1)) & fx.Int32(1)) * fx.Int32(a_lds_i32)
             spn = sp + fx.Int32(1)
-            if const_expr(async_a_copy):
+            if const_expr(PF_SB):
                 sb = [
                     fx.Int32(
                         state[B_STATE_END + group]
@@ -105,6 +110,9 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
                         NUM_B_SCALE
                     )
                 ]
+            else:
+                sb = b_scale.load_step(b_row, sp)
+            if const_expr(async_a_copy):
                 sa = [
                     fx.Int32(
                         state[SB_STATE_END + group]
@@ -114,7 +122,6 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
                     )
                 ]
             else:
-                sb = b_scale.load_step(b_row, sp)
                 sa = [] if pt is not None else a_scale.load_step(
                     a_scale_lds,
                     sp,
@@ -143,6 +150,8 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
                 a_regs = a_gather.load_regs(
                     spn * fx.Int32(A_K_STEP_BYTES)
                 )
+                if const_expr(PF_SB):
+                    sb_next = b_scale.load_step(b_row, spn)
 
             def load_next(ni, _kn=spn):
                 return b_loader.load_ni(b_row, ni, _kn)
@@ -169,8 +178,9 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
                 a_gather.store(a_buf, a_regs, nxt_off)
                 wait_lds_barrier()
             yv = list(acc) + [h for ni_list in b_next for h in ni_list]
-            if const_expr(async_a_copy):
+            if const_expr(PF_SB):
                 yv += sb_next
+            if const_expr(async_a_copy):
                 yv += sa_next
             return yv
 
@@ -200,7 +210,7 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
         def final_a_load(mi, ks, _base=final_off):
             return a_s2r.load_operand(a_buf, mi, ks, _base)
 
-        if const_expr(async_a_copy):
+        if const_expr(PF_SB):
             sb = [
                 fx.Int32(
                     state[B_STATE_END + group]
@@ -209,6 +219,9 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
                     NUM_B_SCALE
                 )
             ]
+        else:
+            sb = b_scale.load_step(b_row, last)
+        if const_expr(async_a_copy):
             sa = [
                 fx.Int32(
                     state[SB_STATE_END + group]
@@ -218,7 +231,6 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
                 )
             ]
         else:
-            sb = b_scale.load_step(b_row, last)
             sa = [] if pt is not None else a_scale.load_step(
                 a_scale_lds,
                 last,
