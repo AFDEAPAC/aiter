@@ -307,8 +307,10 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
 # fmt: on
     """Compile fused GEMM2 and weighted cross-rank P2P scatter."""
     arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx95"):
-        raise RuntimeError(f"MegaMoE v2 stage2 requires CDNA4 (gfx95x), got {arch or 'unknown'}")
+    if not arch.startswith(("gfx95", "gfx942")):
+        raise RuntimeError(f"MegaMoE v2 stage2 requires gfx95x or gfx942, got {arch or 'unknown'}")
+    if arch.startswith("gfx942") and p2p_quant_type != "none":
+        raise ValueError("gfx942 MegaMoE stage2 supports p2p_quant_type='none' only")
     assert max_tok > 0 and (max_tok & (max_tok - 1)) == 0, "max_tok must be power of two"
     assert model_dim % BN == 0 and HIDDEN_MAX % BN == 0
     assert INTER_MAX % BK == 0, f"INTER_MAX must be a multiple of {BK}"
@@ -348,8 +350,9 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
     lds_weight_off = lds_packed_off + BM * 4
     lds_peer_off = lds_weight_off + BM * 4
     lds_bytes = lds_peer_off + npes * 8
-    if lds_bytes > 160 * 1024:
-        raise ValueError(f"Stage2 LDS use {lds_bytes} exceeds 160 KiB")
+    lds_limit = 64 * 1024 if arch.startswith("gfx942") else 160 * 1024
+    if lds_bytes > lds_limit:
+        raise ValueError(f"Stage2 LDS use {lds_bytes} exceeds {lds_limit // 1024} KiB")
     _recv_cap = npes * max_tok if recv_cap is None else int(recv_cap)
     _row_nbytes = N_OUT + N_OUT // 32 if p2p_quant_type == "fp8_blockwise_1x32" else N_OUT * 2
     _comb_inp_nbytes = max_tok * topk * _row_nbytes if comb_inp_nbytes is None else int(comb_inp_nbytes)

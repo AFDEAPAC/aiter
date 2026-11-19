@@ -23,9 +23,12 @@ from ..mxfp4_gemm_common import (
     lds_dma_atom_128,
     lds_dma_dst,
     lds_swizzle_mask_f8,
+    lds_typed_ptr,
     lds_vec_load,
 )
+from ..moe_2stage_a16wmix.utils import a16wmix_use_k16
 from ..tensor_shim import buf_copy_load, ptr_buf_tensor
+from .gemm_util import dequant_a_fp8_k16, dequant_b_fp4_k16, k16_mma
 
 
 def scale_view(
@@ -98,6 +101,30 @@ def mma_one_j(
         )
 
 
+def mma_cluster_k16(atom, bqf, a_frags, c_frags, sa, sb_words, num_acc_n, k_halves,
+                    single_rg, rg_off, scale_sub_blocks):
+    """gfx942 form of the scaled-MFMA cluster: the same (osa, osb, row-group) steps
+    as mma_one_j, with each A fragment dequantized once per K tile and each B
+    fragment once per 16-column block."""
+    if single_rg:
+        rows = ((0, 0, rg_off),)
+    else:
+        rows = tuple(
+            (2 * sub + im, sub, im) for sub in range(scale_sub_blocks) for im in range(2)
+        )
+    a_bf = {}
+    for J in range(num_acc_n):
+        mni, in_b = J // 2, J % 2
+        for k in range(k_halves):
+            b_bf = dequant_b_fp4_k16(Vec(bqf[J][k].load()), sb_words[mni], 2 * k + in_b)
+            for i, sub, im in rows:
+                if (i, k) not in a_bf:
+                    a_bf[(i, k)] = dequant_a_fp8_k16(
+                        Vec(a_frags[i][k].load()), sa[sub], 2 * k + im
+                    )
+                k16_mma(atom, c_frags[i][J], a_bf[(i, k)], b_bf)
+
+
 def issue_a_load_lds_dt(
     arg_aq,
     s_aq_base,
@@ -127,8 +154,36 @@ def issue_a_load_lds_dt(
         n_row_groups = rows_per_wave // rows_per_call
     lane_col = (lane % lanes_per_row) * 16
     base_i32 = s_aq_base
-    atom = lds_dma_atom_128()
     tile_base = fx.Int64(arg_aq) + fx.Int64(m_row) * fx.Int64(K_BYTES)
+    if const_expr(a16wmix_use_k16()):
+        # gfx942 has no 16-byte global-to-LDS copy: stage through VGPRs and write
+        # each lane's 16 bytes where the LDS DMA would have put them (wave base +
+        # lane * 16), so the swizzled ds-read side is unchanged.
+        src_rsrc = ptr_buf_tensor(
+            tile_base,
+            fx.Int32,
+            unit_elems=4,
+            num_records_bytes=fx.Int32(BM) * K_BYTES,
+        )
+        for g in range_constexpr(n_row_groups):
+            lds_row = gather_base_row + g * rows_per_call
+            mask = (
+                lds_swizzle_mask_f8(lds_row + a_lane_row, KH_TILE_A)
+                if const_expr(is_f8)
+                else lds_swizzle_mask(lds_row + a_lane_row)
+            )
+            tile_row = lds_row + a_lane_row
+            voffset = (lane_col ^ mask) + tile_row * K_BYTES
+            off = fx.Int32(slot * (BM * KH_TILE_A)) + lds_row * KH_TILE_A
+            v = buf_copy_load(
+                src_rsrc, (voffset + kt * KH_TILE_A) // 16, fx.Int32, unit_elems=4
+            )
+            dst = lds_typed_ptr(
+                base_i32, T.i32, align=16, byte_offset=off + lane * fx.Int32(16)
+            )
+            fx.ptr_store(Vec(v), dst)
+        return
+    atom = lds_dma_atom_128()
     src = flat_buffer_view(
         tile_base,
         None,
@@ -256,7 +311,12 @@ def gemm2_compute_v2(
     lane_mod_16 = lane % 16
 
     s_aq_base = lds_base_i32
-    mma_atoms = scale_mma_atoms(a_dtype)
+    k16 = a16wmix_use_k16()
+    if const_expr(k16):
+        assert is_f8_a, "gfx942 MegaMoE supports a8w4 only"
+        k16_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
+    else:
+        mma_atoms = scale_mma_atoms(a_dtype)
 
     # A activation: global->LDS DMA (issue_a_load_lds), then LDS->reg ds-read (issue_a_ds_read).
     A_NDW = (
@@ -290,9 +350,15 @@ def gemm2_compute_v2(
                 row_off = fx.Int32(slot * slot_bytes) + lds_row * KH_TILE_A
                 if const_expr(is_f8_a):
                     mask = lds_swizzle_mask_f8(lane_mod_16, KH_TILE_A)
-                    col0 = lane_div_16 * 16 + k * 128
-                    col_lo = col0 ^ mask
-                    col_hi = (col0 + 64) ^ mask
+                    if const_expr(k16):
+                        # a16wmix K order: lane group g reads K [32g, 32g+32).
+                        col0 = lane_div_16 * 32 + k * 128
+                        col_lo = col0 ^ mask
+                        col_hi = (col0 + 16) ^ mask
+                    else:
+                        col0 = lane_div_16 * 16 + k * 128
+                        col_lo = col0 ^ mask
+                        col_hi = (col0 + 64) ^ mask
                     lo = Vec(
                         lds_vec_load(
                             s_aq_base,
@@ -468,6 +534,12 @@ def gemm2_compute_v2(
             shift_scale_word(Vec(bsf[mni].load())[0], kt_rt)
             for mni in range_constexpr(nPairs)
         ]
+        if const_expr(k16):
+            mma_cluster_k16(
+                k16_atom, bqf, a_frags, c_frags, sa, sb_words, numAccN, kHalves,
+                is_bm16, rg_off, kScaleSubBlocks,
+            )
+            return
         for J in range_constexpr(numAccN):
             mni, in_b = J // 2, J % 2
             sb = sb_words[mni]

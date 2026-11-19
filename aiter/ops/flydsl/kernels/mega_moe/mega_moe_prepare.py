@@ -37,9 +37,9 @@ def compile_mega_moe_prepare(
 ):
     """Compile compact count/group/plan without the GEMM1 shared footprint."""
     arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx95"):
+    if not arch.startswith(("gfx95", "gfx942")):
         raise RuntimeError(
-            f"MegaMoE prepare requires CDNA4 (gfx95x), got {arch or 'unknown'}"
+            f"MegaMoE prepare requires gfx95x or gfx942, got {arch or 'unknown'}"
         )
     npes = int(fuse_npes)
     epr = int(experts_per_rank)

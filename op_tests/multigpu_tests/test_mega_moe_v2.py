@@ -37,6 +37,13 @@ NETWORKS = {
         "topk": 6,
         "swiglu_limit": 10.0,
     },
+    "v41_flash": {
+        "model_dim": 5120,
+        "inter_dim": 2304,
+        "experts": 384,
+        "topk": 6,
+        "swiglu_limit": 10.0,
+    },
     "r1_v3": {
         "model_dim": 7168,
         "inter_dim": 2048,

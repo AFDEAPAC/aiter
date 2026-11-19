@@ -102,8 +102,8 @@ def compile_mega_moe_stage1(
     _return_kernel_spec: bool = False,
 ):
     arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx95"):
-        raise RuntimeError(f"MegaMoE v2 stage1 requires CDNA4 (gfx95x), got {arch or 'unknown'}")
+    if not arch.startswith(("gfx95", "gfx942")):
+        raise RuntimeError(f"MegaMoE v2 stage1 requires gfx95x or gfx942, got {arch or 'unknown'}")
     NUM_WAVES = int(num_waves)
     assert NUM_WAVES > 1, "planner needs one communication wave and at least one grouping wave"
     assert 1 <= waves_per_eu_hint <= 4

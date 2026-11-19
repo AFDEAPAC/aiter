@@ -10,6 +10,10 @@ import mori.shmem as ms
 import torch
 
 from ..flydsl_dispatch_combine_intranode_op import (
+    _DEFAULT_COMBINE_BLOCK_NUM,
+    _DEFAULT_COMBINE_WARP_NUM,
+    _DEFAULT_DISPATCH_BLOCK_NUM,
+    _DEFAULT_DISPATCH_WARP_NUM,
     FlyDSLDispatchCombineConfig,
     FlyDSLDispatchCombineIntraNodeOp,
 )
@@ -97,6 +101,18 @@ class MegaMoEV2:
         capacity_tile_m = 128 if compact else 32
         self._s1_fixed_slot = not compact
         self._s1_scale_dim = self.model_dim // 32
+        # Dispatch/combine end each phase with a grid-wide barrier, so their
+        # blocks must all be resident: cap the 128-block default on smaller
+        # parts (MI308X has 80 CUs).
+        num_cu = torch.cuda.get_device_properties(self.dev).multi_processor_count
+        geometry = {}
+        if num_cu < _DEFAULT_COMBINE_BLOCK_NUM:
+            geometry = dict(
+                dispatch_block_num=min(_DEFAULT_DISPATCH_BLOCK_NUM, num_cu),
+                dispatch_warp_num_per_block=_DEFAULT_DISPATCH_WARP_NUM,
+                combine_block_num=num_cu,
+                combine_warp_num_per_block=_DEFAULT_COMBINE_WARP_NUM,
+            )
         # fmt: off
         self.comb_cfg = FlyDSLDispatchCombineConfig(rank=self.rank, world_size=self.world_size,
             hidden_dim=self.model_dim, max_num_inp_token_per_rank=self.mtpr, num_experts_per_rank=self.epr,
@@ -105,7 +121,7 @@ class MegaMoEV2:
             enable_std_moe=False, enable_group_major=True, gm_unit_size=capacity_tile_m,
             gm_scheme=mega_scheme, gm_compact=compact,
             gm_indexed_payload=compact and self.mtpr >= INDEXED_PAYLOAD_MIN_MTPR,
-            max_total_recv_tokens=self.world_size)
+            max_total_recv_tokens=self.world_size, **geometry)
         # fmt: on
         self.comb_op = FlyDSLDispatchCombineIntraNodeOp(self.comb_cfg)
         torch.cuda.synchronize()

@@ -9,9 +9,68 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 from ..act import situ_mul, tanh_via_sigmoid_f32
+from ..moe_2stage_a16wmix.utils import (
+    _e8m0_byte_to_f32,
+    _fp4_nibble_to_bf16x8_lut,
+    a16wmix_use_k16,
+)
 from ..tensor_shim import buf_copy_load, buf_copy_store, ptr_buf_tensor
 
 _PACK = 2  # fp4 micro-scale pack (per-32 E8M0): pack_M = pack_N = pack_K = 2
+
+
+def fp8_e8m0_bias():
+    """Exponent offset of the 1x32 FP8 quant scale: the scaled |max| stays below
+    1.5 * 2**bias.  gfx942 packs FP8 as e4m3fnuz (max 240), gfx95x as OCP (max 448)."""
+    return 7 if a16wmix_use_k16() else 8
+
+
+def fp8x8_to_bf16x8(lo_i32, hi_i32, scale_f32):
+    """Eight FP8 bytes (hardware FP8 format) times a power-of-two scale -> v8bf16.
+
+    The product is exact in bf16, so the f32 -> bf16 step is a truncation."""
+    out = []
+    for word in (lo_i32, hi_i32):
+        for sel in (False, True):
+            pair = fx.Vector(rocdl.cvt_pk_f32_fp8(T.vec(2, T.f32), word, sel))
+            lo_b = (fx.Float32(pair[0]) * scale_f32).bitcast(fx.Int32).shrui(fx.Int32(16))
+            hi_b = (fx.Float32(pair[1]) * scale_f32).bitcast(fx.Int32) & fx.Int32(0xFFFF0000)
+            out.append(lo_b | hi_b)
+    return fx.Vector.from_elements(out, fx.Int32).bitcast(fx.BFloat16)
+
+
+def dequant_b_fp4_k16(b_i32x4, sb_word, sb_byte):
+    """B operand of one 128-K step (4 dwords of 8 FP4) -> 4 x v8bf16."""
+    sb = _e8m0_byte_to_f32(fx.Int32(sb_word), fx.Int32(sb_byte))
+    b_vec = Vec(b_i32x4)
+    return [_fp4_nibble_to_bf16x8_lut(fx.Int32(b_vec[j]), sb) for j in range_constexpr(4)]
+
+
+def k16_mma(atom, c_frag, a_bf16x8s, b_bf16x8s):
+    """gfx942 replacement of one 16x16x128 FP8 x FP4 scaled MFMA.
+
+    In the a16wmix K order lane group g owns K [32g, 32g+32) of the 128-K step,
+    i.e. exactly one E8M0 block for both operands, so A and B are dequantized
+    with their own scales and the step becomes 8 bf16 16x16x16 MFMAs."""
+    for j in range_constexpr(4):
+        a8 = a_bf16x8s[j]
+        b8 = b_bf16x8s[j]
+        for h in range_constexpr(2):
+            a4 = fx.make_rmem_tensor(4, fx.BFloat16)
+            b4 = fx.make_rmem_tensor(4, fx.BFloat16)
+            a4.store(fx.Vector.from_elements([a8[h * 4 + i] for i in range_constexpr(4)], fx.BFloat16))
+            b4.store(fx.Vector.from_elements([b8[h * 4 + i] for i in range_constexpr(4)], fx.BFloat16))
+            fx.gemm(atom, c_frag, a4, b4, c_frag)
+
+
+def dequant_a_fp8_k16(a_i32x8, sa_word, sa_byte):
+    """A operand of one 128-K step (8 dwords, a16wmix K order) -> 4 x v8bf16."""
+    sa = _e8m0_byte_to_f32(fx.Int32(sa_word), fx.Int32(sa_byte))
+    a_vec = Vec(a_i32x8)
+    return [
+        fp8x8_to_bf16x8(fx.Int32(a_vec[2 * j]), fx.Int32(a_vec[2 * j + 1]), sa)
+        for j in range_constexpr(4)
+    ]
 
 
 @flyc.jit
@@ -92,6 +151,7 @@ class ATileLoader:
         self._is_fp4 = a_dtype == "fp4"
         assert self._is_fp4 or a_dtype == "fp8"
         if const_expr(self._async_copy):
+            assert not a16wmix_use_k16(), "gfx942 has no 128-bit global-to-LDS copy"
             assert total_threads % 64 == 0
             total_chunks = sort_block_m * (k_step_bytes // 16)
             assert total_chunks % 64 == 0
@@ -271,6 +331,8 @@ class AS2RLoader:
         self._lane = fx.thread_idx.x % 64
         self._is_fp4 = a_dtype == "fp4"
         assert self._is_fp4 or a_dtype == "fp8"
+        self._k16 = a16wmix_use_k16()
+        assert not (self._k16 and self._is_fp4), "gfx942 MegaMoE supports a8w4 only"
 
     def _load_16b(self, lds_src, i32_off):
         # add_offset+recast preserves the LDS address space.
@@ -297,10 +359,15 @@ class AS2RLoader:
             return col
 
         col_lo = klane4 + fx.Int32(ksub * (16 if self._is_fp4 else 32))
+        hi_step = 16
+        if const_expr(self._k16):
+            # a16wmix K order: lane group g reads K [32g, 32g+32) of this 128-K step.
+            col_lo = klane4 * fx.Int32(2) + fx.Int32(ksub * 32)
+            hi_step = 4
         lo = self._load_16b(lds_src, row_i32 + _c(col_lo)).bitcast(fx.Int64)
         if const_expr(self._is_fp4):
             return Vec(lo).bitcast(fx.Int32)
-        hi = self._load_16b(lds_src, row_i32 + _c(col_lo + fx.Int32(16))).bitcast(
+        hi = self._load_16b(lds_src, row_i32 + _c(col_lo + fx.Int32(hi_step))).bitcast(
             fx.Int64
         )
         return Vec.from_elements([lo[0], lo[1], hi[0], hi[1]], fx.Int64).bitcast(
@@ -509,6 +576,13 @@ class MfmaScaleGU:
         self._num_acc_n = num_acc_n
         self._is_fp4 = a_dtype == "fp4"
         assert self._is_fp4 or a_dtype == "fp8"
+        self._k16 = a16wmix_use_k16()
+        self.zero_value = Vec.filled(4, 0.0, fx.Float32)
+        if const_expr(self._k16):
+            assert not self._is_fp4, "gfx942 MegaMoE supports a8w4 only"
+            self._k16_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
+            self._deq = {}
+            return
         elem_a = fx.Float4E2M1FN if self._is_fp4 else fx.Float8E4M3FN
         self._atoms = {
             (osa, osb): fx.make_mma_atom(
@@ -519,14 +593,34 @@ class MfmaScaleGU:
             for osa in range(4)
             for osb in range(4)
         }
-        self.zero_value = Vec.filled(4, 0.0, fx.Float32)
 
     def idx(self, mi, ni):
         return mi * self._num_acc_n + ni
 
+    def _dequant(self, kind, op, word, byte):
+        # Trace-time memo: one dequant per operand object, reused by every MFMA
+        # that consumes it.  Holding ``op`` keeps its id() from being recycled.
+        key = (kind, id(op), id(word), byte)
+        hit = self._deq.get(key)
+        if hit is None:
+            fn = dequant_a_fp8_k16 if kind == "a" else dequant_b_fp4_k16
+            hit = (op, word, fn(op, word, byte))
+            self._deq[key] = hit
+        return hit[2]
+
     def _mfma(self, a_op, b_op, acc, sa_v, sb_v, ksub, ia, jb):
         opsel_a = ksub * _PACK + ia
         opsel_b = ksub * _PACK + jb
+        if const_expr(self._k16):
+            c_frag = fx.make_rmem_tensor(4, fx.Float32)
+            c_frag.store(Vec(acc))
+            k16_mma(
+                self._k16_atom,
+                c_frag,
+                self._dequant("a", a_op, sa_v, opsel_a),
+                self._dequant("b", b_op, sb_v, opsel_b),
+            )
+            return Vec(c_frag.load())
         a_frag = fx.make_rmem_tensor(4 if self._is_fp4 else 8, fx.Int32)
         b_frag = fx.make_rmem_tensor(4, fx.Int32)
         c_frag = fx.make_rmem_tensor(4, fx.Float32)
@@ -546,6 +640,7 @@ class MfmaScaleGU:
 
     def call(self, a_load, b, acc, sa, sb):
         """Non-pipelined lazy-A K-step: a_load(mi,ksub) on demand (one A operand live -> low VGPR, wins small bs)."""
+        self._deq = {}
         for ksub in range_constexpr(_PACK):
             for mi in range_constexpr(self._m_repeat):
                 a_op = a_load(mi, ksub)
@@ -567,6 +662,7 @@ class MfmaScaleGU:
 
     def call_pipe(self, a_load, b_prev, acc, sa, sb, load_next):
         """B-major pipe: MFMA b_prev while load_next(ni) issues next-tile B[ni] before its group."""
+        self._deq = {}
         a_ops = []
         for mi in range_constexpr(self._m_repeat):
             a_ops.append([a_load(mi, ks) for ks in range_constexpr(_PACK)])
@@ -592,6 +688,7 @@ class MfmaScaleGU:
 
     def call_pipe_am(self, a_load, b_prev, acc, sa, sb, load_next):
         """A-major pipe: lazy-A per (mi,ksub) overlaps next A ds_read with MFMA; next-B loads spread over groups."""
+        self._deq = {}
         nn = self._num_acc_n
         b_next = [None] * nn
         ngrp = self._m_repeat * _PACK
@@ -626,6 +723,7 @@ class MfmaScaleGU:
 
     def call_pipe_am_final(self, a_load, b_prev, acc, sa, sb):
         """Consume the final prefetched B step without redundant loads."""
+        self._deq = {}
         for mi in range_constexpr(self._m_repeat):
             ia = mi % _PACK
             sa_v = sa[mi // _PACK]
@@ -659,7 +757,7 @@ def _group_absmax(vals, shuffle_offs, c64):
 def _e8m0_scale(amax):
     """E8M0 exponent of a 1x32 group's |max| and the matching FP8 quant multiplier."""
     max_rounded = (amax.bitcast(fx.Int32) + fx.Int32(0x400000)) & fx.Int32(0xFF800000)
-    e = (max_rounded >> fx.Int32(23)) - fx.Int32(8)
+    e = (max_rounded >> fx.Int32(23)) - fx.Int32(fp8_e8m0_bias())
     e8m0 = (e > fx.Int32(0)).select(e, fx.Int32(0))
     quant_scale = ((fx.Int32(254) - e8m0) << fx.Int32(23)).bitcast(fx.Float32)
     return e8m0, quant_scale
@@ -865,7 +963,7 @@ class SiluQuantEpilogue:
                 for off in (1, 2, 4, 8):
                     m = m.maximumf(m.shuffle_xor(fx.Int32(off), c64))
                 max_rounded = (m.bitcast(fx.Int32) + fx.Int32(0x400000)) & fx.Int32(0xFF800000)
-                _e = (max_rounded >> fx.Int32(23)) - fx.Int32(2 if self._is_fp4 else 8)
+                _e = (max_rounded >> fx.Int32(23)) - fx.Int32(2 if self._is_fp4 else fp8_e8m0_bias())
                 e8m0_v = (_e > fx.Int32(0)).select(_e, fx.Int32(0))
                 quant_scale = ((fx.Int32(254) - e8m0_v) << fx.Int32(23)).bitcast(fx.Float32)
                 gcol = out_tile_base + col0

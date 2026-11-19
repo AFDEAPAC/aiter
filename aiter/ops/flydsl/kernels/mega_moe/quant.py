@@ -10,14 +10,21 @@ from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp, T
 
+from ..moe_2stage_a16wmix.utils import a16wmix_use_k16
 from ..tensor_shim import buf_copy_atom, ptr_buf_tensor
 
 BLOCK = 64
 GROUP = 32
 
-# fp32 bits of 1/max_pos for RoundUp ceil_pow2(amax/max_pos): fp4 max_pos=6, fp8 e4m3=448.
+# fp32 bits of 1/max_pos (rounded up) for RoundUp ceil_pow2(amax/max_pos): fp4 max_pos=6,
+# fp8 e4m3=448 (OCP, gfx95x) or e4m3fnuz=240 (gfx942, where cvt_pk_fp8_f32 emits fnuz).
 _FP4_INV_MAX_POS_BITS = 0x3E2AAAAB
 _FP8_E4M3_INV_MAX_POS_BITS = 0x3B124925
+_FP8_E4M3FNUZ_INV_MAX_POS_BITS = 0x3B888889
+
+
+def _fp8_inv_max_pos_bits():
+    return _FP8_E4M3FNUZ_INV_MAX_POS_BITS if a16wmix_use_k16() else _FP8_E4M3_INV_MAX_POS_BITS
 
 
 def _load_i32x4(buffer, index):
@@ -45,7 +52,7 @@ def emit_per_1x32_mx_fp8_group(in_buf, out_buf, scale_buf, group_id):
             act.append(values[elem])
 
     working = (
-        local_max * fx.Int32(_FP8_E4M3_INV_MAX_POS_BITS).bitcast(fx.Float32)
+        local_max * fx.Int32(_fp8_inv_max_pos_bits()).bitcast(fx.Float32)
     ).bitcast(fx.Int32)
     mantissa = working & fx.Int32(0x7FFFFF)
     biased_exp = (working >> fx.Int32(23)) & fx.Int32(0xFF)

@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import cache
 
+from ..moe_2stage_a16wmix.utils import a16wmix_use_k16
 from . import envs
 
 TOKEN_BUCKETS = (
@@ -957,6 +958,8 @@ def select_mega_moe_config(
         # global-to-LDS atom spans two rows. Indexed payload gives every
         # row an independent source key, which that atom cannot express.
         config = _replace_config(config, stage1={"async_a_copy": False})
+    if a16wmix_use_k16():
+        config = _gfx942_config(config, a_dtype, model_dim)
     if config.stage2.aligned_pair and config.p2p_quant != P2P_QUANT_FP8_BLOCKWISE:
         # The aligned-pair Stage2 kernel only emits the FP8 P2P row layout, so
         # reject the combination here instead of at launch.
@@ -964,6 +967,47 @@ def select_mega_moe_config(
             f"p2p_quant={config.p2p_quant!r} conflicts with aligned-pair Stage2"
         )
     return config
+
+
+GFX942_LDS_BYTES = 64 * 1024
+
+
+def _stage1_lds_bytes(sort_block_m: int, tile_n: int, model_dim: int) -> int:
+    """FP8-A Stage1 shared footprint (mega_moe_stage1 SharedStorage)."""
+    a_k_step_bytes = 256
+    pool = max(2 * sort_block_m * a_k_step_bytes, sort_block_m * (tile_n // 2) * 4)
+    return pool + sort_block_m * (model_dim // 32) + 3 * 16
+
+
+def _gfx942_config(config: MegaMoEConfig, a_dtype: str, model_dim: int) -> MegaMoEConfig:
+    """gfx942: a8w4 only, no 128-bit LDS DMA, 64 KiB LDS, no FP8 P2P or aligned pair."""
+    if a_dtype != ACTIVATION_FP8:
+        raise ValueError("gfx942 MegaMoE supports a8w4 only")
+    stage1 = config.stage1
+    sort_block_m = min(stage1.sort_block_m, 64)
+    tile_n = stage1.tile_n
+    min_tile_n = 32 * stage1.num_waves
+    while (
+        _stage1_lds_bytes(sort_block_m, tile_n, model_dim) > GFX942_LDS_BYTES
+        and tile_n // 2 >= min_tile_n
+    ):
+        tile_n //= 2
+    if _stage1_lds_bytes(sort_block_m, tile_n, model_dim) > GFX942_LDS_BYTES:
+        sort_block_m = 32
+    stage1 = replace(
+        stage1, sort_block_m=sort_block_m, tile_n=tile_n, async_a_copy=False
+    )
+    # skew_cu must not exceed the launched CTA count, which Stage2 clamps to the
+    # device CU count (80 on MI308X).
+    stage2 = replace(
+        config.stage2,
+        block_m=32,
+        aligned_pair=False,
+        pair_cu=0,
+        bf16_lds=False,
+        skew_cu=0,
+    )
+    return MegaMoEConfig(stage1=stage1, stage2=stage2, p2p_quant=P2P_QUANT_NONE)
 
 
 @cache
