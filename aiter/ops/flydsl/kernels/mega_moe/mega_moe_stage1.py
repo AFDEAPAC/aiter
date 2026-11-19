@@ -148,7 +148,6 @@ def compile_mega_moe_stage1(
     assert launch_grid_x <= num_cu * 33 + 1
     M_REPEAT = sort_block_m // 16
     NUM_ACC_N = n_per_wave // 16
-    assert NUM_ACC_N % 2 == 0 and M_REPEAT % 2 == 0
     assert a_dtype in ("fp4", "fp8")
     assert out_dtype in ("fp4", "fp8")
 
@@ -231,6 +230,8 @@ def compile_mega_moe_stage1(
     SKIP_GEMM = envs.AITER_MEGA_S1_TRACE_SKIP_GEMM
     A_PER_TOKEN = a_per_token_enabled()
     EPI_EXP128 = a2_fp8_enabled()
+    # Paired 16-row A scales feed the scaled MFMA; per-token A has none, so SBM16 works.
+    assert NUM_ACC_N % 2 == 0 and (M_REPEAT % 2 == 0 or A_PER_TOKEN)
     dispatch_path = "fixedslot" if fixed_slot_dispatch else "compact"
     swiglu_suffix = "" if swiglu_limit <= 0 else f"_sl{str(float(swiglu_limit)).replace('.', 'p')}"
     # Activation is baked into the epilogue, so it (and its baked beta/linear_beta)

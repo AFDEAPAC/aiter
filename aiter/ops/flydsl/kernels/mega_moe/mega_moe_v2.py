@@ -206,7 +206,10 @@ class MegaMoEV2:
             run_mega_moe_stage1_bundle,
         )
 
-        self.sort_block_m = 32
+        # Smallest SBM in the bundle: it sizes the per-tile metadata and tile state.
+        self.sort_block_m = min(
+            32, *(entry.config.stage1.sort_block_m for entry in self._bundle_plan.entries)
+        )
         # Opt-in hardware bounds checking for the Stage1 control buffers.  Off
         # by default so production keeps today's descriptors; turn it on while
         # sweeping configurations, where an indexing mistake would otherwise

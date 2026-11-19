@@ -29,6 +29,11 @@ SWEEP = (
     dict(sort_block_m=64, tile_n=256, num_waves=4),
     dict(sort_block_m=64, tile_n=256, num_waves=8, mfma_amajor=True),
 )
+# SBM16 needs per-token A (no paired 16-row A scales).
+SWEEP_PER_TOKEN = (
+    dict(sort_block_m=16, tile_n=256, num_waves=4),
+    dict(sort_block_m=16, tile_n=256, num_waves=4, pipe_weights=False),
+)
 
 
 def fp8_dtype():
@@ -112,7 +117,7 @@ def main():
     w_sref = w1_sref_kernel_order(ws_k.view(torch.uint8), e, inter, k) if args.a_per_token else None
 
     failed = 0
-    for cfg in SWEEP:
+    for cfg in SWEEP + (SWEEP_PER_TOKEN if args.a_per_token else ()):
         rel, nan = run_case(args, cfg, x_q, x_s, w_k, ws_k, xd, w1d, w_sref=w_sref)
         ok = rel < args.rtol and not nan
         failed += not ok

@@ -959,7 +959,7 @@ def select_mega_moe_config(
         # row an independent source key, which that atom cannot express.
         config = _replace_config(config, stage1={"async_a_copy": False})
     if a16wmix_use_k16():
-        config = _gfx942_config(config, a_dtype, model_dim)
+        config = _gfx942_config(config, a_dtype, model_dim, bucket)
     if config.stage2.aligned_pair and config.p2p_quant != P2P_QUANT_FP8_BLOCKWISE:
         # The aligned-pair Stage2 kernel only emits the FP8 P2P row layout, so
         # reject the combination here instead of at launch.
@@ -979,12 +979,23 @@ def _stage1_lds_bytes(sort_block_m: int, tile_n: int, model_dim: int) -> int:
     return pool + sort_block_m * (model_dim // 32) + 3 * 16
 
 
-def _gfx942_config(config: MegaMoEConfig, a_dtype: str, model_dim: int) -> MegaMoEConfig:
+def _gfx942_config(
+    config: MegaMoEConfig, a_dtype: str, model_dim: int, bucket: int
+) -> MegaMoEConfig:
     """gfx942: a8w4 only, no 128-bit LDS DMA, 64 KiB LDS, no FP8 P2P or aligned pair."""
     if a_dtype != ACTIVATION_FP8:
         raise ValueError("gfx942 MegaMoE supports a8w4 only")
     stage1 = config.stage1
     sort_block_m = min(stage1.sort_block_m, 64)
+    # SBM16 halves the per-expert padding at decode sizes; it needs per-token A
+    # (no paired 16-row A scales). Measured 18-29% faster at 1-128 tokens/rank.
+    small = (
+        envs.AITER_MEGA_GFX942_SBM16
+        and envs.AITER_MEGA_GFX942_A_PER_TOKEN
+        and bucket <= 128
+    )
+    if small:
+        sort_block_m = 16
     tile_n = stage1.tile_n
     min_tile_n = 32 * stage1.num_waves
     while (
@@ -1001,7 +1012,7 @@ def _gfx942_config(config: MegaMoEConfig, a_dtype: str, model_dim: int) -> MegaM
     # device CU count (80 on MI308X).
     stage2 = replace(
         config.stage2,
-        block_m=32,
+        block_m=16 if small else 32,
         aligned_pair=False,
         pair_cu=0,
         bf16_lds=False,

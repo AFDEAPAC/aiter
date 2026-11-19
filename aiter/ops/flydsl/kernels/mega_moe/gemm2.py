@@ -127,7 +127,7 @@ def mma_cluster_k16(atom, bqf, a_frags, c_frags, sa, sb_words, num_acc_n, k_halv
             for i, sub, im in rows:
                 if (i, k) not in a_bf:
                     a_bf[(i, k)] = dequant_a_fp8_k16(
-                        Vec(a_frags[i][k].load()), sa[sub], 2 * k + im
+                        Vec(a_frags[i][k].load()), sa[sub], fx.Int32(2 * k) + im
                     )
                 k16_mma(atom, c_frags[i][J], a_bf[(i, k)], b_bf)
 
@@ -149,9 +149,9 @@ def mma_cluster_fp8(atom, bqf, a_frags, c_frags, sa, sb_words, sref, num_acc_n, 
         for k in range(k_halves):
             b8s = decode_b_fp4_fp8(Vec(bqf[J][k].load()), sb_words[mni], 2 * k + in_b, sref[J], r7=True)
             for i, sub, im in rows:
-                if (sub, k, im) not in row_scale:
-                    row_scale[(sub, k, im)] = row_step_scales(sa[sub], 2 * k + im)
-                rs = row_scale[(sub, k, im)]
+                if (i, k) not in row_scale:
+                    row_scale[(i, k)] = row_step_scales(sa[sub], fx.Int32(2 * k) + im)
+                rs = row_scale[(i, k)]
                 tmp = fx.make_rmem_tensor(4, Float32)
                 tmp.store(Vec.filled(4, 0.0, Float32))
                 fp8_mma_k32(atom, tmp, a_frags[i][k].load(), b8s)
@@ -348,6 +348,10 @@ def gemm2_compute_v2(
 
     s_aq_base = lds_base_i32
     k16 = a16wmix_use_k16()
+    if const_expr(k16 and is_bm16):
+        # Stage1 writes A scales in 32-row chunks (byte (row >> 4) & 1 per half); the
+        # gfx942 dequant takes that byte at run time, so a 16-row block reads its half.
+        rg_off = (m_row // fx.Int32(16)) & fx.Int32(1)
     a2_fp8 = w2_sref is not None
     if const_expr(a2_fp8):
         from ..moe_2stage_a16wmix.utils import fp8_elem_type
@@ -443,7 +447,7 @@ def gemm2_compute_v2(
 
     asc_per_mb = fx.Int32(kScaleSubBlocks) * kAS_per_chunk_dw * fx.Int32(4)
     asc_num = fx.Int64(i32_max_m_blocks) * fx.Int64(asc_per_mb)
-    scale_chunk0 = m_block_idx if const_expr(is_bm16) else m_row // 32
+    scale_chunk0 = m_block_idx if const_expr(is_bm16 and not k16) else m_row // 32
 
     def make_ascale_view(sub):
         base_dw = (scale_chunk0 + fx.Int32(sub)) * kAS_per_chunk_dw

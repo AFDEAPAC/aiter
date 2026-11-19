@@ -115,7 +115,7 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
                 ]
             else:
                 sb = b_scale.load_step(b_row, sp)
-                sa = a_scale.load_step(
+                sa = [] if pt is not None else a_scale.load_step(
                     a_scale_lds,
                     sp,
                 )
@@ -219,7 +219,7 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
             ]
         else:
             sb = b_scale.load_step(b_row, last)
-            sa = a_scale.load_step(
+            sa = [] if pt is not None else a_scale.load_step(
                 a_scale_lds,
                 last,
             )
@@ -261,7 +261,7 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
                 return a_s2r.load_operand(a_buf, mi, ks, _base)
 
             b = b_loader.load_step(b_row, sp)
-            sa = a_scale.load_step(a_scale_lds, sp)
+            sa = [] if pt is not None else a_scale.load_step(a_scale_lds, sp)
             sb = b_scale.load_step(b_row, sp)
             if const_expr(async_a_copy):
                 rocdl.sched_barrier(0)
@@ -408,7 +408,8 @@ def compile_gemm1(
     n_tiles = (2 * inter_dim) // tile_n
     m_repeat = sort_block_m // 16
     num_acc_n = n_per_wave // 16
-    assert num_acc_n % 2 == 0 and m_repeat % 2 == 0
+    # Paired 16-row A scales feed the scaled MFMA; per-token A has none, so SBM16 works.
+    assert num_acc_n % 2 == 0 and (m_repeat % 2 == 0 or a_per_token)
 
     a_k_step_bytes = tile_k // (2 if a_dtype == "fp4" else 1)
     out_row_bytes = inter_dim // (2 if out_dtype == "fp4" else 1)

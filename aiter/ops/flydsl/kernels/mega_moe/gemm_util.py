@@ -713,6 +713,9 @@ class MfmaScaleGU:
             self._deq[key] = hit
         return hit[2]
 
+    def _sa(self, sa, mi):
+        return None if const_expr(self._a_per_token) else sa[mi // _PACK]
+
     def set_tile_sref(self, sref):
         """Per-lane s_ref byte of each 16-column block of the current tile."""
         self._sref = sref
@@ -766,7 +769,7 @@ class MfmaScaleGU:
         for ksub in range_constexpr(_PACK):
             for mi in range_constexpr(self._m_repeat):
                 a_op = a_load(mi, ksub)
-                sa_v = sa[mi // _PACK]
+                sa_v = self._sa(sa, mi)
                 ia = mi % _PACK
                 for ni in range_constexpr(self._num_acc_n):
                     aidx = self.idx(mi, ni)
@@ -801,7 +804,7 @@ class MfmaScaleGU:
                         a_ops[mi][ksub],
                         b_prev[ni][ksub],
                         acc[aidx],
-                        sa[mi // _PACK],
+                        self._sa(sa, mi),
                         sb_v,
                         ksub,
                         mi % _PACK,
@@ -820,7 +823,7 @@ class MfmaScaleGU:
         nb = 0
         for mi in range_constexpr(self._m_repeat):
             ia = mi % _PACK
-            sa_v = sa[mi // _PACK]
+            sa_v = self._sa(sa, mi)
             for ksub in range_constexpr(_PACK):
                 a_op = a_load(mi, ksub)
                 tgt = ((g + 1) * nn) // ngrp
@@ -851,7 +854,7 @@ class MfmaScaleGU:
         self._deq = {}
         for mi in range_constexpr(self._m_repeat):
             ia = mi % _PACK
-            sa_v = sa[mi // _PACK]
+            sa_v = self._sa(sa, mi)
             for ksub in range_constexpr(_PACK):
                 a_op = a_load(mi, ksub)
                 for ni in range_constexpr(self._num_acc_n):
