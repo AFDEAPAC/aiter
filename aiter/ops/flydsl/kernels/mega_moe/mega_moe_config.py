@@ -1005,14 +1005,19 @@ def _gfx942_config(
         tile_n //= 2
     if _stage1_lds_bytes(sort_block_m, tile_n, model_dim) > GFX942_LDS_BYTES:
         sort_block_m = 32
+    # Measured on MI308X (EP4, V4.1 Flash): weight prefetch costs 2-3.5% of Stage1 at
+    # 32-128 tokens/rank and helps elsewhere; Stage2 block_n=128 is 3-10% faster at
+    # every size (more N blocks per CU).
     stage1 = replace(
-        stage1, sort_block_m=sort_block_m, tile_n=tile_n, async_a_copy=False
+        stage1, sort_block_m=sort_block_m, tile_n=tile_n, async_a_copy=False,
+        pipe_weights=stage1.pipe_weights and not 32 <= bucket <= 128,
     )
     # skew_cu must not exceed the launched CTA count, which Stage2 clamps to the
     # device CU count (80 on MI308X).
     stage2 = replace(
         config.stage2,
         block_m=16 if small else 32,
+        block_n=128,
         aligned_pair=False,
         pair_cu=0,
         bf16_lds=False,
