@@ -35,6 +35,12 @@ environment_variables: dict[str, tuple[Callable[[str], Any], str]] = {
     "AITER_MEGA_S1_FIXED_KPAIR": (_flag, "1"),
     # Compact dispatch producers keep two rows in flight.
     "AITER_MEGA_DISPATCH_FAST_COPY": (_flag, "1"),
+    # Record a per-workgroup Stage1 timeline (see trace.py). Read per Stage1
+    # compile and when an instance is built; off adds no code to the kernel.
+    "AITER_MEGA_S1_TRACE": (_flag, "0"),
+    # Debug timing only: Stage1 keeps dispatch and every readiness wait but
+    # skips the GEMM1 tile body (its output is garbage).
+    "AITER_MEGA_S1_TRACE_SKIP_GEMM": (_flag, "0"),
 }
 
 

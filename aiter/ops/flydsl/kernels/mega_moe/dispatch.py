@@ -12,6 +12,7 @@ from flydsl.expr.typing import T
 
 from .. import communication_ops_utils as comm_ops
 from ..tensor_shim import buf_copy_load, buf_copy_store, ptr_buf_tensor
+from . import trace
 
 
 class DispatchSlot(IntEnum):
@@ -68,6 +69,8 @@ class DispatchSlot(IntEnum):
     P2P_TILE_EXPECTED = 50
     FANOUT_PAIR_CONFIG = 51
     BLOCK_HIST = 52
+    TRACE_EVENTS = trace.TRACE_EVENTS_SLOT
+    TRACE_COUNT = trace.TRACE_COUNT_SLOT
 
 
 DISPATCH_TABLE_SIZE = max(DispatchSlot) + 1
@@ -1562,6 +1565,7 @@ def emit_dispatch_payload(
     tile_state_stride,
     indexed_payload=False,
     fast_copy,
+    trace_events=False,
 ):
 # fmt: on
     """Produce independently publishable expert payloads from a compact plan."""
@@ -1647,6 +1651,8 @@ def emit_dispatch_payload(
         ]
     fx.barrier()
     for task_index in range(task0, task_limit, task_stride):
+        if const_expr(trace_events):
+            task_t0 = trace.now()
         chunk_id = task_index // fx.Int32(segments_per_destination)
         rotated_segment = task_index - chunk_id * fx.Int32(
             segments_per_destination
@@ -1979,4 +1985,14 @@ def emit_dispatch_payload(
                         tile_state_stride=tile_state_stride,
                     )
                 _finish_task(chunk_done, segment, num_chunks)
+                if const_expr(trace_events):
+                    trace.record(
+                        addr_disp,
+                        fx.Int64(trace.KIND_TASK),
+                        task_t0,
+                        trace.now(),
+                        fx.Int64(segment)
+                        | (fx.Int64(chunk_id) << fx.Int64(16))
+                        | (fx.Int64(row_end - row_begin) << fx.Int64(32)),
+                    )
             fx.barrier()

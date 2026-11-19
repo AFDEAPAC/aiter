@@ -20,7 +20,7 @@ from ..tensor_shim import (
     buf_copy_load,
     ptr_buf_tensor,
 )
-from . import envs
+from . import envs, trace
 from .dispatch import (
     DispatchSlot,
     emit_direct_fixed_slot_finalize,
@@ -226,6 +226,8 @@ def compile_mega_moe_stage1(
     # prefill is slower with it (its 8-wave tiles already hide the latency).
     PAIR_K = fixed_slot_dispatch and async_a_copy and envs.AITER_MEGA_S1_FIXED_KPAIR
     EPI_EVEC = envs.AITER_MEGA_S1_EPI_EVEC
+    TRACE = envs.AITER_MEGA_S1_TRACE
+    SKIP_GEMM = envs.AITER_MEGA_S1_TRACE_SKIP_GEMM
     dispatch_path = "fixedslot" if fixed_slot_dispatch else "compact"
     swiglu_suffix = "" if swiglu_limit <= 0 else f"_sl{str(float(swiglu_limit)).replace('.', 'p')}"
     # Activation is baked into the epilogue, so it (and its baked beta/linear_beta)
@@ -277,6 +279,8 @@ def compile_mega_moe_stage1(
         # Kept in the name so a bounds-checked build never reuses a cached
         # unbounded kernel, or the reverse.
         f"{'_bc1' if bounds_check else ''}"
+        f"{'_trace' if TRACE else ''}"
+        f"{'_nogemm' if SKIP_GEMM else ''}"
     )
 
     @flyc.kernel(name=kernel_name, known_block_size=[TOTAL_THREADS, 1, 1])
@@ -288,6 +292,8 @@ def compile_mega_moe_stage1(
         addr_expected: fx.Int64,
     ):
         tid = fx.thread_idx.x
+        if const_expr(TRACE):
+            t_entry = trace.now()
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         a_buf = lds.pool
         a_scale_lds = lds.A_scale
@@ -443,6 +449,8 @@ def compile_mega_moe_stage1(
                     parity=payload_parity, expected=payload_expected,
                 )
             else:
+                if const_expr(TRACE):
+                    t_producer = trace.now()
                 if tid == fx.Int32(0):
                     comm_ops.wait_i32_until_equals(
                         a_pair_order_ready
@@ -475,7 +483,14 @@ def compile_mega_moe_stage1(
                     tile_state_stride=tile_state_stride,
                     indexed_payload=indexed_payload,
                     fast_copy=FAST_COPY,
+                    trace_events=TRACE,
                 )
+                if const_expr(TRACE):
+                    if tid == fx.Int32(0):
+                        trace.record(
+                            addr_disp, fx.Int64(trace.KIND_PRODUCER), t_producer,
+                            trace.now(), fx.Int64(producer_slot),
+                        )
         if const_expr(fixed_slot_dispatch):
             if is_owner:
                 emit_direct_fixed_slot_finalize(
@@ -559,6 +574,11 @@ def compile_mega_moe_stage1(
                 comm_ops.fence_system_acquire()
             else:
                 comm_ops.fence_agent_acquire()
+            if const_expr(TRACE):
+                trace.record(
+                    addr_disp, fx.Int64(trace.KIND_CTA), t_entry, trace.now(),
+                    is_producer.select(fx.Int64(1), fx.Int64(0)),
+                )
         fx.barrier()
 
         num_valid = nv_rsrc[fx.Int32(0)]
@@ -617,10 +637,26 @@ def compile_mega_moe_stage1(
                     elif not use_ready_order:
                         # Ready-order waits for the tile in the scheduler block.
                         if tid == fx.Int32(0):
+                            if const_expr(TRACE):
+                                t_wait = trace.now()
                             _wait_tile_payload(work)
+                            if const_expr(TRACE):
+                                trace.record(
+                                    addr_disp, fx.Int64(trace.KIND_WAIT), t_wait,
+                                    trace.now(), fx.Int64(work),
+                                )
                         fx.barrier()
                         comm_ops.fence_system_acquire()
-                    _do_scheduled_tile(work)
+                    if const_expr(TRACE):
+                        t_tile = trace.now()
+                    if const_expr(not SKIP_GEMM):
+                        _do_scheduled_tile(work)
+                    if const_expr(TRACE):
+                        if tid == fx.Int32(0):
+                            trace.record(
+                                addr_disp, fx.Int64(trace.KIND_TILE), t_tile,
+                                trace.now(), fx.Int64(work),
+                            )
 
         while consumer_active:
             if tid == fx.Int32(0):
@@ -672,6 +708,8 @@ def compile_mega_moe_stage1(
                     ready_slot = first_work // fx.Int32(N_TILES)
                     first_n_tile = first_work - ready_slot * fx.Int32(N_TILES)
                     if tid == fx.Int32(0):
+                        if const_expr(TRACE):
+                            t_wait = trace.now()
                         comm_ops.wait_i32_until_equals(
                             a_ready_tile_epoch
                             + fx.Int64(ready_slot) * fx.Int64(4),
@@ -685,6 +723,11 @@ def compile_mega_moe_stage1(
                             ready_m_tile * fx.Int32(N_TILES) + first_n_tile
                         )
                         _wait_tile_payload(scheduled_first)
+                        if const_expr(TRACE):
+                            trace.record(
+                                addr_disp, fx.Int64(trace.KIND_WAIT), t_wait,
+                                trace.now(), fx.Int64(scheduled_first),
+                            )
                         fx.ptr_store(
                             Vec.from_elements([scheduled_first], fx.Int32),
                             sched_scratch,

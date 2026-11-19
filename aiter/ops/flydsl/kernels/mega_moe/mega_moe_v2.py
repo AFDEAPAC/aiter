@@ -17,7 +17,7 @@ from ..flydsl_dispatch_combine_intranode_op import (
     FlyDSLDispatchCombineConfig,
     FlyDSLDispatchCombineIntraNodeOp,
 )
-from . import envs
+from . import envs, trace
 from .dispatch import DISPATCH_TABLE_SIZE, DispatchSlot
 from .mega_moe_config import (
     INDEXED_PAYLOAD_MIN_MTPR,
@@ -430,6 +430,15 @@ class MegaMoEV2:
         for slot, name in workspace_slots.items():
             table[slot] = workspace[name].data_ptr()
         table[DispatchSlot.TILE_INPUT_BASE] = self._s1_tile_input_base.data_ptr()
+        # Stage1 timeline (AITER_MEGA_S1_TRACE=1); placeholders keep the table complete.
+        trace_blocks = self._s1_num_cu * 33 + 1 if envs.AITER_MEGA_S1_TRACE else 1
+        trace_events = trace.MAX_EVENTS * trace.FIELDS if envs.AITER_MEGA_S1_TRACE else 1
+        self._s1_trace_events = torch.zeros(
+            trace_blocks * trace_events, dtype=torch.int64, device=self.dev
+        )
+        self._s1_trace_count = torch.zeros(trace_blocks, dtype=torch.int32, device=self.dev)
+        table[DispatchSlot.TRACE_EVENTS] = self._s1_trace_events.data_ptr()
+        table[DispatchSlot.TRACE_COUNT] = self._s1_trace_count.data_ptr()
         if any(pointer == 0 for pointer in table):
             raise RuntimeError("incomplete MegaMoE dispatch table")
         self._s1_disp = torch.tensor(table, dtype=torch.int64, device=self.dev)
@@ -706,6 +715,18 @@ class MegaMoEV2:
             )
         self._s1_active_tile_m = config.sort_block_m
         return self._s1_active_tile_m
+
+    def read_stage1_trace(self):
+        """Events of the Stage1 launches since the last call, as
+        ``{block: int64 tensor [n, 4]}`` of ``(kind, t0, t1, info)``; then clears them."""
+        counts = self._s1_trace_count.cpu().clamp(max=trace.MAX_EVENTS)
+        events = self._s1_trace_events.view(-1, trace.MAX_EVENTS, trace.FIELDS).cpu()
+        self._s1_trace_count.zero_()
+        return {
+            block: events[block, :count].clone()
+            for block, count in enumerate(counts.tolist())
+            if count
+        }
 
     def quantize(self, x_bf16):
         if x_bf16.shape[0] == 0:
