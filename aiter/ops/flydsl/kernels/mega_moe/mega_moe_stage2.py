@@ -22,6 +22,7 @@ from ..tensor_shim import (
     ptr_buf_tensor,
 )
 
+from .gemm_util import a2_fp8_enabled
 from .gemm2 import (
     _resolve_g2_knobs,
     _spart_output_tile_index,
@@ -369,6 +370,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         buf: fx.Array[Int8, lds_bytes, 16]
 
     dispatch_path = "fixedslot" if fixed_slot_dispatch else "compact"
+    A2_FP8 = a2_fp8_enabled() and is_f8
     kernel_name = (
         f"megamoe_stage2_{dispatch_path}_t{BM}x{BN}x{BK}"
         f"_sbm{SBM}_{a_dtype}_nt{int(use_nt)}"
@@ -379,6 +381,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         f"_bf16lds{int(g2_bf16_lds)}_{p2p_quant_type}"
         f"_rps{int(runtime_pair_skip)}_rtv3{int(runtime_pair_skip)}"
         f"_sv{scatter_vec}_tb2_rsm1"
+        f"{'_a2f8' if A2_FP8 else ''}"
     )
 
     # fmt: off
@@ -388,7 +391,8 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         arg_sweights: fx.Int64, arg_trb: fx.Int64, arg_expert_tile_end: fx.Int64,
         arg_count_matrix: fx.Int64, arg_pair_config: fx.Int64, arg_parity: fx.Int64,
         arg_p2p_comb_inp: fx.Int64, i32_max_m_blocks: fx.Int32,
-        i32_inter: fx.Int32, i32_hidden: fx.Int32, i32_kpad: fx.Int32, i32_npad: fx.Int32):
+        i32_inter: fx.Int32, i32_hidden: fx.Int32, i32_kpad: fx.Int32, i32_npad: fx.Int32,
+        arg_w2_sref: fx.Int64):
     # fmt: on
         tx_i32 = fx.thread_idx.x
         bx_i32 = fx.block_idx.x
@@ -507,7 +511,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                 i32_kpad, i32_npad, BM=BM, BN=BN, BK=BK, use_nt=use_nt, INTER_MAX=INTER_MAX, aStages=aStages,
                 a_dtype=a_dtype, has_pad=has_pad, SBM=SBM, g2_bhoist=g2_bhoist, g2_b2stage=g2_b2stage,
                 g2_ascale_pf=g2_ascale_pf, g2_deep_a_pipeline=g2_deep_a_pipeline,
-                expert_offset=_expert_offset)
+                expert_offset=_expert_offset, w2_sref=arg_w2_sref if A2_FP8 else None)
             p2p_scatter_epilog(lds_base_i32, accm_vecs, n_block_idx, wave, lane, N_OUT=N_OUT,
                 BM=BM, BN=BN, npes=npes, topk=topk,
                 log2_max_tok=log2_max_tok, mask_max_tok=mask_max_tok, recv_cap=_recv_cap,
@@ -623,7 +627,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         arg_count_matrix: fx.Int64, arg_pair_config: fx.Int64, arg_parity: fx.Int64,
         arg_p2p_comb_inp: fx.Int64, i32_max_m_blocks: fx.Int32,
         i32_grid_blocks: fx.Int32, i32_inter: fx.Int32, i32_hidden: fx.Int32, i32_kpad: fx.Int32,
-        i32_npad: fx.Int32, stream: fx.Stream):
+        i32_npad: fx.Int32, arg_w2_sref: fx.Int64, stream: fx.Stream):
     # fmt: on
         num_n_blocks = fx.Int32(i32_hidden) // fx.Int32(BN)
         grid_x = i32_grid_blocks * num_n_blocks
@@ -632,7 +636,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
             arg_stids, arg_sweights, arg_trb, arg_expert_tile_end, arg_count_matrix,
             arg_pair_config, arg_parity,
             arg_p2p_comb_inp, i32_max_m_blocks, i32_inter,
-            i32_hidden, i32_kpad, i32_npad,
+            i32_hidden, i32_kpad, i32_npad, arg_w2_sref,
         ).launch(grid=(grid_x, 1, 1), block=(256, 1, 1), stream=stream)
 
     return launch
@@ -660,7 +664,7 @@ def run_mega_moe_stage2(arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, arg_cu
     HIDDEN_MAX, INTER_MAX, cu_num, BN=256, BK=256, use_nt=True, g2_bhoist=True, g2_b2stage=False,
     g2_ascale_pf=True, g2_spart=402, g2_deep_a_pipeline=False, persist=False, persist_cu=0, persist_strided=False,
     g2_bf16_lds=False, p2p_quant_type="none", fixed_slot_dispatch=False, skew_cu=0,
-    runtime_pair_skip=False, scatter_vec=8, a_dtype="fp8"):
+    runtime_pair_skip=False, scatter_vec=8, a_dtype="fp8", w2_sref_ptr=0):
     # fmt: on
     """Compile or reuse one fused Stage2 configuration and launch it."""
     launch_cu_num = min(cu_num, persist_cu) if persist and persist_cu > 0 else cu_num
@@ -682,7 +686,8 @@ def run_mega_moe_stage2(arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, arg_cu
         launch, arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, arg_cumsum,
         arg_max_expert_tiles, arg_stids, arg_sweights, arg_trb, arg_expert_tile_end,
         arg_count_matrix, arg_pair_config, arg_parity, arg_p2p, fx.Int32(max_m_blocks),
-        fx.Int32(grid_blocks), fx.Int32(i32_inter), fx.Int32(i32_hidden), fx.Int32(0), fx.Int32(0), stream,
+        fx.Int32(grid_blocks), fx.Int32(i32_inter), fx.Int32(i32_hidden), fx.Int32(0), fx.Int32(0),
+        fx.Int64(w2_sref_ptr), stream,
     )
 
 
@@ -695,7 +700,7 @@ def preload_mega_moe_stage2(arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, ar
     HIDDEN_MAX, INTER_MAX, cu_num, BN=256, BK=256, use_nt=True, g2_bhoist=True, g2_b2stage=False,
     g2_ascale_pf=True, g2_spart=402, g2_deep_a_pipeline=False, persist=False, persist_cu=0, persist_strided=False,
     g2_bf16_lds=False, p2p_quant_type="none", fixed_slot_dispatch=False, skew_cu=0,
-    runtime_pair_skip=False, scatter_vec=8, a_dtype="fp8"):
+    runtime_pair_skip=False, scatter_vec=8, a_dtype="fp8", w2_sref_ptr=0):
 # fmt: on
     """Compile and load one fused Stage2 variant without dispatching it."""
     launch_cu_num = min(cu_num, persist_cu) if persist and persist_cu > 0 else cu_num
@@ -718,5 +723,6 @@ def preload_mega_moe_stage2(arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, ar
         arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, arg_cumsum,
         arg_max_expert_tiles, arg_stids, arg_sweights, arg_trb, arg_expert_tile_end,
         arg_count_matrix, arg_pair_config, arg_parity, arg_p2p, fx.Int32(max_m_blocks),
-        fx.Int32(grid_blocks), fx.Int32(i32_inter), fx.Int32(i32_hidden), fx.Int32(0), fx.Int32(0), stream,
+        fx.Int32(grid_blocks), fx.Int32(i32_inter), fx.Int32(i32_hidden), fx.Int32(0), fx.Int32(0),
+        fx.Int64(w2_sref_ptr), stream,
     )

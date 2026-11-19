@@ -28,7 +28,7 @@ from .dispatch import (
     emit_dispatch_payload,
 )
 from .gemm1 import _LdsF32View, build_fused_gemm1
-from .gemm_util import a_per_token_enabled
+from .gemm_util import a2_fp8_enabled, a_per_token_enabled
 from .mega_moe_config import (
     FIXED_GRID_MULT_VALUES,
     INDEXED_PAYLOAD_MIN_MTPR,
@@ -230,6 +230,7 @@ def compile_mega_moe_stage1(
     TRACE = envs.AITER_MEGA_S1_TRACE
     SKIP_GEMM = envs.AITER_MEGA_S1_TRACE_SKIP_GEMM
     A_PER_TOKEN = a_per_token_enabled()
+    EPI_EXP128 = a2_fp8_enabled()
     dispatch_path = "fixedslot" if fixed_slot_dispatch else "compact"
     swiglu_suffix = "" if swiglu_limit <= 0 else f"_sl{str(float(swiglu_limit)).replace('.', 'p')}"
     # Activation is baked into the epilogue, so it (and its baked beta/linear_beta)
@@ -284,6 +285,7 @@ def compile_mega_moe_stage1(
         f"{'_trace' if TRACE else ''}"
         f"{'_nogemm' if SKIP_GEMM else ''}"
         f"{'_apt' if A_PER_TOKEN else ''}"
+        f"{'_e128' if EPI_EXP128 else ''}"
     )
 
     @flyc.kernel(name=kernel_name, known_block_size=[TOTAL_THREADS, 1, 1])
@@ -565,6 +567,7 @@ def compile_mega_moe_stage1(
             a_per_token=A_PER_TOKEN,
             sref_rsrc=ptr_buf_tensor(_disp_ptr(DispatchSlot.W1_SREF), fx.Uint8) if A_PER_TOKEN else None,
             token_scale_rsrc=ptr_buf_tensor(fx.get_iter(scale_x), fx.Int32) if A_PER_TOKEN else None,
+            epi_exp128=EPI_EXP128,
         )
 
         if tid == fx.Int32(0):

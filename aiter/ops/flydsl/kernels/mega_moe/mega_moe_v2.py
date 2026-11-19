@@ -19,7 +19,12 @@ from ..flydsl_dispatch_combine_intranode_op import (
 )
 from . import envs, trace
 from .dispatch import DISPATCH_TABLE_SIZE, DispatchSlot
-from .gemm_util import a_per_token_enabled
+from .gemm_util import (
+    MAX_NEG_RESIDUAL_W1,
+    MAX_NEG_RESIDUAL_W2,
+    a2_fp8_enabled,
+    a_per_token_enabled,
+)
 from .mega_moe_config import (
     INDEXED_PAYLOAD_MIN_MTPR,
     INDEXED_PAYLOAD_MIN_SBM,
@@ -34,6 +39,21 @@ from .quant import per_1x32_mx_quant
 __all__ = ["MegaMoEV2"]
 
 
+def sref_u8_checked(scale_u8, *, experts, n_out, k_groups, shuffle_fn, max_neg_residual):
+    """a16wmix ``compute_sref_u8``, refusing residuals deeper than the decode covers."""
+    from aiter.ops.flydsl.a16wmix_fp8_prep import check_residual_range, compute_sref_u8
+
+    kw = dict(experts=experts, n_out=n_out, k_groups=k_groups, shuffle_fn=shuffle_fn)
+    sref = compute_sref_u8(scale_u8, **kw)
+    worst = check_residual_range(scale_u8, sref, **kw)
+    if worst > max_neg_residual:
+        raise ValueError(
+            f"e8m0 residual reaches -{worst}, past -{max_neg_residual}, the deepest the "
+            f"MegaMoE fp8 B decode is exact for; these weights need the bf16 GEMM path."
+        )
+    return sref
+
+
 def w1_sref_kernel_order(w1_scale_u8, experts, inter_dim, model_dim):
     """Per-(local expert, GEMM1 kernel row) largest E8M0 byte, ``[experts, 2 * inter_dim]`` uint8.
 
@@ -41,12 +61,12 @@ def w1_sref_kernel_order(w1_scale_u8, experts, inter_dim, model_dim):
     reads. Kernel rows follow ``shuffle_weight_a16w4(..., gate_up=True)``: 16-row gate
     and up blocks interleave, so kernel row R is logical row
     ``(R // 16 % 2) * inter_dim + (R // 32) * 16 + R % 16``."""
-    from aiter.ops.flydsl.a16wmix_fp8_prep import get_sref_u8
     from aiter.ops.shuffle import shuffle_scale_a16w4
 
-    sref = get_sref_u8(
+    sref = sref_u8_checked(
         w1_scale_u8, experts=experts, n_out=2 * inter_dim, k_groups=model_dim // 32,
         shuffle_fn=lambda t, e: shuffle_scale_a16w4(t, e, True),
+        max_neg_residual=MAX_NEG_RESIDUAL_W1,
     )
     r = torch.arange(2 * inter_dim, device=sref.device)
     logical = (r // 16 % 2) * inter_dim + (r // 32) * 16 + r % 16
@@ -103,6 +123,9 @@ class MegaMoEV2:
         # gfx942: per-token FP8 A and FP8 MFMA in GEMM1 (AITER_MEGA_GFX942_A_PER_TOKEN).
         self._a_per_token = self._a_dtype == "fp8" and a_per_token_enabled()
         self._w1_sref_cache = {}
+        # gfx942: GEMM2 on FP8 MFMA (AITER_MEGA_GFX942_A2_FP8).
+        self._a2_fp8 = self._a_dtype == "fp8" and a2_fp8_enabled()
+        self._w2_sref_cache = {}
         self.swiglu_limit = float(swiglu_limit)
         self.act = act
         self.situ_beta = float(situ_beta)
@@ -771,6 +794,25 @@ class MegaMoEV2:
             self._w1_sref_cache[key] = hit
         return hit[1]
 
+    def _w2_sref(self):
+        """Per-(local expert, output column) largest W2 E8M0 byte; W2 rows keep their
+        logical order in shuffle_weight_a16w4(..., gate_up=False)."""
+        from aiter.ops.shuffle import shuffle_scale_a16w4
+
+        scale = self.w2_scale
+        key = (scale.data_ptr(), tuple(scale.shape))
+        hit = self._w2_sref_cache.get(key)
+        if hit is None:
+            sref = sref_u8_checked(
+                scale.view(torch.uint8), experts=self.epr, n_out=self.model_dim,
+                k_groups=self.inter_dim // 32,
+                shuffle_fn=lambda t, e: shuffle_scale_a16w4(t, e, False),
+                max_neg_residual=MAX_NEG_RESIDUAL_W2,
+            )
+            hit = (scale, sref)
+            self._w2_sref_cache[key] = hit
+        return hit[1]
+
     def read_stage1_trace(self):
         """Events of the Stage1 launches since the last call, as
         ``{block: int64 tensor [n, 4]}`` of ``(kind, t0, t1, info)``; then clears them."""
@@ -1020,6 +1062,7 @@ class MegaMoEV2:
             g2_bf16_lds=stage2.bf16_lds,
             runtime_pair_skip=runtime_pair_skip,
             scatter_vec=scatter_vec,
+            w2_sref_ptr=self._w2_sref().data_ptr() if self._a2_fp8 else 0,
             **self._g2_invariants_by_quant[config.p2p_quant],
         )
 

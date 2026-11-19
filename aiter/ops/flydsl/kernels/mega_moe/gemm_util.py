@@ -4,12 +4,14 @@
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 from ..act import situ_mul, tanh_via_sigmoid_f32
 from ..moe_2stage_a16wmix.utils import (
+    _FP8_SWAR_HI_BASE,
+    _FP8_SWAR_LO_BASE,
     _e8m0_byte_raw,
     _e8m0_byte_to_f32,
     _fp4_nibble_to_bf16x8_lut,
@@ -18,6 +20,7 @@ from ..moe_2stage_a16wmix.utils import (
     a16wmix_use_k16,
     fp8_elem_type,
 )
+from ..tensor_shim import _to_raw as _raw
 from ..tensor_shim import buf_copy_load, buf_copy_store, ptr_buf_tensor
 from . import envs
 
@@ -74,13 +77,53 @@ def a_per_token_enabled():
     return a16wmix_use_k16() and envs.AITER_MEGA_GFX942_A_PER_TOKEN
 
 
-def decode_b_fp4_fp8(b_i32x4, sb_word, sb_byte, sref_i32):
+def a2_fp8_enabled():
+    """gfx942 GEMM2 on FP8 MFMA with a shared exponent per 128-K step of A."""
+    return a16wmix_use_k16() and envs.AITER_MEGA_GFX942_A2_FP8
+
+
+def row_step_scales(sa_word, byte_sel):
+    """2^e of the A rows this lane's accumulator holds (rows 4 * (lane // 16) + ii).
+
+    ``sa_word`` holds, in lane (g, r), the scale bytes of A-operand row r; the rows
+    of the accumulator are fetched from lanes 0..15 with ds_bpermute."""
+    lane = fx.thread_idx.x % 64
+    base = (lane // fx.Int32(16)) * fx.Int32(4)
+    out = []
+    for ii in range_constexpr(4):
+        w = fx.Int32(fx.rocdl.ds_bpermute(T.i32, (base + fx.Int32(ii)) * fx.Int32(4), fx.Int32(sa_word)))
+        out.append(_e8m0_byte_to_f32(w, fx.Int32(byte_sel)))
+    return out
+
+
+# Under EP the W2 column maximum spans the whole inter dim, and the V4.1 Flash
+# checkpoint has one group at r = -7 (layer 39), one past the a16wmix tables.
+# W1 stays within -6, and GEMM1 keeps the cheaper a16wmix decode.
+MAX_NEG_RESIDUAL_W1 = 6
+MAX_NEG_RESIDUAL_W2 = 7
+
+
+def _fp8_table_select_r7(neg_r):
+    """a16wmix ``_fp8_table_select`` extended to r = -7 on e4m3fnuz: there the 0.5
+    magnitude is the subnormal 0x04 (the SWAR subtract leaves 0x00); every other
+    byte still follows the subtract."""
+    t = fx.Int32(arith.minsi(_raw(fx.Int32(neg_r)), _raw(fx.Int32(MAX_NEG_RESIDUAL_W2))))
+    t = fx.Int32(arith.maxsi(_raw(t), _raw(fx.Int32(0))))
+    sub = t * fx.Int32(0x08080808)
+    lo = ((fx.Int32(_FP8_SWAR_LO_BASE) - sub) & fx.Int32(0xFFFFFF00)) | fx.Int32(0x01)
+    lo = lo | ((t & (t >> fx.Int32(1)) & (t >> fx.Int32(2)) & fx.Int32(1)) << fx.Int32(10))
+    hi = fx.Int32(_FP8_SWAR_HI_BASE) - sub
+    return lo, hi
+
+
+def decode_b_fp4_fp8(b_i32x4, sb_word, sb_byte, sref_i32, r7=False):
     """B operand of one 128-K step -> 4 x v8 e4m3fnuz with 2^(s - s_ref) folded in.
 
     s_ref is the column's largest E8M0 exponent, so the residual is <= 0; the
-    epilogue multiplies the accumulator by 2^s_ref (a16wmix FP8 stage1 scheme)."""
+    epilogue multiplies the accumulator by 2^s_ref (a16wmix FP8 stage1 scheme).
+    ``r7`` decodes residuals down to -7 instead of -6."""
     neg_r = fx.Int32(sref_i32) - _e8m0_byte_raw(fx.Int32(sb_word), fx.Int32(sb_byte))
-    tab_lo, tab_hi = _fp8_table_select(neg_r)
+    tab_lo, tab_hi = _fp8_table_select_r7(neg_r) if r7 else _fp8_table_select(neg_r)
     b_vec = Vec(b_i32x4)
     return [_fp4_nibble_to_fp8x8_vec(fx.Int32(b_vec[j]), tab_lo, tab_hi) for j in range_constexpr(4)]
 
@@ -852,7 +895,8 @@ class SiluQuantEpilogue:
     # fmt: off
     def __init__(self, *, out_rsrc, out_scale_rsrc, sorted_rsrc, tokens, inter_dim, m_repeat, num_acc_n,
         sort_block_m, tile_n, num_waves, lds_out, evec, swiglu_limit=0.0, always_valid=False,
-        out_tensor=None, out_dtype="fp8", act="silu", situ_beta=1.0, situ_linear_beta=1.0):
+        out_tensor=None, out_dtype="fp8", act="silu", situ_beta=1.0, situ_linear_beta=1.0,
+        shared_exp128=False):
     # fmt: on
         self._out_rsrc = out_rsrc
         self._out_scale_rsrc = out_scale_rsrc
@@ -890,6 +934,11 @@ class SiluQuantEpilogue:
         self._evec = 2 if self._is_fp4 else evec
         self._lane = fx.thread_idx.x % 64
         self._sorted_scale_cols_i32 = (inter_dim // 32 + 7) // 8 * 8
+        # GEMM2 FP8 needs one exponent per 128 columns (16 lanes of 8 in the vec8 store).
+        # A compile parameter, not an env read here: FlyDSL keys its kernel cache on
+        # source plus captured scalars, so a trace-time env read would hit stale code.
+        self._shared_exp128 = bool(shared_exp128) and not self._is_fp4
+        assert not (self._shared_exp128 and self._evec != 8), "shared 128-column exponent needs evec=8"
 
     def _silu(self, g):
         emu = (g * fx.Float32(-1.4426950408889634)).exp2()
@@ -1095,6 +1144,7 @@ class SiluQuantEpilogue:
         EVEC = 8
         NLANE = cs_tile_n // EVEC
         assert 64 % NLANE == 0 and NLANE * EVEC == cs_tile_n
+        assert not self._shared_exp128 or NLANE % 16 == 0
         tx = fx.thread_idx.x
         c64 = fx.Int32(64)
         n32 = fx.Int32(self._sorted_scale_cols_i32 * 32)
@@ -1122,7 +1172,7 @@ class SiluQuantEpilogue:
             f32_iter = fx.recast_iter(fx.Float32, fx.add_offset(cptr, fx.make_int_tuple(idx)))
             frag = fx.make_view(f32_iter, fx.make_layout(EVEC, 1)).load()
             vals = [frag[i] for i in range_constexpr(EVEC)]
-            m = _group_absmax(vals, (1, 2), c64)
+            m = _group_absmax(vals, (1, 2, 4, 8) if self._shared_exp128 else (1, 2), c64)
             e8m0_v, quant_scale = _e8m0_scale(m)
             words = []
             for w in range_constexpr(2):

@@ -31,7 +31,7 @@ def fp8_dtype():
     return torch.float8_e4m3fnuz if "gfx94" in arch else torch.float8_e4m3fn
 
 
-def stage2_reference(moe, w2_q, w2_scale, bs):
+def stage2_reference(moe, w2_q, w2_scale, bs, deep_residual=False):
     op = moe._s1_op
     sbm = int(moe._s1_active_tile_m)
     num_valid = int(op.num_valid[0].item())
@@ -56,9 +56,32 @@ def stage2_reference(moe, w2_q, w2_scale, bs):
     for e in torch.unique(expert[valid]).tolist():
         sel = valid & (expert == e)
         w2 = t._dequant_expert(w2_q[e], w2_scale[e], d, inter)
+        if deep_residual:
+            # The FP8 decode maps FP4 +-0 to +-2^-10 * 2^(s_ref - 127), not 0: at
+            # residual -7 that is a quarter of the smallest nonzero magnitude.
+            s = w2_scale[e].contiguous().view(torch.uint8)
+            col = fp4_utils.e8m0_to_f32(s.amax(dim=-1, keepdim=True).view(dtypes.fp8_e8m0)).float()
+            sign = torch.where(torch.signbit(w2), -1.0, 1.0)
+            w2 = torch.where(w2 == 0, sign * (2.0 ** -10) * col, w2)
         out.index_add_(0, key[sel], (a[sel] @ w2.T) * weight[sel, None])
     dist.all_reduce(out)
     return out[moe.rank * moe.mtpr: moe.rank * moe.mtpr + bs]
+
+
+def deepen_w2_residual(w2_q, w2_ref_scale, epr):
+    """Every W2 group sits exactly at residual -7 from its column maximum: all groups
+    share the row's E8M0 byte S except group 0, raised to S + 7 with its FP4 zeroed,
+    so every contributing weight goes through the r = -7 decode."""
+    from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight_a16w4
+
+    s = w2_ref_scale.view(torch.uint8)
+    row_max = s.amax(dim=-1, keepdim=True).clamp(max=247)
+    s.copy_(row_max.expand_as(s))
+    s[..., 0] = row_max[..., 0] + 7
+    w2_q.view(torch.uint8)[..., :16] = 0
+    w2 = shuffle_weight_a16w4(w2_q, 16, False).contiguous()
+    w2s = shuffle_scale_a16w4(w2_ref_scale.reshape(-1, s.shape[-1]), epr, False).contiguous()
+    return w2, w2s
 
 
 def main():
@@ -67,6 +90,8 @@ def main():
     p.add_argument("--bs-list", default="128,512")
     p.add_argument("--max-tok-per-rank", type=int, default=8192)
     p.add_argument("--rtol", type=float, default=0.01)
+    p.add_argument("--deep-residual", action="store_true",
+                   help="W2 groups at E8M0 residual -7 (the deepest the FP8 decode covers)")
     args = p.parse_args()
     rank, world, device = t._setup_dist()
     failed = 0
@@ -75,6 +100,8 @@ def main():
         epr = net["experts"] // world
         w1, w1s, w2, w2s, _, _, w2_q, w2_ref_scale = t._quantize_weights(
             net["model_dim"], net["inter_dim"], epr, rank, 123, device)
+        if args.deep_residual:
+            w2, w2s = deepen_w2_residual(w2_q, w2_ref_scale, epr)
         bss = [int(v) for v in args.bs_list.split(",")]
         x_all, wts_all, ids_all = t._make_inputs(
             max(bss), net["model_dim"], net["experts"], net["topk"], rank, 123, device,
@@ -86,7 +113,7 @@ def main():
             out = moe(x, wts, ids)[:bs].float()
             torch.cuda.synchronize()
             t._barrier()
-            ref = stage2_reference(moe, w2_q, w2_ref_scale, bs)
+            ref = stage2_reference(moe, w2_q, w2_ref_scale, bs, args.deep_residual)
             rel = t._rel_l2(out, ref)
             ok = 0 <= rel < args.rtol
             failed += not ok
@@ -94,19 +121,21 @@ def main():
                 print(f"[GEMM2] {'PASS' if ok else 'FAIL'} bs={bs} relL2={rel:.6f} "
                       f"SBM={moe._s1_active_tile_m} G2_BM={moe._g2_active_block_m}", flush=True)
         # Negative control: Stage2 alone on the same intermediate with W2 scales
-        # rolled by one K group must miss the reference.
-        saved = moe.w2_scale
-        moe.w2_scale = torch.roll(saved.view(torch.uint8), 1, dims=-1).contiguous().view(saved.dtype)
-        out = moe._run_stage2(bs, None, True, moe._active_config).float()
-        torch.cuda.synchronize()
-        t._barrier()
-        moe.w2_scale = saved
-        rel = t._rel_l2(out, ref)
-        neg_ok = rel > 10 * args.rtol
-        failed += not neg_ok
-        if rank == 0:
-            print(f"[GEMM2] negative control (W2 scales rolled): relL2={rel:.6f} "
-                  f"{'detected (PASS)' if neg_ok else 'NOT detected (FAIL)'}", flush=True)
+        # rolled by one K group must miss the reference. Skipped for --deep-residual,
+        # where a roll pushes residuals past the decode's range and is refused.
+        if not args.deep_residual:
+            saved = moe.w2_scale
+            moe.w2_scale = torch.roll(saved.view(torch.uint8), 1, dims=-1).contiguous().view(saved.dtype)
+            out = moe._run_stage2(bs, None, True, moe._active_config).float()
+            torch.cuda.synchronize()
+            t._barrier()
+            moe.w2_scale = saved
+            rel = t._rel_l2(out, ref)
+            neg_ok = rel > 10 * args.rtol
+            failed += not neg_ok
+            if rank == 0:
+                print(f"[GEMM2] negative control (W2 scales rolled): relL2={rel:.6f} "
+                      f"{'detected (PASS)' if neg_ok else 'NOT detected (FAIL)'}", flush=True)
     finally:
         t._cleanup()
     sys.exit(1 if failed else 0)

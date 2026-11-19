@@ -28,7 +28,14 @@ from ..mxfp4_gemm_common import (
 )
 from ..moe_2stage_a16wmix.utils import a16wmix_use_k16
 from ..tensor_shim import buf_copy_load, ptr_buf_tensor
-from .gemm_util import dequant_a_fp8_k16, dequant_b_fp4_k16, k16_mma
+from .gemm_util import (
+    decode_b_fp4_fp8,
+    dequant_a_fp8_k16,
+    dequant_b_fp4_k16,
+    fp8_mma_k32,
+    k16_mma,
+    row_step_scales,
+)
 
 
 def scale_view(
@@ -123,6 +130,34 @@ def mma_cluster_k16(atom, bqf, a_frags, c_frags, sa, sb_words, num_acc_n, k_halv
                         Vec(a_frags[i][k].load()), sa[sub], 2 * k + im
                     )
                 k16_mma(atom, c_frags[i][J], a_bf[(i, k)], b_bf)
+
+
+def mma_cluster_fp8(atom, bqf, a_frags, c_frags, sa, sb_words, sref, num_acc_n, k_halves,
+                    single_rg, rg_off, scale_sub_blocks):
+    """gfx942 FP8 form of the GEMM2 cluster: each 128-K step runs 4 FP8 MFMAs into a
+    step accumulator that is scaled by its rows' shared exponent (one per 128 K, see
+    SiluQuantEpilogue) before it is added; B carries 2^(s - s_ref)."""
+    if single_rg:
+        rows = ((0, 0, rg_off),)
+    else:
+        rows = tuple(
+            (2 * sub + im, sub, im) for sub in range(scale_sub_blocks) for im in range(2)
+        )
+    row_scale = {}
+    for J in range(num_acc_n):
+        mni, in_b = J // 2, J % 2
+        for k in range(k_halves):
+            b8s = decode_b_fp4_fp8(Vec(bqf[J][k].load()), sb_words[mni], 2 * k + in_b, sref[J], r7=True)
+            for i, sub, im in rows:
+                if (sub, k, im) not in row_scale:
+                    row_scale[(sub, k, im)] = row_step_scales(sa[sub], 2 * k + im)
+                rs = row_scale[(sub, k, im)]
+                tmp = fx.make_rmem_tensor(4, Float32)
+                tmp.store(Vec.filled(4, 0.0, Float32))
+                fp8_mma_k32(atom, tmp, a_frags[i][k].load(), b8s)
+                t = Vec(tmp.load())
+                c = Vec(c_frags[i][J].load())
+                c_frags[i][J].store(Vec.from_elements([c[ii] + t[ii] * rs[ii] for ii in range(4)], Float32))
 
 
 def issue_a_load_lds_dt(
@@ -243,6 +278,7 @@ def gemm2_compute_v2(
     explicit_m_row=None,
     explicit_n_block=None,
     explicit_expert=None,
+    w2_sref=None,
 ):
     """Run GEMM2, optionally using an explicitly selected expert row/tile."""
     assert aStages == (4 if g2_deep_a_pipeline else kStages + 1)
@@ -312,6 +348,17 @@ def gemm2_compute_v2(
 
     s_aq_base = lds_base_i32
     k16 = a16wmix_use_k16()
+    a2_fp8 = w2_sref is not None
+    if const_expr(a2_fp8):
+        from ..moe_2stage_a16wmix.utils import fp8_elem_type
+
+        fp8_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, fp8_elem_type()))
+        sref_buf = ptr_buf_tensor(w2_sref, fx.Uint8)
+        sref = [
+            fx.Int32(sref_buf[e * N_OUT_rt + n_block_idx * BN + wave * (BN // 4) + j * 16 + lane % 16])
+            & fx.Int32(0xFF)
+            for j in range_constexpr(numAccN)
+        ]
     if const_expr(k16):
         assert is_f8_a, "gfx942 MegaMoE supports a8w4 only"
         k16_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
@@ -534,6 +581,12 @@ def gemm2_compute_v2(
             shift_scale_word(Vec(bsf[mni].load())[0], kt_rt)
             for mni in range_constexpr(nPairs)
         ]
+        if const_expr(a2_fp8):
+            mma_cluster_fp8(
+                fp8_atom, bqf, a_frags, c_frags, sa, sb_words, sref, numAccN, kHalves,
+                is_bm16, rg_off, kScaleSubBlocks,
+            )
+            return
         if const_expr(k16):
             mma_cluster_k16(
                 k16_atom, bqf, a_frags, c_frags, sa, sb_words, numAccN, kHalves,
@@ -757,6 +810,12 @@ def gemm2_compute_v2(
         store_carry(results)
 
     # Load the C fragments (fp8/fp4 unified onto the same fx.gemm path) and hand them to the epilog.
+    if const_expr(a2_fp8):
+        for J in range_constexpr(numAccN):
+            col_scale = (sref[J] << fx.Int32(23)).bitcast(Float32)
+            for i in range_constexpr(kMChunks):
+                c = Vec(c_frags[i][J].load())
+                c_frags[i][J].store(Vec.from_elements([c[ii] * col_scale for ii in range(4)], Float32))
     accm_vecs = [
         [c_frags[i][J].load() for J in range(numAccN)] for i in range(kMChunks)
     ]

@@ -21,6 +21,7 @@ from .gemm_util import (
     MfmaScaleGU,
     SiluQuantEpilogue,
     TileScheduler,
+    a2_fp8_enabled,
     scale_acc_per_token,
     wait_lds_barrier,
 )
@@ -55,7 +56,8 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
     if const_expr(pt is not None):
         lane16 = fx.thread_idx.x % fx.Int32(16)
         mfma.set_tile_sref([
-            fx.Int32(pt[0][b_row + fx.Int32(ni * 16) + lane16]) for ni in range_constexpr(NUM_ACC_N)
+            fx.Int32(pt[0][b_row + fx.Int32(ni * 16) + lane16]) & fx.Int32(0xFF)
+            for ni in range_constexpr(NUM_ACC_N)
         ])
     if const_expr(pipe_weights):
         if const_expr(async_a_copy):
@@ -303,7 +305,7 @@ def build_fused_gemm1(*, x_tensor, w_rsrc, sw_rsrc, sx_rsrc,
     use_tile_resource, indirect_input, indexed_input=False, row_map_rsrc=None,
     source_rows=0, a_dtype="fp8", out_dtype="fp8", swiglu_limit=0.0, pair_k=False, evec,
     act="silu", situ_beta=1.0, situ_linear_beta=1.0, a_per_token=False, sref_rsrc=None,
-    token_scale_rsrc=None):
+    token_scale_rsrc=None, epi_exp128=False):
     # fmt: on
     """Build the GEMM1 atoms and return its expert resolver and tile runner.
 
@@ -353,7 +355,7 @@ def build_fused_gemm1(*, x_tensor, w_rsrc, sw_rsrc, sx_rsrc,
         inter_dim=inter_dim, m_repeat=m_repeat, num_acc_n=num_acc_n, sort_block_m=sort_block_m, tile_n=tile_n,
         num_waves=num_waves, lds_out=c_tile, swiglu_limit=swiglu_limit, always_valid=True,
         out_tensor=out_tensor if use_tile_resource else None, evec=evec, out_dtype=out_dtype,
-        act=act, situ_beta=situ_beta, situ_linear_beta=situ_linear_beta)
+        act=act, situ_beta=situ_beta, situ_linear_beta=situ_linear_beta, shared_exp128=epi_exp128)
     # fmt: on
 
     def _decode(flat):
@@ -389,7 +391,7 @@ def compile_gemm1(
     use_tile_resource: bool = True, waves_per_eu_hint: int = 2, b_cache_modifier: int = 0,
     a_dtype: str = "fp8", out_dtype: str = "fp8", swiglu_limit: float = 0.0,
     act: str = "silu", situ_beta: float = 1.0, situ_linear_beta: float = 1.0,
-    a_per_token: bool = False,
+    a_per_token: bool = False, epi_exp128: bool = False,
 ):
     # fmt: on
     """Compile standalone group GEMM1 from the fused Stage1 compute body."""
@@ -473,6 +475,7 @@ def compile_gemm1(
             act=act, situ_beta=situ_beta, situ_linear_beta=situ_linear_beta,
             a_per_token=a_per_token, sref_rsrc=ptr_buf_tensor(fx.get_iter(w_sref), fx.Uint8),
             token_scale_rsrc=ptr_buf_tensor(fx.get_iter(scale_x), fx.Int32),
+            epi_exp128=epi_exp128,
         )
         total_work = (num_valid // fx.Int32(sort_block_m)) * fx.Int32(n_tiles)
         for flat in range(fx.block_idx.x, total_work, grid_x):
@@ -528,7 +531,7 @@ def gemm1_kernel(
         waves_per_eu_hint=waves_per_eu_hint, b_cache_modifier=b_cache_modifier,
         a_dtype=a_dtype, out_dtype=out_dtype,
         swiglu_limit=swiglu_limit, act=act, situ_beta=situ_beta, situ_linear_beta=situ_linear_beta,
-        a_per_token=w_sref is not None,
+        a_per_token=w_sref is not None, epi_exp128=a2_fp8_enabled(),
     )
     if w_sref is None:
         w_sref = torch.zeros(1, dtype=torch.uint8, device=out.device)
