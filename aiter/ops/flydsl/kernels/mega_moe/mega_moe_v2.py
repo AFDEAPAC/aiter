@@ -45,16 +45,36 @@ def sref_u8_checked(scale_u8, *, experts, n_out, k_groups, shuffle_fn, max_neg_r
 
     kw = dict(experts=experts, n_out=n_out, k_groups=k_groups, shuffle_fn=shuffle_fn)
     sref = compute_sref_u8(scale_u8, **kw)
-    worst = check_residual_range(scale_u8, sref, **kw)
+    _check_residual(check_residual_range(scale_u8, sref, **kw), max_neg_residual)
+    return sref
+
+
+def sref_u8_per_expert(scale_u8, *, experts, n_out, k_groups, shuffle_fn, max_neg_residual):
+    """``sref_u8_checked`` probing the shuffle on one expert only, ~10x cheaper: the a16w4
+    scale shuffle permutes within each expert (expert axis outermost in ``shuffle_scale``),
+    so all experts share one position map."""
+    from aiter.ops.flydsl.a16wmix_fp8_prep import _shuffled_positions
+
+    per_expert = scale_u8.reshape(experts, -1)
+    groups = per_expert.shape[1] // n_out
+    pos = _shuffled_positions(n_out, groups, 1, shuffle_fn, scale_u8.device)
+    logical = torch.empty_like(per_expert)
+    logical[:, pos.long()] = per_expert
+    logical = logical.view(experts, n_out, groups)[..., :k_groups]
+    sref = logical.amax(-1)
+    _check_residual(int((sref.unsqueeze(-1) - logical).max().item()), max_neg_residual)
+    return sref
+
+
+def _check_residual(worst, max_neg_residual):
     if worst > max_neg_residual:
         raise ValueError(
             f"e8m0 residual reaches -{worst}, past -{max_neg_residual}, the deepest the "
             f"MegaMoE fp8 B decode is exact for; these weights need the bf16 GEMM path."
         )
-    return sref
 
 
-def w1_sref_kernel_order(w1_scale_u8, experts, inter_dim, model_dim):
+def w1_sref_kernel_order(w1_scale_u8, experts, inter_dim, model_dim, sref_fn=sref_u8_checked):
     """Per-(local expert, GEMM1 kernel row) largest E8M0 byte, ``[experts, 2 * inter_dim]`` uint8.
 
     ``w1_scale_u8`` is the ``shuffle_scale_a16w4(..., gate_up=True)`` tensor the kernel
@@ -63,7 +83,7 @@ def w1_sref_kernel_order(w1_scale_u8, experts, inter_dim, model_dim):
     ``(R // 16 % 2) * inter_dim + (R // 32) * 16 + R % 16``."""
     from aiter.ops.shuffle import shuffle_scale_a16w4
 
-    sref = sref_u8_checked(
+    sref = sref_fn(
         w1_scale_u8, experts=experts, n_out=2 * inter_dim, k_groups=model_dim // 32,
         shuffle_fn=lambda t, e: shuffle_scale_a16w4(t, e, True),
         max_neg_residual=MAX_NEG_RESIDUAL_W1,
@@ -800,28 +820,45 @@ class MegaMoEV2:
         key = (scale.data_ptr(), tuple(scale.shape))
         hit = self._w1_sref_cache.get(key)
         if hit is None:
-            hit = (scale, w1_sref_kernel_order(scale, self.epr, self.inter_dim, self.model_dim))
+            hit = (scale, self._build_w1_sref(scale))
             self._w1_sref_cache[key] = hit
         return hit[1]
+
+    def _build_w1_sref(self, scale, sref_fn=sref_u8_checked):
+        return w1_sref_kernel_order(scale, self.epr, self.inter_dim, self.model_dim, sref_fn)
 
     def _w2_sref(self):
         """Per-(local expert, output column) largest W2 E8M0 byte; W2 rows keep their
         logical order in shuffle_weight_a16w4(..., gate_up=False)."""
-        from aiter.ops.shuffle import shuffle_scale_a16w4
-
         scale = self.w2_scale
         key = (scale.data_ptr(), tuple(scale.shape))
         hit = self._w2_sref_cache.get(key)
         if hit is None:
-            sref = sref_u8_checked(
-                scale.view(torch.uint8), experts=self.epr, n_out=self.model_dim,
-                k_groups=self.inter_dim // 32,
-                shuffle_fn=lambda t, e: shuffle_scale_a16w4(t, e, False),
-                max_neg_residual=MAX_NEG_RESIDUAL_W2,
-            )
-            hit = (scale, sref)
+            hit = (scale, self._build_w2_sref(scale))
             self._w2_sref_cache[key] = hit
         return hit[1]
+
+    def _build_w2_sref(self, scale, sref_fn=sref_u8_checked):
+        from aiter.ops.shuffle import shuffle_scale_a16w4
+
+        return sref_fn(
+            scale.view(torch.uint8), experts=self.epr, n_out=self.model_dim,
+            k_groups=self.inter_dim // 32,
+            shuffle_fn=lambda t, e: shuffle_scale_a16w4(t, e, False),
+            max_neg_residual=MAX_NEG_RESIDUAL_W2,
+        )
+
+    def refresh_sref(self, data_ptrs=None):
+        """Rebuild in place the cached s_ref tables of the scale tensors starting at
+        ``data_ptrs`` (all if None) after their expert rows were rewritten in place (sglang
+        EPLB). Captured graphs hold the table addresses, so the tables must not move."""
+        for cache, build in (
+            (self._w1_sref_cache, self._build_w1_sref),
+            (self._w2_sref_cache, self._build_w2_sref),
+        ):
+            for (ptr, _), (scale, sref) in cache.items():
+                if data_ptrs is None or ptr in data_ptrs:
+                    sref.copy_(build(scale, sref_u8_per_expert))
 
     def read_stage1_trace(self):
         """Events of the Stage1 launches since the last call, as
