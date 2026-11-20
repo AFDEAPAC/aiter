@@ -1031,8 +1031,9 @@ def _gfx942_config(
     while grid_mult > 1 and grid_mult * _stage1_lds_bytes(sort_block_m, tile_n, model_dim) > GFX942_LDS_BYTES:
         grid_mult -= 1
     # Measured on MI308X (EP4, V4.1 Flash): weight prefetch costs 2-3.5% of Stage1 at
-    # 32-128 tokens/rank and helps elsewhere; Stage2 block_n=128 is 3-10% faster at
-    # every size (more N blocks per CU).
+    # 32-128 tokens/rank and helps elsewhere. In Stage2 with block_m=32, block_n=256
+    # is 11-13% slower than 128 (fewer N blocks per CU); with block_m=16, block_n=256
+    # without the hoisted B prefetch is 7-11% faster than block_n=128 (FP8 GEMM2).
     # Fixed-slot producers are Stage1 CTAs 1..num_dispatch_cu and must number fewer
     # than the 80 CUs.
     num_dispatch_cu = (
@@ -1051,7 +1052,8 @@ def _gfx942_config(
     stage2 = replace(
         config.stage2,
         block_m=16 if small else 32,
-        block_n=128,
+        block_n=256 if small else 128,
+        b_hoist=False if small else config.stage2.b_hoist,
         aligned_pair=False,
         pair_cu=0,
         bf16_lds=False,
