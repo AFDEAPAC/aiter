@@ -491,7 +491,12 @@ class MegaMoEV2:
             table[slot] = workspace[name].data_ptr()
         table[DispatchSlot.TILE_INPUT_BASE] = self._s1_tile_input_base.data_ptr()
         # Stage1 timeline (AITER_MEGA_S1_TRACE=1); placeholders keep the table complete.
-        trace_blocks = self._s1_num_cu * 33 + 1 if envs.AITER_MEGA_S1_TRACE else 1
+        self._s1_prep_trace_base = self._s1_num_cu * 33 + 1 if envs.AITER_MEGA_S1_TRACE else 0
+        trace_blocks = (
+            self._s1_prep_trace_base + self._s1_prepare_cu_capacity + 1
+            if envs.AITER_MEGA_S1_TRACE
+            else 1
+        )
         trace_events = trace.MAX_EVENTS * trace.FIELDS if envs.AITER_MEGA_S1_TRACE else 1
         self._s1_trace_events = torch.zeros(
             trace_blocks * trace_events, dtype=torch.int64, device=self.dev
@@ -549,6 +554,7 @@ class MegaMoEV2:
                     model_dim=self.model_dim,
                     payload_chunk_rows=config.payload_chunk_rows,
                     tile_state_stride=self._s1_tile_state_stride,
+                    trace_block_base=self._s1_prep_trace_base,
                 )
 
         op = self._s1_op
@@ -660,6 +666,7 @@ class MegaMoEV2:
             model_dim=self.model_dim,
             payload_chunk_rows=config.payload_chunk_rows,
             tile_state_stride=self._s1_tile_state_stride,
+            trace_block_base=self._s1_prep_trace_base,
         )
     def _run_fused_stage1(
         self,

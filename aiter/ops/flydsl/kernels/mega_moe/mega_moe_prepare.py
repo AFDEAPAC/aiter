@@ -13,6 +13,7 @@ from flydsl.runtime.device import get_rocm_arch
 
 from .. import communication_ops_utils as comm_ops
 from ..tensor_shim import _preload_compiled, _run_compiled, ptr_buf_tensor
+from . import envs, trace
 from .dispatch import DispatchSlot, emit_dispatch_group, emit_dispatch_plan
 from .quant import emit_per_1x32_mx_fp4_group, emit_per_1x32_mx_fp8_group
 
@@ -34,6 +35,7 @@ def compile_mega_moe_prepare(
     model_dim: int,
     payload_chunk_rows: int,
     tile_state_stride: int,
+    trace_block_base: int = 0,
 ):
     """Compile compact count/group/plan without the GEMM1 shared footprint."""
     arch = str(get_rocm_arch() or "")
@@ -60,6 +62,8 @@ def compile_mega_moe_prepare(
     total_experts = npes * epr
     total_segments = total_experts + npes
     block_threads = num_waves * 64
+    # Phase timeline per CTA into trace blocks trace_block_base + ticket (after Stage1's).
+    TRACE = bool(envs.AITER_MEGA_S1_TRACE) and int(trace_block_base) > 0
     assert prepare_blocks >= 1
     launch_grid = prepare_blocks + quant_blocks + 1
     assert dispatch_blocks % npes == 0
@@ -79,6 +83,7 @@ def compile_mega_moe_prepare(
         f"_qcu{quant_blocks}qcap{quant_cu_capacity}{quant_suffix}"
         "_fov_runtime_dyn"
         f"_tss{tile_state_stride}_v13"
+        f"{'_trace' if TRACE else ''}"
     )
 
     @flyc.kernel(name=kernel_name, known_block_size=[block_threads, 1, 1])
@@ -93,6 +98,8 @@ def compile_mega_moe_prepare(
         addr_quant_scale: fx.Int64,
     ):
         tid = fx.thread_idx.x
+        if const_expr(TRACE):
+            t_entry = trace.now()
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         ticket_scratch = fx.recast_iter(fx.Int64, lds.ticket.ptr)
         count_scratch = lds.count_scratch.ptr
@@ -124,6 +131,11 @@ def compile_mega_moe_prepare(
         producer_slot = ticket - fx.Int32(1)
         quant_producer = ticket > fx.Int32(prepare_blocks)
         quant_slot = ticket - fx.Int32(prepare_blocks + 1)
+        trace_block = None
+        trace_t0 = None
+        if const_expr(TRACE):
+            trace_block = fx.Int32(int(trace_block_base)) + ticket
+            trace_t0 = t_entry
 
         if const_expr(quant_blocks > 0):  # noqa: SIM102 - preserve DSL staging
             if quant_producer:
@@ -192,6 +204,11 @@ def compile_mega_moe_prepare(
                         next_parity,
                     )
                     comm_ops.store_i32_system(epoch_gate, fx.Int32(0), gate_epoch)
+                    if const_expr(TRACE):
+                        trace.record_slot(
+                            addr_disp, trace_block, fx.Int32(0),
+                            fx.Int64(trace.KIND_PREP), trace_t0, trace.now(), fx.Int64(0),
+                        )
             else:
                 if tid == fx.Int32(0):
                     comm_ops.wait_i32_until_equals(epoch_gate, gate_epoch)
@@ -227,6 +244,8 @@ def compile_mega_moe_prepare(
                     group_phase_base=group_phase_base,
                     payload_chunk_rows=chunk_rows,
                     tile_state_stride=tile_state_stride,
+                    trace_block=trace_block,
+                    trace_t0=trace_t0,
                 )
             if producer:
                 emit_dispatch_group(
@@ -244,6 +263,8 @@ def compile_mega_moe_prepare(
                     parity=parity,
                     expected=expected,
                     count_scratch=count_scratch,
+                    trace_block=trace_block,
+                    trace_t0=trace_t0,
                 )
 
     @flyc.jit

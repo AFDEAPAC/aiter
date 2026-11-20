@@ -28,6 +28,7 @@ KIND_PRODUCER = 1
 KIND_TASK = 2
 KIND_WAIT = 3
 KIND_TILE = 4
+KIND_PREP = 5
 
 
 def now():
@@ -51,3 +52,18 @@ def record(addr_disp, kind, t0, t1, info):
         buf[base + fx.Int32(1)] = fx.Int64(t0)
         buf[base + fx.Int32(2)] = fx.Int64(t1)
         buf[base + fx.Int32(3)] = fx.Int64(info)
+
+
+@flyc.jit
+def record_slot(addr_disp, block, slot, kind, t0, t1, info):
+    """Write event ``slot`` of trace block ``block`` with plain stores (no atomic on the
+    timed path). One thread per block, recording its slots in increasing order."""
+    table = ptr_buf_tensor(addr_disp, fx.Int64)
+    events = ptr_buf_tensor(table[fx.Int32(TRACE_EVENTS_SLOT)], fx.Int64)
+    counts = ptr_buf_tensor(table[fx.Int32(TRACE_COUNT_SLOT)], fx.Int32)
+    base = (block * fx.Int32(MAX_EVENTS) + slot) * fx.Int32(FIELDS)
+    events[base] = fx.Int64(kind)
+    events[base + fx.Int32(1)] = fx.Int64(t0)
+    events[base + fx.Int32(2)] = fx.Int64(t1)
+    events[base + fx.Int32(3)] = fx.Int64(info)
+    counts[block] = slot + fx.Int32(1)

@@ -974,10 +974,18 @@ def emit_dispatch_plan(
     *, num_waves, fz_npes, fz_epr, fz_k, fz_mtpr, fz_rank, fz_tile_m, fz_total_experts, addr_disp,
     i32_cur_tok, addr_in_idx, parity, expected,
     dispatch_blocks, group_blocks, group_done_slot, group_phase_base, payload_chunk_rows, tile_state_stride,
+    trace_block=None, trace_t0=None,
 ):
 # fmt: on
     """Build a destination-owned compact plan in one producer-only CTA."""
     dispatch_table = ptr_buf_tensor(addr_disp, fx.Int64)
+    TRACE = trace_block is not None
+
+    def trace_phase(slot):
+        trace.record_slot(
+            addr_disp, trace_block, fx.Int32(slot),
+            fx.Int64(trace.KIND_PREP), trace_t0, trace.now(), fx.Int64(slot),
+        )
 
     def dp(i):
         return dispatch_table[fx.Int32(i)]
@@ -1035,6 +1043,8 @@ def emit_dispatch_plan(
             group_phase_base + fx.Int32(group_blocks),
         )
         comm_ops.fence_agent_acquire()
+        if const_expr(TRACE):
+            trace_phase(1)
     fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
     fx.barrier()
     comm_ops.fence_agent_acquire()
@@ -1066,6 +1076,9 @@ def emit_dispatch_plan(
         )
     fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
     fx.barrier()
+    if const_expr(TRACE):
+        if tid == fx.Int32(0):
+            trace_phase(2)
     comm_ops.fence_agent_release()
 
     # Exchange route counts once.  The full-histogram path makes the offset
@@ -1082,6 +1095,9 @@ def emit_dispatch_plan(
             )
     fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
     fx.barrier()
+    if const_expr(TRACE):
+        if tid == fx.Int32(0):
+            trace_phase(3)
 
     # Warp 0 plans local experts after all source matrices arrive.
     if warp == fx.Int32(0):
@@ -1097,6 +1113,9 @@ def emit_dispatch_plan(
                 a_cd + fx.Int64(parity) * fx.Int64(4), expected
             )
         comm_ops.fence_system_acquire()
+        if const_expr(TRACE):
+            if lane == fx.Int32(0):
+                trace_phase(4)
 
         _derive_next_fanout_pairs(
             a_bc,
@@ -1108,6 +1127,9 @@ def emit_dispatch_plan(
             total_experts=fz_total_experts,
             total_segments=total_segments,
         )
+        if const_expr(TRACE):
+            if lane == fx.Int32(0):
+                trace_phase(5)
 
         num_valid_buffer = ptr_buf_tensor(a_nv, fx.Int32)
         row_carry = fx.Int32(0)
@@ -1335,6 +1357,9 @@ def emit_dispatch_plan(
             ready_index = parity * fx.Int32(fz_npes) + fx.Int32(fz_rank)
             comm_ops.store_i32_system(remote_ready, ready_index, expected)
         fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
+        if const_expr(TRACE):
+            if lane == fx.Int32(0):
+                trace_phase(6)
     elif warp == fx.Int32(1):
         # Build the global-expert exclusive prefix cooperatively.
         pairs_per_lane = (total_segments + 63) // 64
@@ -1390,6 +1415,9 @@ def emit_dispatch_plan(
     )
     fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
     fx.barrier()
+    if const_expr(TRACE):
+        if tid == fx.Int32(0):
+            trace_phase(7)
     if tid == fx.Int32(0):
         comm_ops.fence_system_release()
         comm_ops.store_i32_system(a_pair_ready, parity, expected)
@@ -1403,6 +1431,8 @@ def emit_dispatch_plan(
         )
         comm_ops.fence_agent_acquire()
         comm_ops.store_i32_system(a_pair_order_ready, parity, expected)
+        if const_expr(TRACE):
+            trace_phase(8)
 
 
 # fmt: off
@@ -1410,11 +1440,18 @@ def emit_dispatch_plan(
 def emit_dispatch_group(
     *, num_waves, fz_npes, fz_k, fz_epr, fz_total_experts, addr_disp, i32_cur_tok, addr_in_idx,
     dispatch_blocks, group_done_slot, producer_slot, parity, expected,
-    count_scratch=None,
+    count_scratch=None, trace_block=None, trace_t0=None,
 ):
 # fmt: on
     """Count and group disjoint route spans across payload producer CTAs."""
     dispatch_table = ptr_buf_tensor(addr_disp, fx.Int64)
+    TRACE = trace_block is not None
+
+    def trace_phase(slot):
+        trace.record_slot(
+            addr_disp, trace_block, fx.Int32(slot),
+            fx.Int64(trace.KIND_PREP), trace_t0, trace.now(), fx.Int64(slot),
+        )
 
     def dp(i):
         return dispatch_table[fx.Int32(int(i))]
@@ -1509,10 +1546,14 @@ def emit_dispatch_group(
     if tid == fx.Int32(0):
         comm_ops.fence_agent_release()
         comm_ops.atomic_add_agent(a_group_done, fx.Int32(1))
+        if const_expr(TRACE):
+            trace_phase(0)
         comm_ops.wait_i32_until_equals(
             a_pair_ready + fx.Int64(parity) * fx.Int64(4), expected
         )
         comm_ops.fence_agent_acquire()
+        if const_expr(TRACE):
+            trace_phase(1)
     fx.barrier()
 
     for segment in range(tid, count_segments, block_threads):
@@ -1553,6 +1594,8 @@ def emit_dispatch_group(
     if tid == fx.Int32(0):
         comm_ops.fence_agent_release()
         comm_ops.atomic_add_agent(a_group_done, fx.Int32(1))
+        if const_expr(TRACE):
+            trace_phase(2)
     fx.barrier()
 
 
