@@ -48,8 +48,7 @@ environment_variables: dict[str, tuple[Callable[[str], Any], str]] = {
     # 128 intermediate columns and GEMM2 scales each 128-K step per row.
     "AITER_MEGA_GFX942_A2_FP8": (_flag, "1"),
     # gfx942 SBM16 + Stage2 BM16 for buckets <= 128 tokens/rank (needs per-token A).
-    # Off: correct per row but the fused Stage1 is not run-to-run deterministic yet.
-    "AITER_MEGA_GFX942_SBM16": (_flag, "0"),
+    "AITER_MEGA_GFX942_SBM16": (_flag, "1"),
 }
 
 
