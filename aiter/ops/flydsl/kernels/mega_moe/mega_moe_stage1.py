@@ -52,13 +52,18 @@ class _Stage1KernelSpec:
 
 
 def _validate_fixed_slot_geometry(
-    npes, experts_per_rank, max_tokens_per_rank, cap, tile_m
+    npes, experts_per_rank, max_tokens_per_rank, cap, tile_m, arch
 ):
     if tile_m <= 0 or max_tokens_per_rank <= 0:
         raise ValueError("fixed-slot requires positive tile and token capacities")
     required_cap = ((npes * max_tokens_per_rank + tile_m - 1) // tile_m) * tile_m
-    if npes != 8 or experts_per_rank != 48 or cap != required_cap:
-        raise ValueError("fixed-slot dispatch requires the direct EP8/EPR48 layout")
+    reference_layout = npes == 8 and experts_per_rank == 48
+    gfx942_layout = arch.startswith("gfx942") and npes <= 8 and experts_per_rank <= 128
+    if not (reference_layout or gfx942_layout) or cap != required_cap:
+        raise ValueError(
+            "fixed-slot dispatch requires the direct EP8/EPR48 layout "
+            "(gfx942: EP<=8, EPR<=128)"
+        )
 
 
 def _validate_dispatch_capacity(
@@ -176,7 +181,7 @@ def compile_mega_moe_stage1(
     fz_tile_m = int(sort_block_m)
     assert fz_cap % fz_tile_m == 0, f"fuse_cap({fz_cap}) % tile_m({fz_tile_m}) != 0"
     if fixed_slot_dispatch:
-        _validate_fixed_slot_geometry(fz_npes, fz_epr, fz_mtpr, fz_cap, fz_tile_m)
+        _validate_fixed_slot_geometry(fz_npes, fz_epr, fz_mtpr, fz_cap, fz_tile_m, arch)
     fz_total_experts = fz_npes * fz_epr
     indexed_payload = (
         not fixed_slot_dispatch

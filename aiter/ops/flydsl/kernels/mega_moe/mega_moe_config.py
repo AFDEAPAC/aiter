@@ -227,6 +227,23 @@ def _fixed_dispatch_cu(bucket: int) -> int:
     return min(224, 16 * (bucket.bit_length() + 7))
 
 
+def _fixed_slot_layout(mtpr: int, world_size: int, experts_per_rank: int) -> bool:
+    if mtpr > FIXED_SLOT_MAX_MTPR:
+        return False
+    if world_size == 8 and experts_per_rank == REFERENCE_EXPERTS_PER_RANK:
+        return True
+    # gfx942 also takes the direct layout at EP <= 8 with up to 128 experts per
+    # rank; its finalize scans experts in 64-lane chunks.  Below 32 receive rows
+    # the 32-row capacity exceeds the SBM16 capacity Stage1 requires.
+    return (
+        envs.AITER_MEGA_GFX942_FIXED_SLOT
+        and a16wmix_use_k16()
+        and world_size <= 8
+        and experts_per_rank <= 128
+        and world_size * mtpr >= 32
+    )
+
+
 def _select_fixed_stage1(bucket: int) -> Stage1Config:
     grid_mult = max(1, bucket // 4) if bucket <= 16 else 3
     return Stage1Config(
@@ -861,11 +878,7 @@ def select_mega_moe_config(
         )
     bucket = nearest_token_bucket(tokens)
     mtpr_class = mtpr_config_class(mtpr)
-    fixed_slot_dispatch = (
-        mtpr_class <= FIXED_SLOT_MAX_MTPR
-        and world_size == 8
-        and experts_per_rank == REFERENCE_EXPERTS_PER_RANK
-    )
+    fixed_slot_dispatch = _fixed_slot_layout(mtpr_class, world_size, experts_per_rank)
     if fixed_slot_dispatch and bucket > FIXED_SLOT_MAX_MTPR:
         raise ValueError(f"fixed-slot does not support token bucket {bucket}")
     total_segments = world_size * experts_per_rank + world_size
@@ -959,7 +972,7 @@ def select_mega_moe_config(
         # row an independent source key, which that atom cannot express.
         config = _replace_config(config, stage1={"async_a_copy": False})
     if a16wmix_use_k16():
-        config = _gfx942_config(config, a_dtype, model_dim, bucket)
+        config = _gfx942_config(config, a_dtype, model_dim, bucket, fixed_slot_dispatch)
     if config.stage2.aligned_pair and config.p2p_quant != P2P_QUANT_FP8_BLOCKWISE:
         # The aligned-pair Stage2 kernel only emits the FP8 P2P row layout, so
         # reject the combination here instead of at launch.
@@ -970,6 +983,7 @@ def select_mega_moe_config(
 
 
 GFX942_LDS_BYTES = 64 * 1024
+GFX942_FIXED_DISPATCH_CU = 64
 
 
 def _stage1_lds_bytes(sort_block_m: int, tile_n: int, model_dim: int) -> int:
@@ -980,7 +994,7 @@ def _stage1_lds_bytes(sort_block_m: int, tile_n: int, model_dim: int) -> int:
 
 
 def _gfx942_config(
-    config: MegaMoEConfig, a_dtype: str, model_dim: int, bucket: int
+    config: MegaMoEConfig, a_dtype: str, model_dim: int, bucket: int, fixed_slot: bool
 ) -> MegaMoEConfig:
     """gfx942: a8w4 only, no 128-bit LDS DMA, 64 KiB LDS, no FP8 P2P or aligned pair."""
     if a_dtype != ACTIVATION_FP8:
@@ -1019,10 +1033,18 @@ def _gfx942_config(
     # Measured on MI308X (EP4, V4.1 Flash): weight prefetch costs 2-3.5% of Stage1 at
     # 32-128 tokens/rank and helps elsewhere; Stage2 block_n=128 is 3-10% faster at
     # every size (more N blocks per CU).
+    # Fixed-slot producers are Stage1 CTAs 1..num_dispatch_cu and must number fewer
+    # than the 80 CUs.
+    num_dispatch_cu = (
+        min(stage1.num_dispatch_cu, GFX942_FIXED_DISPATCH_CU)
+        if fixed_slot
+        else stage1.num_dispatch_cu
+    )
     stage1 = replace(
         stage1, sort_block_m=sort_block_m, tile_n=tile_n, num_waves=num_waves,
         grid_mult=grid_mult, async_a_copy=False,
         pipe_weights=stage1.pipe_weights and not 32 <= bucket <= 128,
+        num_dispatch_cu=num_dispatch_cu,
     )
     # skew_cu must not exceed the launched CTA count, which Stage2 clamps to the
     # device CU count (80 on MI308X).
@@ -1056,11 +1078,7 @@ def build_mega_moe_bundle_plan(
     if not buckets or buckets[-1] != mtpr:
         raise ValueError(f"mtpr={mtpr} has no exact token bucket")
 
-    fixed_slot_dispatch = (
-        mtpr <= FIXED_SLOT_MAX_MTPR
-        and world_size == 8
-        and experts_per_rank == REFERENCE_EXPERTS_PER_RANK
-    )
+    fixed_slot_dispatch = _fixed_slot_layout(mtpr, world_size, experts_per_rank)
     stage1_variants: list[Stage1Config] = []
     stage2_variants: list[Stage2BundleKey] = []
     stage1_ids: dict[Stage1Config, int] = {}
