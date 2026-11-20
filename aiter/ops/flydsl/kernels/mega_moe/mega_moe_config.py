@@ -1010,10 +1010,15 @@ def _gfx942_config(
     )
     if small:
         sort_block_m = 16
+    elif bucket <= 1024:
+        # SBM64 pads each local expert to 64 rows. With three 4-wave CTAs, SBM32 is
+        # 0.76-0.96x per MoE layer at 192-1024 tokens/rank under real routing (MI308X,
+        # EP4, V4.1 Flash). At 2048 it is flat: Stage1 slows as much as Stage2 gains.
+        sort_block_m = min(sort_block_m, 32)
     tile_n = stage1.tile_n
     num_waves = stage1.num_waves
     grid_mult = stage1.grid_mult
-    if bucket <= 128 and sort_block_m <= 32:
+    if sort_block_m <= 32:
         # One 4-wave CTA per CU leaves each GEMM1 tile stall-bound (MI308X ATT: 60% of
         # cycles stalled); three co-resident 4-wave CTAs are 6-14% faster end to end
         # at 1-128 tokens/rank than one 8-wave CTA.
