@@ -41,6 +41,10 @@ environment_variables: dict[str, tuple[Callable[[str], Any], str]] = {
     # Debug timing only: Stage1 keeps dispatch and every readiness wait but
     # skips the GEMM1 tile body (its output is garbage).
     "AITER_MEGA_S1_TRACE_SKIP_GEMM": (_flag, "0"),
+    # Debug timing only (read per Stage2 compile; outputs are garbage): Stage2 skips
+    # the GEMM2 K loop and scatters zeros, or runs GEMM2 but drops every P2P store.
+    "AITER_MEGA_S2_TRACE_SKIP_GEMM": (_flag, "0"),
+    "AITER_MEGA_S2_TRACE_SKIP_SCATTER": (_flag, "0"),
     # gfx942 GEMM1 with per-token FP8 activations and FP8 MFMA (instead of the
     # per-1x32 bf16 dequant path). Read per Stage1 compile and per instance.
     "AITER_MEGA_GFX942_A_PER_TOKEN": (_flag, "1"),

@@ -22,6 +22,7 @@ from ..tensor_shim import (
     ptr_buf_tensor,
 )
 
+from . import envs
 from .gemm_util import a2_fp8_enabled
 from .gemm2 import (
     _resolve_g2_knobs,
@@ -53,7 +54,7 @@ def _fp8_scale_for_leader(is_leader, local_max):
 # fmt: off
 def p2p_scatter_epilog(lds_acc_base, accm, n_block_idx, wave, lane, *, N_OUT, BM, BN, npes, topk,
     log2_max_tok, mask_max_tok, recv_cap, comb_inp_nbytes, lds_packed_off, lds_weight_off,
-    lds_peer_off, g2_bf16_lds=False, p2p_quant_type="none", scatter_vec=8):
+    lds_peer_off, g2_bf16_lds=False, p2p_quant_type="none", scatter_vec=8, drop_stores=False):
 # fmt: on
     """CShuffle one GEMM2 tile into weighted BF16 rows and scatter them to peers."""
     kMChunks = BM // 16
@@ -124,6 +125,8 @@ def p2p_scatter_epilog(lds_acc_base, accm, n_block_idx, wave, lane, *, N_OUT, BM
         dest_pe = t >> fx.Int32(log2_max_tok)
         dest_lid = t & fx.Int32(mask_max_tok)
         valid = (t < fx.Int32(recv_cap)) & (s < fx.Int32(topk)) & (dest_pe < fx.Int32(npes))
+        if const_expr(drop_stores):
+            valid = valid & (t < fx.Int32(0))
         dest_pe_safe = valid.select(dest_pe, fx.Int32(0))
         peer_base = fx.ptr_load(
             lds_typed_ptr(
@@ -371,6 +374,8 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
 
     dispatch_path = "fixedslot" if fixed_slot_dispatch else "compact"
     A2_FP8 = a2_fp8_enabled() and is_f8
+    SKIP_GEMM = envs.AITER_MEGA_S2_TRACE_SKIP_GEMM
+    SKIP_SCATTER = envs.AITER_MEGA_S2_TRACE_SKIP_SCATTER
     kernel_name = (
         f"megamoe_stage2_{dispatch_path}_t{BM}x{BN}x{BK}"
         f"_sbm{SBM}_{a_dtype}_nt{int(use_nt)}"
@@ -382,6 +387,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         f"_rps{int(runtime_pair_skip)}_rtv3{int(runtime_pair_skip)}"
         f"_sv{scatter_vec}_tb2_rsm1"
         f"{'_a2f8' if A2_FP8 else ''}"
+        f"{'_nogemm' if SKIP_GEMM else ''}{'_noscatter' if SKIP_SCATTER else ''}"
     )
 
     # fmt: off
@@ -506,8 +512,12 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                     ),
                 )
             # fmt: off
+            g2_inter = i32_inter
+            if const_expr(SKIP_GEMM):
+                # A zero K extent runs no GEMM2 K-loop iterations.
+                g2_inter = fx.Int32(0)
             accm_vecs, m_row, n_block_idx, _n_out_rt = gemm2_compute_v2(lds_base_i32, arg_ascale, arg_bq,
-                arg_bscale, arg_eids, arg_aq, i32_max_m_blocks, unit_bx, lane, wave, i32_inter, i32_hidden,
+                arg_bscale, arg_eids, arg_aq, i32_max_m_blocks, unit_bx, lane, wave, g2_inter, i32_hidden,
                 i32_kpad, i32_npad, BM=BM, BN=BN, BK=BK, use_nt=use_nt, INTER_MAX=INTER_MAX, aStages=aStages,
                 a_dtype=a_dtype, has_pad=has_pad, SBM=SBM, g2_bhoist=g2_bhoist, g2_b2stage=g2_b2stage,
                 g2_ascale_pf=g2_ascale_pf, g2_deep_a_pipeline=g2_deep_a_pipeline,
@@ -517,7 +527,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                 log2_max_tok=log2_max_tok, mask_max_tok=mask_max_tok, recv_cap=_recv_cap,
                 comb_inp_nbytes=_comb_inp_nbytes, lds_packed_off=lds_packed_off,
                 lds_weight_off=lds_weight_off, lds_peer_off=lds_peer_off, g2_bf16_lds=g2_bf16_lds,
-                p2p_quant_type=p2p_quant_type, scatter_vec=scatter_vec)
+                p2p_quant_type=p2p_quant_type, scatter_vec=scatter_vec, drop_stores=SKIP_SCATTER)
             # fmt: on
 
         def run_unskipped_unit(unit_bx, m_block_idx):
